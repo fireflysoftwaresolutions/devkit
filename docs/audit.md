@@ -587,8 +587,9 @@ repository, and delete the held copy; to drop the change, delete the held copy.
   broke, the file goes back to that version and the sync commits it. A staged version that no Mac could load either
   is held as well.
 - **A file devkit cannot move stays on this Mac.** When the held copy cannot be written (the state folder is not
-  writable, or the disk is full), the file stays in the handoff repository, out of every commit and every push, and
-  the hold is recorded and said at each `dev sync`. A pull may stop until you repair the file or move it out.
+  writable, or the disk is full), or git cannot put the repository's version back (another git process holds
+  `index.lock`), the file stays in the handoff repository as it was and is left out of every commit and push. The
+  hold is recorded and said at each `dev sync`. A pull may stop until you repair the file or move it out.
 - **A commit that leaves a broken policy is never pushed.** `dev sync` checks each team policy file that this Mac's
   commits not pushed yet change, whatever made them (a raw `git commit`, `dev initiative import`, an older devkit
   whose push failed). While one of them leaves a file no Mac could load, the push is refused: devkit records it as a

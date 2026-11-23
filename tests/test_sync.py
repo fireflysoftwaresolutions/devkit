@@ -505,6 +505,30 @@ class HeldPolicyTests(unittest.TestCase):
             self.assertRegex(listed[0]["time"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
             self.assertIn("policy/audit.json", work.held_policy_line())
 
+    def test_a_moved_policy_is_put_back_when_git_cannot_restore_the_repository_version(self):
+        # A file this Mac cannot read is moved, not copied; when the checkout after the move failed (another git
+        # held index.lock), the file stayed gone and the next git add -A committed a deletion of the team policy.
+        with TwoMacs() as m:
+            policy = m.here / "policy" / "audit.json"
+            policy.parent.mkdir()
+            policy.write_text(json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}"]}}))
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "team policy")
+            policy.write_text('{"redact": ')
+            policy.chmod(0)
+            lock = m.here / ".git" / "index.lock"
+            lock.write_text("")
+            try:
+                held = work.hold_broken_policies(m.here)
+            finally:
+                lock.unlink()
+                policy.chmod(0o600)
+            self.assertEqual([(p, why, saved) for p, why, saved in held], [("policy/audit.json", "cannot be read", None)])
+            self.assertEqual(policy.read_text(), '{"redact": ')  # back where it was, never a deletion to commit
+            self.assertEqual((_git(m.here, "diff", "--name-only"), _git(m.here, "diff", "--cached", "--name-only")),
+                             ("policy/audit.json", ""))
+            self.assertEqual(work.held_policies(), [])
+
     def test_a_policy_file_that_loads_is_never_held(self):
         with TwoMacs() as m:
             (m.here / "policy").mkdir()

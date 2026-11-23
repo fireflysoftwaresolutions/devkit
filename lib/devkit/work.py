@@ -937,9 +937,10 @@ def hold_broken_policies(root: Path, paths=None) -> list:
     the repository's file back to its last commit (deleted when it has none), so a pull and a commit find nothing
     to keep. A good version staged before the file broke stays staged, and the file goes back to it; a staged version
     no Mac could load either is held too. Each hold is recorded (a critical, blocked handoff.push) and told to the
-    live sessions. A file that cannot be moved (the state folder cannot be written, the disk is full) stays as it is
-    and is returned with no held copy: the caller leaves it out of every commit, and a staged version of it no Mac
-    could load is unstaged. `paths`: the changed files, when the caller listed them. Under _repo_lock.
+    live sessions. A file that cannot be moved (the state folder cannot be written, the disk is full, git cannot put
+    the repository's version back) stays as it is and is returned with no held copy: the caller leaves it out of
+    every commit, and a staged version of it no Mac could load is unstaged. `paths`: the changed files, when the
+    caller listed them. Under _repo_lock.
     -> [(path, reason, held copy, or None when it could not be moved)]."""
     from . import audit
     out = []
@@ -969,20 +970,23 @@ def hold_broken_policies(root: Path, paths=None) -> list:
                 with contextlib.suppress(OSError):
                     if saved.read_bytes() != staged_text:
                         _hold_text(rel, staged_text, audit.publishable_text(Path(rel).name, staged_text))
-            if keep_index:
-                core.git(root, "checkout", "-q", "--", literal)  # the working copy back to the staged version
+            if keep_index:  # the working copy back to the staged version
+                rc, drop = core.git(root, "checkout", "-q", "--", literal)[0], False
             elif core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
-                core.git(root, "checkout", "-q", "HEAD", "--", literal)
-            else:
-                core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)
+                rc, drop = core.git(root, "checkout", "-q", "HEAD", "--", literal)[0], False
+            else:  # new since the last commit: out of the index, and gone
+                rc, drop = core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)[0], True
+            if rc == 0 and drop:
                 with contextlib.suppress(FileNotFoundError):
                     src.unlink()
-            if src.exists() and audit.publishable_policy(src):  # git could not put the file back
+            if rc != 0 or src.exists() and audit.publishable_policy(src):  # git could not put the file back
                 problem = "git could not restore the repository's version"
                 with contextlib.suppress(OSError):
-                    if src.read_bytes() == saved.read_bytes():  # nothing moved: the copy is not a hold
+                    if not src.exists():  # moved, and nothing came back: a git add -A would commit a deletion
+                        os.replace(saved, src)
+                    elif src.read_bytes() == saved.read_bytes():  # nothing moved: the copy is not a hold
                         saved.unlink()
-                        saved.with_suffix(".why").unlink(missing_ok=True)
+                    saved.with_suffix(".why").unlink(missing_ok=True)
         if problem is not None:
             unstaged = _blob(root, f":{rel}")
             if unstaged is not None and audit.publishable_text(Path(rel).name, unstaged) and \
