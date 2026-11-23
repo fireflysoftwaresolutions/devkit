@@ -1229,8 +1229,9 @@ def _json(text):
     return v
 
 
-def _line(text):
-    """A stored audit line's value (_json), or None when no reader can read it."""
+def parse_line(text):
+    """A stored audit line's value (_json), or None when no reader can read it. Every reader of audit lines, here and
+    in other modules, parses them with this."""
     try:
         return _json(text)
     except ValueError:
@@ -1238,7 +1239,7 @@ def _line(text):
 
 
 def _old_json(s: str):
-    d = _line(s)
+    d = parse_line(s)
     return d if isinstance(d, dict) else None
 
 
@@ -2658,7 +2659,7 @@ def seal(last_hash: str, tail: bytes) -> str:
 def _v2(line: bytes):
     if b'"v":2' not in line and b'"v": 2' not in line:
         return None
-    r = _line(line)
+    r = parse_line(line)
     return r if isinstance(r, dict) and r.get("v") == V and isinstance(r.get("hash"), str) else None
 
 
@@ -2993,7 +2994,7 @@ def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
         except OSError:
             continue
         for ln in data.splitlines():
-            r = _line(ln)
+            r = parse_line(ln)
             if not isinstance(r, dict) or _stand_in(r) and r.get("unreadable") is True:
                 continue
             v2 = r.get("v") == V
@@ -3161,7 +3162,7 @@ def verify_file(path: Path, chain: dict = None, published: bool = False) -> dict
     carry = lines.pop() if c.get("more") and lines and not lines[-1].endswith((b"\n", b"\r")) else b""
     for n, raw in enumerate(lines, 1):
         body = raw.rstrip(b"\r\n")
-        r = _line(body) if body.strip() else None
+        r = parse_line(body) if body.strip() else None
         if isinstance(r, dict) and r.get("v") == V:
             res["records"] += 1
             # the link it must have; None when a held day left a link and lines outside the chain follow it here
@@ -3319,7 +3320,7 @@ def _published_line(ln: bytes, rx) -> bytes:
     short, not an object), as a stand-in that only names it. `rx`: the compiled redaction patterns readers use."""
     if not ln.strip():
         return ln
-    r = _line(ln)
+    r = parse_line(ln)
     if not isinstance(r, dict):
         return _dump({"v": 1, "id": _v1_id({}, ln), "cleaned": True, "unreadable": True})
     if r.get("v") == V or _stand_in(r):
@@ -3349,10 +3350,10 @@ def _stands_for(p: bytes, ln: bytes, rx) -> bool:
     line; and both must read as the local line reads (_reader_view), so a record changed in the handoff repository
     and marked `cleaned` to pass still differs. Reading compares rather than bytes, so a redaction pattern added
     since the day was published does not make it differ."""
-    pr = _line(p)
+    pr = parse_line(p)
     if not isinstance(pr, dict) or pr.get("cleaned") is not True:
         return False
-    lr = _line(ln)
+    lr = parse_line(ln)
     if not isinstance(lr, dict):
         return _stand_in(pr) and pr.get("unreadable") is True and pr.get("id") == _v1_id({}, ln)
     if pr.get("unreadable"):
@@ -3505,7 +3506,7 @@ def _day_of(line: bytes):
     """(the UTC day of a line's record, or None when it has no time; 1 when it is a v2 record, else 0)."""
     if not line.startswith(b"{"):
         return None, 0
-    r = _line(line)
+    r = parse_line(line)
     if not isinstance(r, dict):
         return None, 0
     v2 = 1 if r.get("v") == V and isinstance(r.get("hash"), str) else 0
