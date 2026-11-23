@@ -62,6 +62,17 @@ class DetectTests(unittest.TestCase):
             with self.subTest(lang=lang):
                 self.assertEqual(language.detect(text), lang)
 
+    # Spanish typed without its accents ("mas", "aqui", "deberian") read as Portuguese, whose words those are when
+    # spelled the same: the developer's Spanish prompt got a line asking for a reply in Portuguese
+    def test_a_language_written_without_its_accents_is_still_that_language(self):
+        for text, lang in (("La session de firefly-weave encontro 10 bugs que deberian estar mas que solucionados aqui",
+                            "es"),
+                           ("Esta sesion encontro errores que ya deberian estar solucionados, revisalos aqui", "es"),
+                           ("A sessão encontrou 10 bugs que deveriam estar mais que resolvidos aqui", "pt"),
+                           ("A sessao encontrou 10 bugs que ja deveriam estar resolvidos, nao e?", "pt")):
+            with self.subTest(text=text):
+                self.assertEqual(language.detect(text), lang)
+
     def test_short_or_non_prose_messages_give_no_answer(self):
         for text in UNSURE:
             with self.subTest(text=text):
@@ -273,6 +284,25 @@ class ReplyLanguageTests(unittest.TestCase):
         for prompt in ("como vamos?", "ok"):
             with self.subTest(prompt=prompt):
                 self.assertEqual(language.wanted(prompt, str(self.transcript), AUTO), ("es", "earlier"))
+
+    # A message that reads as two languages alike (Spanish typed without accents, and Portuguese) is unclear: it keeps
+    # the language of the developer's earlier messages when that is one of the two, and names none otherwise
+    def test_a_close_call_keeps_the_language_of_earlier_messages_it_could_be_in(self):
+        close = "que falta para o release, como esta o deploy mas rapido"
+        self.assertIsNone(language.detect(close))
+        for earlier, want in (([PROMPTS["es"][0], PROMPTS["es"][1]], ("es", "earlier")),
+                              ([PROMPTS["pt"][0]], ("pt", "earlier")),
+                              ([PROMPTS["en"][0], PROMPTS["en"][1]], (None, ""))):
+            with self.subTest(earlier=earlier[0][:30]):
+                claude_transcript(self.transcript, earlier)
+                self.assertEqual(language.wanted(close, str(self.transcript), AUTO), want)
+
+    # the reported prompt: Spanish written without accents, after Spanish messages, asks for a reply in Spanish
+    def test_the_reported_spanish_prompt_gets_a_spanish_line(self):
+        claude_transcript(self.transcript, [PROMPTS["es"][0]])
+        line = language.prompt_line("La session de firefly-weave encontro 10 bugs que deberian estar mas que "
+                                    "solucionados aqui", str(self.transcript), AUTO)
+        self.assertTrue(line.startswith("devkit · the developer wrote in Spanish: reply in Spanish"), line)
 
     def test_a_short_codex_answer_follows_the_developers_earlier_messages(self):
         # the reported case: "Sí, aplicar y continuar" in Codex's envelope asked for a reply in Portuguese
