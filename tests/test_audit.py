@@ -269,18 +269,30 @@ class RedactionTests(AuditCase):
         self.assertNotIn(CMD, (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
 
     def test_the_redactor_runs_in_linear_time(self):
-        # 64 KB of text that makes each command rule start a scan at every word; a rule that backtracks takes minutes
-        n = 1 << 16
-        texts = ["curl -u " * (n // 8), "sshpass -P x " * (n // 13), "mysql -u " * (n // 9),
-                 "docker login -u " * (n // 16), "Authorization: token " + "a" * n, "gh secret set X " * (n // 16),
-                 "passphrase credentials " * (n // 23), "https://u:" + "@" * n, "a" * n,
-                 "echo x | sudo " * (n // 14)]
-        start = time.perf_counter()
-        for t in texts:
+        # text that makes each command rule start a scan at every word, at 4 KB and at 16 times that: a linear
+        # redactor takes about 16 times as long on the longer text, a rule that scans to the end from every word
+        # about 256 times. The ratio of two CPU times measured the same way holds on a slow or loaded machine,
+        # where a time limit does not; the fastest of two tries leaves out a pause the process did not cause
+        shapes = [("curl -u ", ""), ("sshpass -P x ", ""), ("mysql -u ", ""), ("docker login -u ", ""),
+                  ("Authorization: token ", "a"), ("gh secret set X ", ""), ("passphrase credentials ", ""),
+                  ("https://u:", "@"), ("", "a"), ("echo x | sudo ", "")]
+
+        def text(head: str, fill: str, n: int) -> str:
+            return head + fill * n if fill else head * (n // len(head))
+
+        def cpu(t: str) -> float:
+            start = time.process_time()
             audit.redact(t, extra=[])
             audit.SECRET.search(t)
-        elapsed = time.perf_counter() - start
-        self.assertLess(elapsed, 2.0, f"{elapsed:.2f}s for {len(texts)} texts of 64 KB")
+            return time.process_time() - start
+
+        ratios = {}
+        for head, fill in shapes:
+            small, large = text(head, fill, 1 << 12), text(head, fill, 1 << 16)
+            s = min(cpu(small) for _ in range(2))
+            ratios[head or fill] = min(cpu(large) for _ in range(2)) / max(s, 1e-6)
+        worst = max(ratios, key=ratios.get)
+        self.assertLess(ratios[worst], 40, f"{worst!r}: {ratios[worst]:.0f} times as long for 16 times the text")
 
     def test_no_prompt_text_reaches_a_record(self):
         audit.record("canary.miss", "devkit", "final message without the status block", "recorded",
