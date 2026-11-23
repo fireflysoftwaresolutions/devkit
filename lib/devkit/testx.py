@@ -5133,7 +5133,6 @@ def _proof_path(top):
 
 PROOF_FILES = 4096
 PROOF_BYTES = 64 * 1024 * 1024
-PROOF_SECONDS = 0.2
 _PROOF_CACHES = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
 
@@ -5143,10 +5142,11 @@ def _proof_snapshot(top, files=None):
     `files`: the copy's list (default _copy_files(top)), so the checkout and its copy are compared over the same files:
     tracked and untracked ones, not ignored ones (build output, local caches), which the copy leaves out. Interpreter
     and tool caches are no input. Linked dependency trees and symbolic links cannot be certified by a checkout-only
-    receipt. Hashes stay local.
+    receipt. The bound is work (PROOF_FILES files, PROOF_BYTES bytes), never wall-clock time, so a loaded machine
+    gets the same evidence. Hashes stay local.
     """
     root, hashes = Path(top).resolve(), {}
-    deadline, remaining = time.monotonic() + PROOF_SECONDS, PROOF_BYTES
+    remaining = PROOF_BYTES
     listed = _copy_files(str(root)) if files is None else list(files)
     if not listed or len(listed) > PROOF_FILES or _dep_folders(str(root), listed):
         return {}
@@ -5164,7 +5164,7 @@ def _proof_snapshot(top, files=None):
                 return {}
             raw = path.read_bytes()
             remaining -= len(raw)
-            if remaining < 0 or time.monotonic() > deadline:
+            if remaining < 0:
                 return {}
             hashes[rel] = hashlib.sha256(raw).hexdigest()
     except (OSError, ValueError):

@@ -2941,7 +2941,11 @@ class CalcTests(unittest.TestCase):
                 (r / f"module_{n}.py").write_text("VALUE = 1\n")
             snapshot = testx._proof_snapshot(r)
             self.assertEqual(len(snapshot), 750)
-            for setting, value in (("PROOF_FILES", 749), ("PROOF_BYTES", 100), ("PROOF_SECONDS", -1)):
+            # the bound is work (files and bytes), not wall-clock time: a slow, loaded machine gets the same evidence
+            ticks = iter(range(10**6))
+            with mock.patch.object(testx.time, "monotonic", side_effect=lambda: float(next(ticks))):
+                self.assertEqual(testx._proof_snapshot(r), snapshot)
+            for setting, value in (("PROOF_FILES", 749), ("PROOF_BYTES", 100)):
                 with self.subTest(setting=setting), mock.patch.object(testx, setting, value):
                     self.assertEqual(testx._proof_snapshot(r), {})
             cache = r / "__pycache__"
