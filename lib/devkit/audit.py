@@ -176,8 +176,10 @@ WITHHOLD = _Withhold()
 
 
 def _extra_rules(patterns) -> list:
+    """audit.redact.extra compiled. While it is Unloaded: WITHHOLD first, which every screen and redact obey, then the
+    patterns that did load, which _clean asks before it keeps one of devkit's own values."""
     if isinstance(patterns, Unloaded):
-        return [WITHHOLD]
+        return [WITHHOLD, *_extra_rules(list(patterns))]
     key = tuple(patterns or ())
     if key not in _EXTRA_CACHE:
         rules = []
@@ -288,10 +290,13 @@ def _home(s: str) -> str:
 
 
 # devkit's own values that a record keeps while the team's patterns cannot load: the whole value is a decision,
-# message or reply id (D3, M12, R4), a work item, lesson, plan, session message or escalation id (T-…, L-…, E-…), a
-# session (claude:<uuid>, codex:<uuid>), or one of devkit's state and outcome words. A crew member from the roster and
-# a project id from this Mac's registry stay too (_own). Anything else, or anything around one of them, is withheld
-_OWN_SHAPE = re.compile(r"[TFBSPLE]-[0-9a-z]{4,16}|[DMR]\d{1,6}|"
+# message or reply id (D3, M12, R4), a work item, lesson or plan id at the length work.new_id writes it (T-, F-, B-,
+# S-, L-, P- and 12 characters, or 11 with a time part from 0 to h, written before TIME_BASE), a session message or
+# escalation id at the length peers writes it (S- or E- and 8 characters), a session (claude:<uuid>, codex:<uuid>), or
+# one of devkit's state and outcome words. A crew member from the roster and a project id from this Mac's registry
+# stay too (_own). Anything else, anything around one of them, and any of them that a built-in rule or a pattern that
+# did load names (_clean), is withheld
+_OWN_SHAPE = re.compile(r"[TFBSPL]-(?:[0-9a-h][0-9a-z]{10}|[i-z][0-9a-z]{11})|[SE]-[0-9a-z]{8}|[DMR]\d{1,6}|"
                         r"(?:claude|codex):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _OWN_WORDS = frozenset((
     "ok", "blocked", "failed", "recorded", "allow", "allowed", "passed", "success", "done", "deny", "denied",
@@ -330,8 +335,9 @@ def _own(s) -> bool:
 def _clean(text, rx) -> str:
     """A text as a record keeps it: redacted, home folders as ~. While the team's patterns cannot load, devkit's own
     ids and words (_own) stay as they are, so a query still finds a record by its project or decision, unless a
-    built-in rule finds a secret in one."""
-    if rx and any(r is WITHHOLD for r in rx) and _own(text) and not SECRET.search(text):
+    built-in rule or a pattern that did load (this Mac's, and the team's when its file parsed) finds a secret in one."""
+    if rx and any(r is WITHHOLD for r in rx) and _own(text) and not SECRET.search(text) \
+            and not any(r.search(text) for r in rx if r is not WITHHOLD):
         return text
     return _home(redact(text, rx))
 

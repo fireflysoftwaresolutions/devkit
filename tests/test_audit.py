@@ -450,6 +450,27 @@ class TeamPatternsFailClosedTests(AuditCase):
         self.assertEqual(members, ["neo", "Neo", "The Keymaker", "devkit:neo"])
         self.assertEqual(found, [rec["id"]])
 
+    def test_a_kept_value_has_an_id_length_devkit_writes_and_no_pattern_that_loaded_names_it(self):
+        # the team's policy has a key this Mac does not know, so its patterns load but text is withheld; this Mac's
+        # pattern names one project, the team's another
+        registry = {"projects": [{"id": "acme/api"}, {"id": "acme/zeus-client"}, {"id": "acme/orion-bid"}]}
+        core.CFG["audit"]["redact"] = {"extra": [r"zeus-client"]}
+        self.write_policy(json.dumps({"redact": {"extra": [r"orion-bid"]}, "archive": True}))
+        values = {"T-ip4k2a7c9x1z": True, "L-fy15osnf0z3": True, "S-ab12cd34": True, "E-ab12cd34": True,
+                  "D12": True, "acme/api": True,
+                  "P-x7k2m9q4w8z1n5v3": False, "T-abcd": False, "E-ab12cd34ef56": False,
+                  "acme/zeus-client": False, "acme/orion-bid": False}
+        with mock.patch.object(core, "read_registry", return_value=registry):
+            self.assertIn("unknown key", audit.redaction_unavailable())
+            got = {v: audit.record("crew.withdrawn", "D3", "x", "withdrawn", project=v if "/" in v else "",
+                                   by=v, was="pending") for v in values}
+        for value, kept in values.items():
+            with self.subTest(value=value):
+                shown = got[value]["ref"]["by"]
+                self.assertEqual(shown, value if kept else f"[text not recorded: {len(value)} characters]")
+                if "/" in value:
+                    self.assertEqual(got[value]["project"], shown)
+
     def test_an_unknown_key_in_the_team_policy_withholds_text(self):
         # a misspelled or misplaced section may hold the team's patterns: the docs call them audit.redact.extra
         for name, body in {"misspelled": {"redcat": {"extra": [self.PATTERN]}},
