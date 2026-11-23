@@ -899,6 +899,28 @@ def _held_copy(rel: str) -> Path:
     return saved
 
 
+def policy_records_file() -> Path:
+    return core.STATE / "policy-recorded.json"
+
+
+def _not_recorded(kind: str, root: Path, now: dict) -> dict:
+    """Of `now` ({path: reason}), what the last check of `kind` ("refused" a push, "stuck" a hold that could not move
+    the file) in the repository at `root` has not recorded with the same reason; `now` becomes what is recorded, so a
+    file the check no longer finds is recorded again when it comes back. Every sync says each one; the audit trail and
+    the sessions hear of it once per file and reason. When the state cannot be written, each is recorded again."""
+    f = policy_records_file()
+    state = core.read_json(f, {})
+    state = state if isinstance(state, dict) and state.get("repo") == str(root) else {"repo": str(root)}
+    known = state.get(kind) if isinstance(state.get(kind), dict) else {}
+    if known == now:
+        return {}
+    state[kind] = now
+    with contextlib.suppress(OSError):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        core.replace_text(f, json.dumps(state, sort_keys=True) + "\n")
+    return {rel: why for rel, why in now.items() if known.get(rel) != why}
+
+
 def _write_private(path: Path, data: bytes) -> None:
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # the text may hold a secret
     with os.fdopen(fd, "wb") as fh:
@@ -939,11 +961,12 @@ def hold_broken_policies(root: Path, paths=None) -> list:
     deletion stays staged, and the file goes; a staged version no Mac could load either is held too. Each hold is
     recorded (a critical, blocked handoff.push) and told to the live sessions. A file that cannot be moved (the state
     folder cannot be written, the disk is full, git cannot put the repository's version back) stays as it is and is
-    returned with no held copy: the caller leaves it out of every commit, and a staged version of it no Mac could
-    load is unstaged. `paths`: the changed files, when the caller listed them. Under _repo_lock.
+    returned with no held copy: the caller leaves it out of every commit, a staged version of it no Mac could load is
+    unstaged, and it is recorded once per file and reason (_not_recorded). `paths`: the changed files, when the
+    caller listed them. Under _repo_lock.
     -> [(path, reason, held copy, or None when it could not be moved)]."""
     from . import audit
-    out = []
+    out, stuck, problems = [], {}, {}
     for rel in [p for p in paths if _POLICY_FILE.fullmatch(p)] if paths is not None else _changed_policies(root):
         src = root / rel
         why = audit.publishable_policy(src)
@@ -996,9 +1019,7 @@ def hold_broken_policies(root: Path, paths=None) -> list:
             if unstaged is not None and audit.publishable_text(Path(rel).name, unstaged) and \
                     core.git(root, "diff", "--cached", "--quiet", "--", literal)[0] == 1:
                 core.git(root, "reset", "-q", "--", literal)  # never committed from the index either
-            audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository "
-                         f"({problem}), so it stays on this Mac, never committed or pushed", "blocked",
-                         severity="critical")
+            stuck[rel], problems[rel] = why, problem
             out.append((rel, why, None))
             continue
         _write_why(saved, rel, why)
@@ -1013,6 +1034,10 @@ def hold_broken_policies(root: Path, paths=None) -> list:
         except Exception:
             pass
         out.append((rel, why, saved))
+    for rel, why in _not_recorded("stuck", root, stuck).items():
+        audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository "
+                     f"({problems[rel]}), so it stays on this Mac, never committed or pushed", "blocked",
+                     severity="critical")
     return out
 
 
@@ -1499,19 +1524,18 @@ def unpublishable_commits(root: Path) -> list:
     return out
 
 
-def _refuse_policy_push(refused) -> str:
-    """Record each committed team policy file no Mac could load (a critical, blocked handoff.push) -> the problem."""
+def _refuse_policy_push(root: Path, refused) -> str:
+    """Record each committed team policy file no Mac could load (a critical, blocked handoff.push), once per file and
+    reason (_not_recorded) -> the problem, said at every refusal."""
     from . import audit
-    each = []
-    for rel, why in refused:
+    for rel, why in _not_recorded("refused", root, dict(refused)).items():
         text = (f"refused: a commit not pushed yet changes it to a version that {why}, so no Mac could load it; "
                 "repair it (dev audit config shows what is wrong) and commit the repair, or put back the version "
                 "the remote has, and the next dev sync pushes")
         audit.record("handoff.push", rel, text, "blocked", severity="critical")
-        each.append(f"{rel} {why}")
-    return (POLICY_REFUSED + "; ".join(each) + ": no Mac could load it. Repair it (dev audit config shows what is "
-            "wrong) and commit the repair, or put back the version the remote has; the next dev sync pushes")
-
+    return (POLICY_REFUSED + "; ".join(f"{rel} {why}" for rel, why in refused) + ": no Mac could load it. Repair it "
+            "(dev audit config shows what is wrong) and commit the repair, or put back the version the remote has; "
+            "the next dev sync pushes")
 
 def push_handoff(timeout: int = 60) -> tuple:
     """Push the handoff repository's commits (the network), under _repo_lock alone. Refused, and recorded, while a
@@ -1522,7 +1546,8 @@ def push_handoff(timeout: int = 60) -> tuple:
             return False, _BUSY
         refused = unpublishable_commits(HANDOFF)
         if refused:
-            return False, _refuse_policy_push(refused)
+            return False, _refuse_policy_push(HANDOFF, refused)
+        _not_recorded("refused", HANDOFF, {})  # the same refusal later is recorded again
         rc, _, err = core.git(HANDOFF, "push", "-q", timeout=timeout)
         return rc == 0, (err.strip()[:300] if rc else "")
 

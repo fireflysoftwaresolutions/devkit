@@ -590,12 +590,14 @@ repository, and delete the held copy; to drop the change, delete the held copy.
 - **A file devkit cannot move stays on this Mac.** When the held copy cannot be written (the state folder is not
   writable, or the disk is full), or git cannot put the repository's version back (another git process holds
   `index.lock`), the file stays in the handoff repository as it was and is left out of every commit and push. The
-  hold is recorded and said at each `dev sync`. A pull may stop until you repair the file or move it out.
+  hold is recorded once per file and reason, and said at each `dev sync`. A pull may stop until you repair the file
+  or move it out.
 - **A commit that leaves a broken policy is never pushed.** `dev sync` checks each team policy file that this Mac's
   commits not pushed yet change, whatever made them (a raw `git commit`, `dev initiative import`, an older devkit
-  whose push failed). While one of them leaves a file no Mac could load, the push is refused: devkit records it as a
-  critical, blocked `handoff.push`, says the file, the reason and the repair, and `dev status` shows the failed
-  push. Repair the file and commit the repair, or put back the version the remote has; the next `dev sync` pushes.
+  whose push failed). While one of them leaves a file no Mac could load, the push is refused: devkit records it once
+  per file and reason as a critical, blocked `handoff.push`, says the file, the reason and the repair at every
+  `dev sync`, and `dev status` shows the failed push. Repair the file and commit the repair, or put back the version
+  the remote has; the next `dev sync` pushes.
 
 Because a key devkit does not know withholds text, add a top-level key that a newer devkit introduces to
 `policy/audit.json` only after every Mac on the team runs that version (`dev update`): a Mac on an older version

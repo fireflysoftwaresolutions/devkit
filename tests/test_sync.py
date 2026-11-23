@@ -705,6 +705,69 @@ class TeamPolicySyncTests(unittest.TestCase):
             self.assertEqual(len(notices), 1)
             self.assertIn("the deletion staged before it", notices[0])
 
+    def test_a_refused_push_is_recorded_once_per_file_and_reason_and_said_at_every_sync(self):
+        # Each sync recorded the same refusal again: three syncs gave three critical records, three failed pushes and
+        # three session notices. A refusal is recorded once per file and reason, and said at every sync.
+        from devkit import watch
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            policy.write_text('{"redact": ')
+            _git(m.here, "commit", "-qam", "a raw commit")
+            notices = []
+            with mock.patch.object(watch, "notice_all", lambda *a, **k: notices.append(a)):
+                said = []
+                for _ in range(3):
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        self.assertEqual(cli.commit_push(quiet=False, urgent=True), "failed")
+                    said.append(err.getvalue())
+                for each in said:
+                    self.assertIn("policy/audit.json is not valid JSON", each)
+
+                def records(outcome):
+                    return [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == outcome]
+
+                self.assertEqual((len(records("blocked")), len(records("failed")), len(notices)), (1, 1, 1))
+                # another reason for the same file is recorded once more
+                policy.write_text(json.dumps({"audit.redact.extra": ["acmetok-[a-z0-9]{14}"]}))
+                _git(m.here, "commit", "-qam", "another raw commit")
+                for _ in range(2):
+                    self.assertEqual(cli.commit_push(quiet=True, urgent=True), "failed")
+                self.assertEqual((len(records("blocked")), len(records("failed")), len(notices)), (2, 2, 2))
+                # once the push goes through, the same refusal later is recorded again
+                _git(m.here, "reset", "-q", "--hard", "@{u}")
+                write_note(m.here, note_text("between two refusals"))
+                self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
+                policy.write_text('{"redact": ')
+                _git(m.here, "commit", "-qam", "a raw commit again")
+                self.assertEqual(cli.commit_push(quiet=True, urgent=True), "failed")
+                self.assertEqual((len(records("blocked")), len(records("failed")), len(notices)), (3, 3, 3))
+
+    def test_a_policy_that_cannot_be_moved_aside_is_recorded_once_and_said_at_every_sync(self):
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            work.held_policy_dir().parent.mkdir(parents=True, exist_ok=True)
+            work.held_policy_dir().write_text("a file where the folder goes")
+            policy.write_text('{"redact": ')
+            said = []
+            for _ in range(3):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(cli.commit_push(quiet=False, urgent=True), "nothing")
+                said.append(err.getvalue())
+            self.assertEqual(["could not be moved" in each for each in said], [True] * 3)
+            blocked = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
+            self.assertEqual([(r["target"], r["severity"]) for r in blocked], [("policy/audit.json", "critical")])
+            # moved aside once the folder can be written: that hold is recorded, and a later stuck one again
+            work.held_policy_dir().unlink()
+            sync()
+            work.held_policy_dir().rename(m.base / "held-elsewhere")
+            work.held_policy_dir().write_text("a file where the folder goes")
+            policy.write_text('{"redact": ')
+            sync()
+            blocked = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
+            self.assertEqual(len(blocked), 3)
+
 
 class WorkingTreeTests(unittest.TestCase):
     def test_a_pull_that_settles_a_conflict_never_takes_away_or_rewrites_this_macs_files(self):

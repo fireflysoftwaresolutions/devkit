@@ -390,6 +390,14 @@ def _pushed(root: Path) -> None:
         _save_push_state(st)
 
 
+def _refused_again(failed: Path, err: str) -> bool:
+    """Is `err` a refused push (work.POLICY_REFUSED) of the same files for the same reasons as the failure already
+    recorded in `failed`? Its record, its failed file and its notice are written once per file and reason."""
+    from . import work
+    last = core.read_json(failed, {}) if err.startswith(work.POLICY_REFUSED) else {}
+    return isinstance(last, dict) and last.get("error") == err[:300]
+
+
 def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, reason: str = "") -> str:
     """Commit what changed in the handoff repository and push it, when the push is due: `urgent`, or no push from this
     Mac for sync.push_interval seconds. Otherwise the changes stay as they are and one detached flusher pushes them
@@ -434,13 +442,12 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
         if not ok and not err.startswith(work.POLICY_REFUSED):  # someone pushed in between: rebase, try once more
             ok, err = work.pull_rebase()
             ok, err = work.push_handoff(timeout=120) if ok else (False, err)
+        result = "pushed" if ok else "failed"
         if ok:
             audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)" + (f" · {reason}" if reason else ""))
             if failed.exists():
                 failed.unlink()
-            result = "pushed"
-        else:
-            result = "failed"
+        elif not _refused_again(failed, err):  # the same refusal again is only said (below)
             audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
             failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
             try:  # each live session hears of it once, with its next wake or hook
