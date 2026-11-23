@@ -531,7 +531,7 @@ PAIRS = ([(fg, bg, TEXT) for fg in ("ink", "ink-2", "ink-strong") for bg in ("su
          + [("you-ink", "you", TEXT), ("you-ink", "you-hover", TEXT), ("alert-ink", "alert", TEXT), ("ink", "selection", TEXT), ("ink", "highlight", TEXT)]
          + [(fg, bg, GLYPH) for fg in ("ok", "alert", "focus", "you-text") for bg in ("surface-page", "surface-raised", "surface-sunken")])
 # AC-11: the only rules that may read amber (--you, --you-hover): the waiting-for-you glyph and bar, the primary button
-YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.you::before", ".now-glyph.you", ".now-strip .you", ".tab .n.you", ".navmore .n.you"}
+YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.now-bar::before", ".now-glyph.you", ".now-strip .you", ".tab .n.you", ".navmore .n.you"}
 RAW_COLOR = re.compile(r"(?<![\w&])#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3}(?:[0-9a-fA-F]{2})?)?\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(")
 FONT_NAME = re.compile(r"Manrope|\bInter\b|Source Serif|SF Mono|Menlo|Consolas|ui-monospace|system-ui|-apple-system|Segoe UI|Arial|Helvetica")
 

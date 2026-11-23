@@ -595,6 +595,36 @@ class NowHighlightTests(unittest.TestCase):
 
 
 @unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowOneBarTests(unittest.TestCase):
+    """The amber bar is the screen's, not a list's: an escalation between sessions, drawn above Needs you, is the first
+    thing that waits for the developer, so it alone has the bar; the decision that heads Needs you keeps its glyph and
+    word."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_an_escalation_above_needs_you_takes_the_only_amber_bar(self):
+        d = with_doc(self.base, "example")
+        d["peers"] = {"groups": [], "claims": [], "overlaps": [], "live": 0, "idle": 0, "escalations": [
+            {"id": "E-7k2m", "question": "Which session ships the release?", "since": CLOCK - 600, "recommend": "A",
+             "from": {"agent_name": "Claude Code", "prefix": "@4d1cffc7", "project": "acme/api", "branch": "main"}, "parties": [],
+             "options": ["A: This session", "B: The other one"], "type": "settle E-7k2m: A"}]}
+        with utc():
+            out = T.browse(frozen(dashboard.page(d)), """out.rows = $$(".now-item").map(r => [r.getAttribute("data-key"),
+                getComputedStyle(r, "::before").content !== "none" && getComputedStyle(r, "::before").width !== "auto",
+                $(".now-glyph", r) ? $(".now-glyph", r).getAttribute("aria-label") : null]);""", 1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual(out["rows"][:2], [["escalation:E-7k2m", True, "Waits for you"], ["decision:claude-7f3a:D1", False, "Waits for you"]])
+        self.assertEqual([r[0] for r in out["rows"] if r[1]], ["escalation:E-7k2m"])
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
 class NowPolishTests(unittest.TestCase):
     """The shared copy toast says what to do with a command, the first-run screen names each section once, a command pill
     shows its whole command on a phone, and the live footer reads the 24-hour clock the rest of the page uses."""
