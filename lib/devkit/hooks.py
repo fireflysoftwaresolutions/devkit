@@ -1579,7 +1579,7 @@ def _pin_audits(entry: dict, data: dict):
     pin, tid, sid = Path(str(entry["pin"])), str(data.get("tool_use_id") or ""), str(data.get("session_id") or "")
     used = identity._read_used(sid, tid)
     found = []
-    if identity._was_contested(entry):  # its pin's marker, or the mark in its ledger entry when no marker could be made
+    if identity._was_contested(entry):  # its pin's marker, or its contest flag in the ledger when no marker could be made
         found.append(("calls.pin-contested", "another process wrote this call's pin before its shell did"))
     try:
         st = os.stat(pin)
