@@ -76,6 +76,10 @@ from devkit import bugs, core  # noqa: E402
 DAILY_CAP = 20  # folded payloads per account per day, across the registry
 DELETED = ("vote", "confirm", "failed")  # once folded these comments go; detours and reports stay on the issue
 REGRESSION = "regression"
+# A record this workflow writes says the comment's edit history names no account the record does not (_write): an
+# older workflow's record lacks it, so its edited comment is posted anew once
+EDIT_HISTORY = "same-accounts"
+_DIGEST = re.compile(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")  # an account digest, as _voter and _account write it
 EXPIRED = "expired-"  # stands in for the account of a team mark older than VOTER_DAYS; a digest is 64 hex characters
 EVENTS = {"issues": ("opened", "labeled"), "issue_comment": ("created",), "release": ("published",),
           "workflow_dispatch": (None,)}  # the actions each event runs for; a manual run's event has none
@@ -259,8 +263,9 @@ def _number(value) -> int:
 def _read(client, number: int):
     """-> (the issue's comments in id order, the record comment, its record or None). The record comment is the
     bot's newest comment with the record marker, readable or not, so a broken one is rewritten rather than doubled.
-    Every write posts the record anew before it deletes the old comment (_write), so a run stopped between the two
-    leaves an older record comment behind: the holder lists those under "older", and the next write deletes them."""
+    A write that posts the record anew does so before it deletes the old comment (_write), so a run stopped between
+    the two leaves an older record comment behind: the holder lists those under "older", and the next write deletes
+    them."""
     comments = sorted((c for c in client.comments(number) or [] if isinstance(c, dict) and _number(c.get("id"))),
                       key=lambda c: c["id"])
     held = [c for c in comments if _by_bot(c) and bugs.RECORD_MARK in (c.get("body") or "")]
@@ -276,26 +281,40 @@ def _edited(comment: dict) -> bool:
     return bool(created and updated and created != updated)
 
 
+def _accounts(body) -> set:
+    """The account digests a record comment names, wherever the record keeps them (voters, regression marks, detour
+    authors and marks, fold counts)."""
+    return set(_DIGEST.findall(body or ""))
+
+
 def _write(client, number: int, holder, rec: dict) -> bool:
     """Write the record when the comment's text differs from it (after a fold, or after a person edited the
-    comment), when the comment was ever edited, or when an older record comment is left. The record is never edited
-    in place: GitHub keeps every earlier body of an edited comment in a public edit history, which goes only with
-    the comment. So the new body is posted as a new comment first and the old comment deleted after, and a run
-    stopped between the two loses no record (_read takes the newest). The comment is read again just before; if it
-    changed or went since this run read it, Changed says to start over. -> whether it wrote."""
-    body = bugs.render_record(rec)
+    comment), or when an older record comment is left. GitHub keeps every earlier body of an edited comment in a
+    public edit history, which goes only with the comment, and emails the issue's subscribers for a new comment but
+    not for an edit. So the record is edited in place while every account its comment ever named is still in it, and
+    posted anew only when an account leaves it, or when an older workflow edited the comment (its record lacks
+    EDIT_HISTORY): the new comment first and the old one deleted after, so a run stopped between the two loses no
+    record (_read takes the newest). The comment is read again just before; if it changed or went since this run read
+    it, Changed says to start over. -> whether it wrote."""
+    body = bugs.render_record({**rec, "edit_history": EDIT_HISTORY})
     if holder is None:
         client.create_comment(number, body)
         return True
-    replaced = [holder["id"]] if holder.get("body") != body or _edited(holder) else []
-    if replaced:
+    gone, wrote = [cid for cid in holder.get("older") or [] if _number(cid)], False
+    if holder.get("body") != body:
         if (client.comment(holder["id"]) or {}).get("body") != holder.get("body"):
             raise Changed(number)
-        client.create_comment(number, body)
-    gone = [cid for cid in holder.get("older") or [] if _number(cid)] + replaced
+        old = bugs.parse_record(holder.get("body")) or {}
+        if (_edited(holder) and old.get("edit_history") != EDIT_HISTORY) or _accounts(holder.get("body")) - \
+                _accounts(body):
+            client.create_comment(number, body)
+            gone.append(holder["id"])
+        else:
+            client.edit_comment(holder["id"], body)
+        wrote = True
     for cid in gone:
         client.delete_comment(cid)
-    return bool(gone)
+    return wrote or bool(gone)
 
 
 # --------------------------------------------------------------------------- what the record keeps, and the issue's text
@@ -698,17 +717,22 @@ def _rerender(client, key: bytes, issue: dict, now: float):
 
 
 def _repost(client, key: bytes, issue: dict):
-    """Post the record of a registry issue closed more than bugs.CLOSED_DAYS ago anew when its comment was ever
-    edited or its text differs from the record keyed per bug: the same record, its accounts rekeyed per bug and
-    nothing pruned, so its votes and counts stay; the issue's text is left as it is. -> whether it wrote, or None for
-    an issue without a readable record of its own."""
+    """Post the record of a registry issue closed more than bugs.CLOSED_DAYS ago anew when an older workflow edited
+    its comment (_write) or it names accounts by digests from before they were keyed per bug: the same record, its
+    accounts rekeyed per bug and nothing pruned, so its votes and counts stay; the issue's text is left as it is. A
+    record that needs neither is left as it is. -> whether it wrote, or None for an issue without a readable record of
+    its own."""
     number = _number(issue.get("number"))
     for _ in range(TRIES):
         _, holder, rec = _read(client, number)
         if rec is None or rec.get("status") == "duplicate":
             return None
+        new = _rekeyed(key, rec)
+        legacy_edit = _edited(holder) and rec.get("edit_history") != EDIT_HISTORY
+        if new == rec and not legacy_edit and not holder.get("older"):
+            return False
         try:
-            return _write(client, number, holder, _rekeyed(key, rec))
+            return _write(client, number, holder, new)
         except Changed:
             continue
     raise RegistryError(f"the record of issue #{number} kept changing while this run wrote it")
@@ -725,8 +749,8 @@ def _verdict_labels(client) -> list:
 
 
 def _rerender_all(client, key: bytes, now: float) -> str:
-    """Rewrite every registry issue, open or closed in the last 90 days, and post anew the edited or older-keyed
-    record of every one closed longer ago (_repost), oldest first, at one request a second at most. It stops once it
+    """Rewrite every registry issue, open or closed in the last 90 days, and post anew the record an older workflow
+    edited or keyed of every one closed longer ago (_repost), oldest first, at one request a second at most. It stops once it
     has written RERENDER_MAX issues and says how many are left; issues already current cost one read each, so
     running it again goes on where it stopped."""
     client.pace(RERENDER_PACE_S)
@@ -909,6 +933,9 @@ class GitHub:
 
     def create_comment(self, number: int, body: str) -> dict:
         return self._call("POST", f"{self._issues()}/{int(number)}/comments", body={"body": body})[1] or {}
+
+    def edit_comment(self, comment_id: int, body: str) -> dict:
+        return self._call("PATCH", f"{self._issues()}/comments/{int(comment_id)}", body={"body": body})[1] or {}
 
     def delete_comment(self, comment_id: int) -> None:
         self._call("DELETE", f"{self._issues()}/comments/{int(comment_id)}", missing_ok=True)

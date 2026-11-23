@@ -225,9 +225,16 @@ class FakeGitHub:
 
     def edit(self, cid, body, ts=NOW - 2 * DAY):
         """Edit a comment as an older workflow or a person did: GitHub keeps the earlier body in its edit history and
-        moves updated_at. The client has no way to edit a comment, so the workflow cannot."""
+        moves updated_at."""
         self.notes[cid]["body"] = body
         self.notes[cid]["updated_at"] = _iso(ts)
+
+    def edit_comment(self, cid, body):
+        """The workflow's edit: GitHub keeps the earlier body in the comment's edit history and notifies nobody."""
+        self._check_size(body)
+        self.writes.append(("edit_comment", cid))
+        self.edit(cid, body, ts=NOW)
+        self._wrote_record(body)
 
     def delete_comment(self, cid):
         if self.delete_fails:
@@ -348,7 +355,7 @@ class FoldTests(unittest.TestCase):
         self.assertEqual(set(rec["voters"]), {_h(1), _h(4), _h(5)})
         self.assertEqual([(d["id"], d["trust"]) for d in rec["detours"]], [("d1", "verified")])
         self.assertEqual(rec["seen"], last)
-        self.assertNotIn(record_id, fake.ids(12))  # posted anew: the old comment went, with its edit history
+        self.assertEqual(fake.record_comment(12)["id"], record_id)  # edited in place: no account left the record
 
     def test_invalid_payloads_are_ignored_and_left_alone(self):
         fake = FakeGitHub()
@@ -596,6 +603,9 @@ class FoldTests(unittest.TestCase):
     def test_a_record_is_posted_anew_before_its_old_comment_goes_so_a_stopped_run_loses_nothing(self):
         fake = FakeGitHub()
         record_id = fake.registry_issue(12)
+        rec = fake.record(12)
+        rec["voters"][_h(4)] = {"impact": "minor", "ts": OLD}  # quiet for 90 days: the next write posts anew
+        fake.set_record(12, rec)
         fake.delete_fails = True  # the run stops right after it posted the new record
         vote = fake.add_comment(12, _body(_payload("vote")), _user(3))
         rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
@@ -1094,6 +1104,57 @@ class RetentionTests(unittest.TestCase):
             self.assertIn(_h(account), body, account)
 
 
+class NotificationTests(unittest.TestCase):
+    """A new comment emails every subscriber of the issue; an edit emails no one. The record is edited in place, and
+    posted anew (the old comment deleted with its edit history) only when an account leaves it, so the public edit
+    history never keeps an account the record no longer names."""
+
+    def test_a_fold_edits_the_record_in_place(self):
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(12)
+        for n in (2, 3):
+            fake.writes.clear()
+            vote = fake.add_comment(12, _body(_payload("vote")), _user(n))
+            rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual([w for w in fake.writes if w[0] in ("create_comment", "edit_comment", "delete_comment")],
+                             [("edit_comment", record_id), ("delete_comment", vote)])
+        self.assertEqual(fake.record_comment(12)["id"], record_id)
+        self.assertEqual(set(fake.record(12)["voters"]), {_h(1), _h(2), _h(3)})
+
+    def test_a_write_that_drops_an_account_posts_the_record_anew(self):
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(12)
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(2))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)  # edited in place
+        rec = fake.record(12)
+        rec["voters"][_h(4)] = {"impact": "minor", "ts": OLD}  # quiet past the 90 days: the next write forgets it
+        fake.edit(record_id, bugs.render_record(rec), ts=NOW)
+        fake.writes.clear()
+        chat = fake.add_comment(12, "Same here.", _user(5))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=chat)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([w for w in fake.writes if w[0] in ("create_comment", "edit_comment", "delete_comment")],
+                         [("create_comment", 12), ("delete_comment", record_id)])
+        self.assertNotIn(record_id, fake.ids(12))
+        self.assertNotIn(_h(4), fake.record_comment(12)["body"])
+
+    def test_a_record_an_older_workflow_edited_is_posted_anew_once(self):
+        # GitHub's edit history of that comment may keep accounts an older record named: only a new comment drops it
+        fake = FakeGitHub()
+        record_id = fake.registry_issue(12)
+        fake.edit(record_id, fake.notes[record_id]["body"])
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(2))
+        rc, _, err = _run(fake, "issue_comment", 12, comment=vote)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([w for w in fake.writes if w[0] in ("create_comment", "edit_comment")], [("create_comment", 12)])
+        self.assertNotIn(record_id, fake.ids(12))
+        fake.writes.clear()
+        vote = fake.add_comment(12, _body(_payload("vote")), _user(3))
+        self.assertEqual(_run(fake, "issue_comment", 12, comment=vote)[0], 0)
+        self.assertIn(("edit_comment", fake.record_comment(12)["id"]), fake.writes)
+
+
 class VerdictTests(unittest.TestCase):
     """A maintainer gives a verdict with one verdict:* label; the issue's text states it."""
 
@@ -1193,7 +1254,8 @@ class ManualRunTests(unittest.TestCase):
         self.assertEqual(_run(fake, "workflow_dispatch")[0], 0)
         old = fake.record_comment(12)
         voters = fake.record(12)["voters"]
-        fake.edit(old["id"], old["body"])  # edited in place by an older workflow: GitHub keeps the earlier bodies
+        legacy = {k: v for k, v in fake.record(12).items() if k != "edit_history"}
+        fake.edit(old["id"], bugs.render_record(legacy))  # by an older workflow: GitHub keeps the earlier bodies
         fake.writes.clear()
         rc, out, err = _run(fake, "workflow_dispatch")
         self.assertEqual(rc, 0, err)
@@ -1283,6 +1345,15 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(action.GitHubError):  # posting again after a lost answer could post a record twice
             client.create_comment(12, "a record")
         self.assertEqual((len(seen), self.slept), (1, []))
+
+    # the record is edited with a PATCH of the comment, which the workflow's issues: write permission covers; an edit
+    # sends the same body again, so it is tried again like a read
+    def test_a_record_edit_patches_the_comment_and_is_tried_again(self):
+        client, seen = self._client([502, _Response(data={"id": 5})])
+        self.assertEqual(client.edit_comment(5, "a record"), {"id": 5})
+        self.assertEqual([(r.get_method(), r.full_url) for r in seen],
+                         [("PATCH", "https://api.github.com/repos/owner/registry/issues/comments/5")] * 2)
+        self.assertEqual(json.loads(seen[-1].data), {"body": "a record"})
 
     def test_the_duplicate_search_reads_only_registry_issues(self):
         label = [{"name": "devkit-bug"}]
