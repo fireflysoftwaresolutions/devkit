@@ -243,16 +243,21 @@ in another letter case is still the checkout. `dev test prove` says "proves the 
   environment whose `PYTHONPATH` leaves out devkit's recorder), is "cannot be proven: no record of what the run
   imported," and the output names the child's command. The recorder finds such a child behind `/usr/bin/env` (with
   its options, `-i` and `NAME=value` words), behind leading `NAME=value` words in a shell line, inside `sh -c`,
-  `bash -lc` or `sh -ec`, through `subprocess`'s `executable=`, and after a separate `-W` or `-X` value. When the
-  proof spans more than one test file, each file runs once more with a record of its own, so only the files that start
-  such a child lose their proof.
+  `bash -lc`, `sh -ec` or `bash -c --` (also after `--rcfile` or `--init-file` and its file), behind a program that
+  runs the rest of its words (`timeout 30 python`, `nice -n 5 python`, `xargs python`), through `subprocess`'s
+  `executable=`, and after the value of `-W`, `-X` or `--check-hash-based-pycs`. When the proof spans more than one
+  test file, each Python test file runs once more with a record of its own, so only the files that start such a child
+  lose their proof; a file that does not load on that run (state the first run left stops it) has no record.
 - A failing test whose run imported none of the changed Python files from the copy, and read none of the changed data
   files there, is "cannot be proven: imported none of the changed files from the copy": nothing shows that it ran the
-  code without your change.
+  code without your change. An open that empties a data file first (`w+`, `O_TRUNC`) reads none of its content.
 
-The record has limits. It cannot see a Python that a program other than Python starts (a shebang script with `-I`, a
-`"$PY" -I` shell line, `make`, `tox`, or devkit's own `bin/dev`), a module run from a sourceless `.pyc` compiled under
-another filename, or a plain copy of the source inside the checkout (`build/lib`). Such a test may show "does not
+The record has limits. A Python child that a program other than Python starts is recorded when it keeps the
+recorder, since it inherits `PYTHONPATH`; one that skips it there goes unseen (a shebang script with `-I`, a
+`"$PY" -I` shell line, `make`, `tox`, or devkit's own `bin/dev`). The record also misses a module run from a
+sourceless `.pyc` compiled under another filename, a plain copy of the source inside the checkout (`build/lib`), and
+source that a test reads from the checkout and runs itself (`exec(compile(path.read_text(), …))`), which is a read of
+a `.py` file, not an import. Such a test may show "does not
 test the change" when it does; prove it with a test that imports the module directly.
 
 For JavaScript, the only evidence checked is a workspace package that the linked `node_modules` resolves into the
