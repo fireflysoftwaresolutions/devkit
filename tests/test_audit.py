@@ -419,6 +419,23 @@ class TeamPatternsFailClosedTests(AuditCase):
         self.assertEqual((shown[0]["detail"], shown[0]["ref"]["answer"]),
                          ("[text not recorded: 1 characters]", "[text not recorded: 1 characters]"))
 
+    def test_an_answer_shaped_like_a_length_marker_keeps_only_its_length(self):
+        # only the two markers an answer becomes stay; any other bracketed "<words>: N characters" is the person's text
+        typed = "[correct horse battery staple: 4 characters]"
+        hashed = "[approval line not recorded: 1 characters, sha256 " + "9f" * 32 + "]"
+        options = ["A: csv", "B: xlsx"]
+        for answer, kept in ((typed, f"[free text: {len(typed)} characters]"),
+                             (hashed, f"[free text: {len(hashed)} characters]"),
+                             ("[free text: 10 characters]", "[free text: 10 characters]"),
+                             ("[text not recorded: 1 characters]", "[text not recorded: 1 characters]")):
+            with self.subTest(answer=answer):
+                rec = audit.record("crew.decided", "D3", answer, "ok", options=options, answer=answer)
+                self.assertEqual((rec["detail"], rec["ref"]["answer"]), (kept, kept))
+        # while the patterns cannot load, such a text is withheld like any other, not kept as a marker
+        self.write_policy('{"redact": ')
+        rec = audit.record("guard", "deploy", typed, "blocked")
+        self.assertEqual(rec["detail"], f"[text not recorded: {len(typed)} characters]")
+
     def test_a_record_keeps_devkits_own_ids_and_words_while_text_is_withheld(self):
         session = "claude:0f8e2c1a-3b4d-4e5f-8a9b-0c1d2e3f4a5b"
         registry = {"projects": [{"id": "acme/api"}]}

@@ -154,9 +154,14 @@ class Unloaded(list):
         return True
 
 
-# a text already withheld, or any length marker the trail writes: withholding it again keeps it, so redact stays
-# idempotent while the team patterns cannot load
-_LENGTH_MARK = re.compile(r"\[[a-z ]+: \d+\+? characters(?:, sha256 [0-9a-f]{64})?\]")
+# a text already withheld, or one of the length markers the trail writes: withholding it again keeps it, so redact
+# stays idempotent while the team patterns cannot load. Only those markers: any other "[<words>: N characters]" is a
+# person's text, and a hash a person typed beside one may be a secret
+_LENGTH_MARK = re.compile(r"\[(?:(?:message text|text|approval line|question) not recorded: \d+\+?|free text: \d+) "
+                          r"characters\]")
+# the markers an answer becomes (_option): [free text: N characters], or [text not recorded: N characters] while the
+# team's patterns cannot load
+_ANSWER_MARK = re.compile(r"\[(?:free text|text not recorded): \d+ characters\]")
 
 
 class _Withhold:
@@ -358,10 +363,11 @@ def _norm(text) -> str:
 def _option(answer, options) -> str:
     """An answer as a record may keep it: the decision's option it names, read as progress.option_of reads it (the
     label in any case or spacing, with the question tool's "(Recommended)", or its letter: "B" for "B: reject"),
-    else its length only. A length marker stays as it is: [free text: …], and the [text not recorded: …] an answer
-    becomes while the team's patterns cannot load, which keeps the answer's length rather than the marker's."""
+    else its length only. The two markers an answer becomes stay as they are (_ANSWER_MARK): [free text: …], and the
+    [text not recorded: …] an answer becomes while the team's patterns cannot load, which keeps the answer's length
+    rather than the marker's. Any other text shaped like a marker is the person's answer, and keeps its length."""
     s = str(answer)
-    if _LENGTH_MARK.fullmatch(s):
+    if _ANSWER_MARK.fullmatch(s):
         return s
     said = _norm(_RECOMMENDED.sub("", s))
     for o in options if isinstance(options, (list, tuple)) else []:
