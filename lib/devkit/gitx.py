@@ -447,6 +447,14 @@ def _key(c) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "__", c.pid)
 
 
+def _checkout_key(c) -> str:
+    """The project's key and a short hash of this checkout's real path (`acme__widget@3f9c0a1b2d4e`): the main
+    checkout and each worktree of a project keep their own dev ci --run logs and step records, which the evidence
+    markers, named by commit and tree, need not."""
+    import hashlib
+    return f"{_key(c)}@{hashlib.sha256(os.path.realpath(c.top).encode()).hexdigest()[:12]}"
+
+
 def work_tree(top):
     """Tree id of the working tree as it is now (tracked and untracked, not ignored); the real index is untouched."""
     import shutil
@@ -480,7 +488,7 @@ def record_evidence(c, how: str, tree: str, **extra) -> dict:
             "ts": int(time.time()), "user": os.environ.get("USER", ""), "host": os.uname().nodename.split(".")[0]}
     data.update(extra)
     (d / name).write_text(json.dumps(data, indent=1))
-    cutoff = time.time() - 30 * 86400
+    cutoff = time.time() - CI_KEEP_DAYS * 86400
     for f in d.glob("*.json"):
         try:
             if f.stat().st_mtime < cutoff:
@@ -3167,19 +3175,59 @@ def _fmt_secs(s) -> str:
     return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
 
 
+CI_KEEP_DAYS = 30  # the local CI evidence, and the step logs and records of a checkout nothing has run in since
+
+
 def _steps_file(c) -> Path:
-    return _ci_dir() / "steps" / f"{_key(c)}.json"
+    return _ci_dir() / "steps" / f"{_checkout_key(c)}.json"
 
 
 def step_records(c) -> dict:
-    """The last result of every local CI step: {"<job> › <step>": {rc, tree, sha, secs, how, failed_tests, …}}."""
+    """The last result of every local CI step in this checkout: {"<job> › <step>": {rc, tree, sha, secs, how,
+    failed_tests, …}}. Each checkout keeps its own (_checkout_key): another worktree's run never changes what
+    --resume keeps here."""
     data = core.read_json(_steps_file(c), {})
     return (data.get("steps") or {}) if isinstance(data, dict) else {}
 
 
+def _step_history(c) -> dict:
+    """{"<job> › <step>": {"longest": seconds}}: the longest whole pass of each step in any checkout of the project,
+    and in the one file the project kept before each checkout had its own, so the limit it sets (step_limit) holds
+    in a new worktree too."""
+    found = {}
+    files = [_ci_dir() / "steps" / f"{_key(c)}.json"] + \
+        [Path(f) for f in _glob.glob(str(_ci_dir() / "steps" / (_glob.escape(_key(c)) + "@*.json")))]
+    for f in files:
+        data = core.read_json(f, {})
+        steps = data.get("steps") if isinstance(data, dict) else None
+        for key, rec in (steps.items() if isinstance(steps, dict) else ()):
+            secs = _longest_pass(rec)
+            if secs and secs > (found.get(key) or 0):
+                found[key] = secs
+    return {key: {"longest": secs} for key, secs in found.items()}
+
+
+def _prune_ci_runs() -> None:
+    """Remove the step logs and records of every checkout nothing has run dev ci --run in for CI_KEEP_DAYS days (a
+    worktree removed long ago), as record_evidence does with the evidence markers."""
+    cutoff = time.time() - CI_KEEP_DAYS * 86400
+    for d in ((_ci_dir() / "logs").iterdir() if (_ci_dir() / "logs").is_dir() else ()):
+        try:
+            if d.is_dir() and d.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+    for f in (_ci_dir() / "steps").glob("*.json"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
 def _save_step(c, key, rec) -> None:
-    """Record step `key`'s result in the project's steps file, read, changed and written under the file's lock (a
-    second `dev ci --run` of the project saving at once waits instead of dropping this step) and written in one step
+    """Record step `key`'s result in this checkout's steps file, read, changed and written under the file's lock (a
+    second `dev ci --run` of the checkout saving at once waits instead of dropping this step) and written in one step
     through a temporary file of its own (core.replace_text). A lock still held after its wait is written over: a lost
     record only runs its step again on --resume."""
     f = _steps_file(c)
@@ -3622,8 +3670,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
               [(s["job"], s["name"], s["skip"], s["blocking"]) for j in jobs if not j["skip"] for s in j["steps"]
                if s["skip"] and s["skip"] != "setup"]
     setup = sum(1 for j in jobs for s in j["steps"] if s["skip"] == "setup")
-    history = step_records(c)  # each step's last record: what --resume keeps, and its longest pass for its limit
-    records = history if resume else {}
+    history = _step_history(c)  # each step's longest pass in any checkout of the project: its limit (step_limit)
+    records = step_records(c) if resume else {}  # each step's last record in this checkout: what --resume keeps
     if resume and not records:
         info("nothing recorded yet: --resume runs every step")
         resume = False
@@ -3663,7 +3711,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
         launcher.write_text(f"#!/bin/sh\nexec {shlex.quote(shutil.which('python3'))} \"$@\"\n")
         launcher.chmod(0o700)
         info("python → python3 for these steps (setup-python provides `python` on the runner)")
-    logs = _ci_dir() / "logs" / _key(c)
+    _prune_ci_runs()
+    logs = _ci_dir() / "logs" / _checkout_key(c)  # this checkout's own: a run in another worktree never empties it
     logs.mkdir(parents=True, exist_ok=True)
     for f in logs.glob("*.log"):
         f.unlink()

@@ -21,7 +21,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from devkit import gitx  # noqa: E402
-from test_gitx import Sandbox, dev  # noqa: E402
+from test_gitx import Sandbox, dev, git  # noqa: E402
 
 
 BOUND = 20  # seconds: a stopped step returns well within this, while its child would sleep for ten minutes
@@ -303,6 +303,74 @@ class HistoryLimitTests(StepLimitCase):
         rc, out = self.ci(workflow(steps=self.STEPS[:1]) + "# again\n")
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.limits, {"test -f README.md": 54 * 60})
+
+
+class CheckoutTests(StepLimitCase):
+    """Each checkout of a project (its main checkout and every worktree) keeps its own step logs and records."""
+
+    SHARDED = workflow(job_timeout=40, steps=(("Unit tests", "test -f README.md && pwd"),)).replace(
+        "    timeout-minutes: 40\n", "    timeout-minutes: 40\n    strategy:\n      matrix:\n        shard: [1, 2]\n")
+
+    def run_in(self, checkout):
+        """`dev ci --run` in `checkout` -> (rc, output); each step's limit is appended to self.given."""
+        def spy(argv, *args, **kwargs):
+            self.given.append(kwargs.get("timeout"))
+            return self.real_run(argv, *args, **kwargs)
+        here = os.getcwd()
+        os.chdir(checkout)
+        try:
+            with mock.patch.object(gitx, "_step_shell", spy):
+                rc, out, err = dev("ci", "--run")
+        finally:
+            os.chdir(here)
+        return rc, out + err
+
+    # dev ci --run kept one folder of step logs and one file of step records per project, and emptied the folder when
+    # it started: two worktrees of one project running it at once deleted or swapped each other's logs, and each
+    # --resume read the other's records. The longest pass of any checkout still sets a step's limit, so a new
+    # worktree's whole suite is not cut at one matrix leg's timeout-minutes.
+    def test_two_checkouts_of_a_project_keep_their_own_logs_and_records_and_share_the_longest_pass(self):
+        self.given = []
+        self.s.branch("feat/ci")
+        self.record("Unit tests", 2142.5)  # an earlier pass in the main checkout: 35.7 minutes
+        self.s.commit("ci: the workflow", files={".github/workflows/ci.yml": self.SHARDED})
+        other = self.s.root / "widget-wt"
+        git(self.s.repo, "worktree", "add", "-q", "-b", "feat/other", str(other))
+        self.s.commit("feat: a change of its own", repo=other)
+        self.assertEqual(gitx.ctx(other).pid, gitx.ctx(self.s.repo).pid)  # one project
+        for checkout in (self.s.repo, other):
+            rc, out = self.run_in(checkout)
+            self.assertEqual(rc, 0, out)
+        logs = sorted(p.read_text().strip() for p in (gitx._ci_dir() / "logs").rglob("*.log"))
+        self.assertEqual(logs, sorted([str(self.s.repo), str(other.resolve())]))
+        for checkout in (self.s.repo, other):
+            with self.subTest(checkout=checkout.name):
+                rec = gitx.step_records(gitx.ctx(checkout))["test › Unit tests"]
+                self.assertEqual(rec["sha"], git(checkout, "rev-parse", "HEAD").strip())
+        self.assertEqual(self.given, [54 * 60, 54 * 60])
+
+    # Each worktree has a folder of logs and a file of records of its own, so the ones of a worktree removed long ago
+    # go once nothing has written them for 30 days, as the local CI evidence does.
+    def test_the_logs_and_records_of_a_checkout_untouched_for_30_days_go(self):
+        self.given = []
+        self.s.branch("feat/ci")
+        self.s.commit("ci: the workflow", files={".github/workflows/ci.yml": self.SHARDED})
+        old, recent = time.time() - 31 * 86400, time.time() - 86400
+        kept = []
+        for name, when in (("acme__gone@0123456789ab", old), ("acme__live@ba9876543210", recent)):
+            logs, steps = gitx._ci_dir() / "logs" / name, gitx._ci_dir() / "steps" / f"{name}.json"
+            logs.mkdir(parents=True)
+            steps.parent.mkdir(parents=True, exist_ok=True)
+            (logs / "01-test-unit-tests.log").write_text("ok\n")
+            steps.write_text("{}")
+            for f in (logs / "01-test-unit-tests.log", logs, steps):
+                os.utime(f, (when, when))
+            kept.append((logs, steps))
+        rc, out = self.run_in(self.s.repo)
+        self.assertEqual(rc, 0, out)
+        (gone_logs, gone_steps), (live_logs, live_steps) = kept
+        self.assertEqual((gone_logs.exists(), gone_steps.exists()), (False, False))
+        self.assertEqual((live_logs.exists(), live_steps.exists()), (True, True))
 
 
 if __name__ == "__main__":
