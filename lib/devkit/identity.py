@@ -51,6 +51,7 @@ so where the hook stamps every call (stamps_all) the thread rule never decides a
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
@@ -688,35 +689,95 @@ def sweep_gone(now: float | None = None) -> int:
             if isinstance(pid, int) and not progress._pid_running(pid):
                 _end_call(str(e.get("agent") or ""), sid, e, "session-gone")
                 n += 1
-        _sweep_flags(progress.CALLS / sid)
+        _sweep_flags(progress.CALLS / sid, now)
     return n
 
 
-def _sweep_flags(folder):
+FLAG_GRACE_S = 60  # seconds a sweep leaves a contest flag after it was made and after its call closed
+_TREE_DEPTH = 16  # levels of a folder planted at a flag's name the sweep removes; a deeper one stays
+
+
+def _sweep_flags(folder, now: float | None = None):
     """The contest flags (contest_path) a session's ledger folder kept after their calls ended: each `.<tid>.contested`
     whose call has no ledger entry and no kept record goes, whatever is there: a file, a link (never followed), or a
-    folder planted at its name, which the call's end cannot unlink (_drop_marks). A folder that is a link is left."""
-    import shutil
+    folder planted at its name, which the call's end cannot unlink (_drop_marks). A flag made, or whose call closed
+    (the session's record of closed shell calls), less than FLAG_GRACE_S before `now` stays: the close's audit reads
+    it right after the call's ledger entry goes (hooks._pin_audits), and the record is written before the entry goes.
+    The folder is opened once, never through a link (O_NOFOLLOW), and every name in it is reached from that open
+    folder (dir_fd): a folder that is a link is left, and one swapped for a link meanwhile is never followed."""
     import stat
+    now = now or time.time()
     suffix = ".contested"
     try:
-        if not stat.S_ISDIR(os.lstat(folder).st_mode):
-            return
-        names = [n for n in os.listdir(folder) if n.startswith(".") and n.endswith(suffix) and len(n) > len(suffix) + 1]
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return
-    for name in names:
-        tid = name[1:-len(suffix)]
-        if os.path.lexists(folder / f"{tid}.json") or os.path.lexists(folder / f".{tid}.background"):
-            continue
-        flag = folder / name
-        try:
-            if stat.S_ISDIR(os.lstat(flag).st_mode):
-                shutil.rmtree(flag)  # a link swapped in meanwhile is refused, and none inside is followed
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            return
+        names = [n for n in os.listdir(fd) if n.startswith(".") and n.endswith(suffix) and len(n) > len(suffix) + 1]
+        for name in names:
+            tid = name[1:-len(suffix)]
+            if _lexists_at(fd, f"{tid}.json") or _lexists_at(fd, f".{tid}.background"):
+                continue
+            try:
+                st = os.lstat(name, dir_fd=fd)
+            except OSError:
+                continue
+            if now - st.st_mtime < FLAG_GRACE_S or _closed_lately(folder.name, tid, now):
+                continue
+            try:
+                if stat.S_ISDIR(st.st_mode):
+                    _remove_tree_at(fd, name, _TREE_DEPTH)
+                else:
+                    os.unlink(name, dir_fd=fd)
+            except OSError:
+                pass
+    except OSError:
+        return
+    finally:
+        os.close(fd)
+
+
+def _closed_lately(sid: str, tid: str, now: float) -> bool:
+    """Call `tid` closed less than FLAG_GRACE_S before `now` (the session's record of closed shell calls). True when
+    the record cannot be read as one: the sweep then leaves the flag."""
+    from . import progress
+    try:
+        return any(c.get("tool_use_id") == tid for c in progress.shells_since(sid, now - FLAG_GRACE_S, now))
+    except Exception:  # noqa: BLE001 - a record of another shape: the flag stays, as for a call that just closed
+        return True
+
+
+def _lexists_at(fd: int, name: str) -> bool:
+    try:
+        os.lstat(name, dir_fd=fd)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # it may be there: the sweep leaves the flag
+
+
+def _remove_tree_at(parent: int, name: str, depth: int):
+    """Remove folder `name` of the open folder `parent` and all it holds, never through a link: each folder is opened
+    with O_NOFOLLOW from its parent's descriptor, and a link inside is unlinked, never followed. A tree deeper than
+    `depth` levels stays (OSError)."""
+    import stat
+    if depth <= 0:
+        raise OSError(errno.ELOOP, "folder too deep", name)
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.ENOTDIR, "not a folder", name)
+        for child in os.listdir(fd):
+            if stat.S_ISDIR(os.lstat(child, dir_fd=fd).st_mode):
+                _remove_tree_at(fd, child, depth - 1)
             else:
-                flag.unlink()
-        except OSError:
-            pass
+                os.unlink(child, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(name, dir_fd=parent)
 
 
 @dataclass(frozen=True)

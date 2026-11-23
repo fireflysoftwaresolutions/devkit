@@ -1391,21 +1391,29 @@ class TextPinRecordFailureTests(TextPinCase):
 
     # a contest flag its call's end could not remove (a folder planted at its name, which unlink refuses) goes at the
     # next sweep once its call has no ledger entry and no kept record; a link planted there goes, never what it points
-    # to; the flags of an open call and of a kept background call stay
+    # to, and so does a link inside a planted folder; the flags of an open call and of a kept background call stay,
+    # and so does what a session folder that is a link points to
     def test_the_sweep_removes_a_contest_flag_its_call_left_behind(self):
         self.plan_with_link()
         gone, shell = self.call(LEAD)
         planted = identity.contest_path("s1", gone["tool_use_id"])
         planted.mkdir()
         (planted / "inside").write_text("x")
+        (planted / "sub" / "deeper").mkdir(parents=True)
+        (planted / "sub" / "deeper" / "file").write_text("y")
         del self.argvs[shell]
         self.closed(gone)
         self.assertTrue(planted.is_dir())  # the close's unlink leaves a folder
         outside = self.root / "outside"
         outside.mkdir()
         (outside / "keep").write_text("k")
+        (outside / ".toolu_z.contested").write_text("")
+        os.symlink(outside, planted / "sub" / "to-outside")
         linked = identity.contest_path("s1", "toolu_gone")
         os.symlink(outside, linked)
+        os.symlink(outside, pg.CALLS / "s-link")  # a session folder that is a link: nothing it points to goes
+        deep = identity.contest_path("s1", "toolu_deep")  # deeper than the sweep removes: it stays
+        Path(deep, *["d"] * (identity._TREE_DEPTH + 1)).mkdir(parents=True)
         still, _ = self.call("dev progress note x")
         open_flag = identity.contest_path("s1", still["tool_use_id"])
         open_flag.write_text("")
@@ -1415,12 +1423,76 @@ class TextPinRecordFailureTests(TextPinCase):
         kept_flag = identity.contest_path("s1", kept["tool_use_id"])
         kept_flag.write_text("")
         with mock.patch.object(pg, "_pid_running", lambda pid: True):
-            identity.sweep_gone()
+            identity.sweep_gone(time.time() + identity.FLAG_GRACE_S + 1)
         self.assertFalse(os.path.lexists(planted))
         self.assertFalse(os.path.lexists(linked))
-        self.assertEqual((outside / "keep").read_text(), "k")
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), [".toolu_z.contested", "keep"])
+        self.assertTrue(Path(deep, *["d"] * identity._TREE_DEPTH).is_dir())
         self.assertTrue(os.path.lexists(open_flag))
         self.assertTrue(os.path.lexists(kept_flag))
+
+    # a sweep (another session's start, dev sync) leaves a contest flag for FLAG_GRACE_S after it was made and after
+    # its call closed: the close's audit reads the flag right after the call's ledger entry goes, and a sweep in that
+    # moment cost the audit (calls.pin-contested), whether the flag was made just now or long before the close
+    def test_the_sweep_leaves_a_flag_its_call_closed_or_made_within_the_grace_period(self):
+        self.plan_with_link()
+        made = identity.contest_path("s1", "toolu_fresh")
+        made.parent.mkdir(parents=True, exist_ok=True)
+        made.write_text("")
+        identity.sweep_gone()
+        self.assertTrue(os.path.lexists(made))  # no ledger entry, but made within the grace period
+        identity.sweep_gone(time.time() + identity.FLAG_GRACE_S + 1)
+        self.assertFalse(os.path.lexists(made))
+        # a record of closed calls that is not one may hide a close: the flag stays, and the sweep goes on
+        made.write_text("")
+        (made.parent / ".shells.json").write_text("[1]")
+        identity.sweep_gone(time.time() + identity.FLAG_GRACE_S + 1)
+        self.assertTrue(os.path.lexists(made))
+        (made.parent / ".shells.json").unlink()
+        for flag_age in (0, 2 * identity.FLAG_GRACE_S):
+            with self.subTest(flag_age=flag_age):
+                data, token, _ = self.hook(LEAD)
+                flag = identity.contest_path("s1", data["tool_use_id"])
+                flag.touch()
+                made_at = time.time() - flag_age
+                os.utime(flag, (made_at, made_at))
+                rc, out = self.lead(token)
+                self.assertEqual(rc, 2, out)
+                before = len([r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"])
+                real = pg.call_closed
+
+                def closed_then_sweep(*a, **k):
+                    real(*a, **k)
+                    with mock.patch.object(pg, "_pid_running", lambda pid: True):
+                        identity.sweep_gone()
+                with mock.patch.object(pg, "call_closed", closed_then_sweep):
+                    self.closed(data)
+                after = [r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"]
+                self.assertEqual(len(after) - before, 1)
+                self.assertIn("its contest flag is in the ledger", after[-1]["detail"])
+
+    # the session folder swapped for a link once the sweep has checked it: the sweep works in the folder it opened,
+    # never in the one the link points to
+    def test_the_sweep_never_follows_a_session_folder_swapped_for_a_link(self):
+        folder = pg.CALLS / "s-swap"
+        folder.mkdir(parents=True)
+        (folder / ".toolu_y.contested").write_text("")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / ".toolu_z.contested").write_text("")
+        moved = self.root / "moved"
+        real = os.listdir
+
+        def swap(p):
+            if not os.path.islink(folder):
+                os.rename(folder, moved)
+                os.symlink(outside, folder)
+            return real(p)
+        with mock.patch.object(os, "listdir", swap):
+            identity._sweep_flags(folder, time.time() + identity.FLAG_GRACE_S + 1)
+        self.assertTrue(os.path.islink(folder))  # the swap happened
+        self.assertEqual(os.listdir(outside), [".toolu_z.contested"])
+        self.assertEqual(os.listdir(moved), [])  # the flag of the folder it opened went
 
     # a stamped call found contested says how it was marked, in its refusal and in its close's audit: a pin another
     # process wrote first (its pin's marker), or its contest flag in the ledger, which says nothing of who wrote a pin
