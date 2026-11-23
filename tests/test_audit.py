@@ -2219,6 +2219,24 @@ class NotUtf8RecordTests(AuditCase):
                 self.assertIn(rec["id"], [r.get("id") for r in self.stored()])
         self.assertTrue(audit.verify()["ok"])
 
+    def test_a_record_with_escapes_reads_and_publishes_as_it_was_written(self):
+        # an escape is six characters for one byte, so a nested value outgrew its cut, and an escape can read as more
+        # than its byte (\udcda then "pi_key=" reads as api_key=): build writes what a reader sees, nothing it cleans
+        audit.record("dev.rm", "", "\udcdapi_key=hunter2", cwd="/tmp/" + "caf\udce9/" * 120)
+        ln = audit.AUDIT.joinpath(f"{audit.months_back(time.time(), 0)}.jsonl").read_bytes().splitlines()[-1]
+        rx = audit._redact_rules()
+        view = audit.lift(json.loads(ln), ln, rx)
+        self.assertNotIn("cleaned", view)
+        self.assertLessEqual(len(view["evidence"]["cwd"]), audit.VALUE_CUT)
+        self.assertNotIn(b"hunter2", ln)
+        self.assertEqual(audit._published_line(ln, rx), ln)
+
+    def test_a_hand_edited_v2_line_holding_a_lone_surrogate_reads_as_cleaned(self):
+        rec = audit.build("dev.task", "t", "", now=time.time())
+        rec["why"] = "x\ud800"
+        ln = json.dumps(rec, separators=(",", ":")).encode()
+        self.assertTrue(audit.lift(json.loads(ln), ln, audit._redact_rules()).get("cleaned"))
+
     def test_the_bytes_stay_readable_as_their_escape(self):
         audit.record("dev.rm", "", "caf\udce9")
         self.assertEqual(self.stored()[-1]["detail"], "caf\\udce9")

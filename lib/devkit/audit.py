@@ -2612,7 +2612,9 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     floor = RAISE.get(str(raw or "").lower()) or ("warning" if out in ("failed", "blocked") else "info")
     if SEVERITIES.index(rec["severity"]) < SEVERITIES.index(floor):
         rec["severity"] = floor
-    rec = _utf8(rec)
+    seen = _escaped(rec, rx)
+    if seen is not rec:  # the record holds what a reader sees of it: nothing a reader cleans again
+        rec = {k: v for k, v in seen.items() if k != "cleaned"}
     for k, n in _CUT.items():
         if isinstance(rec.get(k), str):
             rec[k] = rec[k][:n]
@@ -2633,6 +2635,15 @@ def _utf8(x):
     if isinstance(x, list):
         return [_utf8(v) for v in x]
     return x
+
+
+def _escaped(view: dict, rx) -> dict:
+    """`view`, a record as a reader sees it, with each lone surrogate as its escape (_utf8), cleaned again and marked
+    `cleaned` when that changed it; `view` itself otherwise. An escape is six characters for one byte, so a value can
+    outgrow its cut, and it can read as more than its byte (\\udcda then "pi_key=" reads as api_key=); the first
+    cleaning ran on the byte, so a token right after it was found where its word starts."""
+    e = _utf8(view)
+    return view if e == view else {**_reclean(e, rx), "cleaned": True}
 
 
 def kept(rec: dict, level: str) -> bool:
@@ -2957,7 +2968,7 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     `extra`: the compiled audit.redact.extra patterns (default: the built-in rules only)."""
     rx = extra if extra is not None else []
     if r.get("v") == V or _stand_in(r):
-        return _utf8(_reclean(r, rx))
+        return _escaped(_reclean(r, rx), rx)
     ts = float(r.get("ts") or 0)
     out, code, raw = outcome_of(r.get("outcome"))
     cat, sev = kind(r.get("action"))
@@ -2980,7 +2991,7 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
         rec["crew"]["member"] = _member(rec["crew"]["member"])[0]
     if out in ("failed", "blocked") and SEVERITIES.index(sev) < SEVERITIES.index("warning"):
         rec["severity"] = "warning"
-    return _utf8(rec)
+    return _escaped(rec, rx)
 
 
 def team_dir() -> Path:
@@ -3364,7 +3375,7 @@ def _published_line(ln: bytes, rx) -> bytes:
     if not isinstance(r, dict):
         return _dump({"v": 1, "id": _v1_id({}, ln), "cleaned": True, "unreadable": True})
     if r.get("v") == V or _stand_in(r):
-        c = _utf8(_reclean(r, rx))
+        c = _escaped(_reclean(r, rx), rx)
         return ln if c == r and _as_written(ln, r) else _dump({**c, "cleaned": True})
     view = lift(r, ln, rx)
     shown = set(_atoms(view))
