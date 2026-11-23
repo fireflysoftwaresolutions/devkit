@@ -691,9 +691,11 @@ def _unstamped(command: str) -> str:
 def _receipt_words(receipt, cwd, agent, repo=""):
     """One observed devkit command in the target tree, with a known executable, or no supported proof.
 
-    Compound shells do not reveal which branch ran or each exit status. Only literal `cd ... && command` is
-    unambiguous here, in this repository or one of its worktrees, or in the member's repository `repo` when the stop's
-    folder is outside it (`_in_repository`). Its stderr may join its output
+    Compound shells do not reveal which branch ran or each exit status. Only a literal `cd ... && command` or
+    `cd ...; command` (or the cd on a line of its own) is unambiguous here, in this repository or one of its
+    worktrees, or in the member's repository `repo` when the stop's folder is outside it (`_in_repository`): with `;`
+    a cd that fails leaves the command in the folder it started in, so that folder must be one of them too. Its stderr
+    may join its output
     (`2>&1`); a pipe into read-only filters (`| tail -40`, the read-only classifier) still shows it ran, but
     the receipt then holds the filter's exit code, so it marks the receipt `piped` and it verifies no success. General
     command parsing still serves skill attribution; it grants no execution proof.
@@ -712,7 +714,10 @@ def _receipt_words(receipt, cwd, agent, repo=""):
         return []
     start = 0
     while start < len(parts) - 1 and parts[start][0][:1] == ["cd"] and len(parts[start][0]) == 2 and \
-            parts[start][2] == "&&" and not parts[start][1] and not parts[start][3]:
+            parts[start][2] in ("&&", ";") and not parts[start][1] and not parts[start][3]:
+        if parts[start][2] == ";" and cwd and here and not _in_repository(here, cwd, repo):
+            return _unproven(receipt, f"it ran after a `cd …;` from {core.tilde(here)}, where it goes on when the cd "
+                                      f"fails, outside this repository and its worktrees", "folder")
         here = os.path.realpath(os.path.join(here or ".", os.path.expanduser(parts[start][0][1])))
         start += 1
     for index, (words, redirs, op, inputs) in enumerate(parts[start:start + 1], start):  # the command after the cds

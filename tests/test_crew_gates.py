@@ -310,6 +310,32 @@ class CrewGateTests(GateCase):
                 found = self.proofs_with(f"cd {shlex.quote(str(folder))} && dev test")
                 self.assertEqual(self.rules(found), owed)
 
+    # A member's shell starts in the session's folder each call, so it reaches its lane's worktree with a cd in
+    # front of its proof, joined with && or with ; (or a new line). Either form counts, in the repository or one of its
+    # worktrees: with `;` a cd that fails leaves the proof in the folder it started in, so that folder must be one of
+    # them too. Any other prefix still proves nothing: it may change which program runs, or the exit code is not the
+    # proof's own.
+    def test_a_proof_whose_only_prefix_is_a_cd_into_the_lanes_checkout_counts(self):
+        tree = Path(self.tmp.name) / "worktrees" / "feat-x"
+        git(self.repo, "worktree", "add", "-q", "-b", "feat/x", str(tree))
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        git(other, "init", "-q", "-b", "main")
+        at, away = shlex.quote(str(tree)), shlex.quote(str(other))
+        for command, owed in ((f"cd {at} && dev test run tests/test_calc.py", []),
+                              (f"cd {at}; dev test run tests/test_calc.py", []),
+                              (f"cd {at}\ndev test", []),
+                              (f"cd {at}; cd lib && dev test", []),
+                              ("export PATH=/tmp/bin:$PATH; dev test", [("proofs", "dev test")]),
+                              ("true; dev test", [("proofs", "dev test")]),
+                              (f"cd {away}; dev test", [("proofs", "dev test")]),
+                              (f"cd {away}; cd {at}; dev test", [("proofs", "dev test")]),
+                              (f"cd {at} || dev test", [("proofs", "dev test")])):
+            with self.subTest(command=command):
+                (tree / "lib").mkdir(exist_ok=True)
+                self.tx = Transcript(Path(self.tmp.name) / f"agent-cd-{abs(hash(command))}.jsonl")
+                self.assertEqual(self.rules(self.proofs_with(command)), owed)
+
     def test_a_proof_piped_into_a_read_only_filter_counts_as_run(self):
         for command in ("dev test 2>&1 | tail -40", "dev test | head -5", "dev test 2>&1 | grep -c passed"):
             with self.subTest(command=command):
