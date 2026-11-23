@@ -4338,17 +4338,60 @@ def _undone_reads(f, entries, undone, lines) -> set:
     return need - gives
 
 
-def _undone_names(f, r) -> set:
-    """The names whose meaning the restore `r` (_rebuild_helpers) changes: each that a helper it rebuilt names now and
-    not at the base, or the other way round; the name of each function it rebuilt whose parameters changed; and what
-    the helpers the change adds give (their names, a class's members, the attributes they set) when a rebuilt helper
-    names them only now, or reaches them through other added helpers: without the change it no longer makes or calls
-    them. A helper it put back after the change removed it changes none: it comes back as it was. A name an import
-    binds in the rebuilt module means the same with and without the change, and is none."""
+_PY_DYNAMIC = {"setattr", "exec", "eval", "globals", "vars", "locals", "namedtuple", "make_dataclass", "new_class",
+               "NamedTuple", "TypedDict", "Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "SimpleNamespace"}
+_JS_DYNAMIC = re.compile(r"\bObject\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf|create|"
+                         r"fromEntries)\b|\bReflect\s*\.|\beval\s*\(|\bnew\s+Function\b|\]\s*=(?![=>])|"
+                         r"(?:[=(,:?\[]|=>|\breturn)\s*class\b")
+
+
+def _py_dynamic(node) -> bool:
+    """Whether Python code sets members from strings or expressions, so what it gives cannot be read off its names:
+    setattr, type() with three arguments, exec or eval, globals(), vars() or locals(), a __dict__ or __setattr__, a
+    class or namespace whose members are named in strings or keywords (namedtuple, make_dataclass, an Enum call,
+    SimpleNamespace), or a store into a subscript (x[key] = ...)."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            called = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+            if called in _PY_DYNAMIC or called == "type" and len(n.args) == 3:
+                return True
+        elif isinstance(n, ast.Attribute) and n.attr in ("__dict__", "__setattr__") or \
+                isinstance(n, ast.Subscript) and not isinstance(n.ctx, ast.Load):
+            return True
+    return False
+
+
+def _js_dynamic(text) -> bool:
+    """Whether JS/TS code sets members from strings or expressions: a class expression (globalThis.Neu = class {...},
+    { Neu: class {...} }), Object.assign, Object.defineProperty and their kind, Reflect, eval or new Function, or a
+    store into a computed member (x[key] = ...)."""
+    return bool(_JS_DYNAMIC.search(_js_mask(text)))
+
+
+def _undone_names(f, r) -> tuple:
+    """(the names whose meaning the restore `r` (_rebuild_helpers) changes, the keys of the helpers it rebuilt whose
+    meaning cannot be told). The names: each that a helper it rebuilt names now and not at the base, or the other way
+    round; the name of each function it rebuilt whose parameters changed; and what the code the change adds gives (its
+    names, a class's members, the attributes it sets) when a rebuilt helper names it only now, or reaches it through
+    other added code: without the change it no longer makes or calls it. Added code: a helper the change adds, and a
+    statement outside the tests, helpers and imports that it adds or edits (r["scope"]). The keys: the rebuilt
+    helpers that reach added code whose members are set from strings or expressions (_py_dynamic, _js_dynamic; such
+    a statement always): what that code gives cannot be named. A helper it put back after the change removed it
+    changes none: it comes back as it was. A name an import binds in the rebuilt module means the same with and
+    without the change, and is none."""
     py = _lang(f) == "py"
     ob, nb = {k: x for k, *x in r["old"]}, {k: x for k, *x in r["now"]}
     old, now = r["lines"]
-    out, reach = set(), set()
+    added = []  # (key, or None for a statement; the names it reads; what it gives; whether its members are dynamic)
+    for k in [k for k in r["added"] if k in nb]:
+        s, e, kind, node = nb[k]
+        if py:
+            added.append((k, _py_names(node, kind), _py_gives(node, kind), _py_dynamic(node)))
+        else:
+            text = "".join(now[s - 1:e])
+            added.append((k, _js_names(text), _js_gives(text) | {k[0], k[1]} - {"", "<head>"}, _js_dynamic(text)))
+    added += [(None, words, set(), True) for words in r["scope"]]
+    out, dynamic = set(), set()
     for k in [k for k in r["undone"] if k in nb]:
         (a, b, kind_a, node_a), (s, e, kind, node) = ob[k], nb[k]
         if py:
@@ -4362,42 +4405,42 @@ def _undone_names(f, r) -> set:
             if _js_params(was) != _js_params(is_):
                 out.add(k[1])
         out |= before ^ after
-        reach |= after - before
-    todo = [k for k in r["added"] if k in nb]
-    while True:  # the added helpers those names reach, one step or more, and the members of an added class reached
-        hit = [k for k in todo if k[1] in reach or k[0] and k[0] in reach]
-        if not hit:
-            break
-        for k in hit:
-            todo.remove(k)
-            s, e, kind, node = nb[k]
-            if py:
-                reach |= _py_names(node, kind)
-                out |= _py_gives(node, kind)
-            else:
-                text = "".join(now[s - 1:e])
-                reach |= _js_names(text)
-                out |= _js_gives(text) | {k[0], k[1]} - {"", "<head>"}
-    return out - (_py_imported if py else _js_imported)(r["text"] or "".join(now))
+        reach, todo = after - before, list(added)
+        while True:  # the added code those names reach, one step or more, and the members of an added class reached
+            hit = [x for x in todo if (x[1] & reach if x[0] is None else
+                                       x[0][1] in reach or x[0][0] and x[0][0] in reach)]
+            if not hit:
+                break
+            for x in hit:
+                todo.remove(x)
+                reach |= x[1]
+                out |= x[2]
+                if x[3]:
+                    dynamic.add(k)
+    return out - (_py_imported if py else _js_imported)(r["text"] or "".join(now)), dynamic
 
 
 def _reads_undone(f, r) -> set:
     """The tests of test module `f` that cannot be proven although its helpers came back as their base text: those
     whose own text, or a helper the change adds that they reach, names a word whose meaning the restore `r` changes
-    (_undone_names). Without the change such a test fails on that name, a name only the change's helper edit gives,
-    whatever the rest of the change does. A test reaches an added helper it names, every added member of a class it
-    names, and every one the test framework calls for it (_framework_reach). -> their names, as _units gives them."""
-    names = _undone_names(f, r)
-    if not names:
+    (_undone_names), and those that reach a rebuilt helper whose meaning cannot be told. Without the change such a
+    test fails on that name, a name only the change's helper edit gives, whatever the rest of the change does. A test
+    reaches a helper it names, every member of a class it names, and every one the test framework calls for it
+    (_framework_reach). -> their names, as _units gives them."""
+    names, dynamic = _undone_names(f, r)
+    if not names and not dynamic:
         return set()
     py, now = _lang(f) == "py", r["lines"][1]
     nb = {k: x for k, *x in r["now"]}
 
     def words(s, e, kind, node, outside=False):
         return _py_names(node, kind, outside) if py else _js_names("".join(now[s - 1:e]))
-    added = [(k, words(*nb[k]), _framework_reach(_lang(f), now, k[1], nb[k][0], nb[k][1],
-                                                 k[0] if py and nb.get(("", k[0], 0), (0, 0, ""))[2] == "tests" else ""))
-             for k in r["added"]]
+
+    def called(k):
+        return _framework_reach(_lang(f), now, k[1], nb[k][0], nb[k][1],
+                                k[0] if py and nb.get(("", k[0], 0), (0, 0, ""))[2] == "tests" else "")
+    added = [(k, words(*nb[k]), called(k)) for k in r["added"]]
+    unknown = [(k, called(k)) for k in dynamic]
     out = set()
     for (cls, name, _), s, e, kind, node in r["now"]:
         if kind != "fixed":
@@ -4412,7 +4455,8 @@ def _reads_undone(f, r) -> set:
             for a in hit:
                 seen |= a[1]
                 todo.remove(a)
-        if seen & names:
+        if seen & names or any(k[1] in seen or k[0] and k[0] in seen or reach == "every" or
+                               reach == "class" and k[0] == cls for k, reach in unknown):
             out.add(f"{cls}.{name}" if cls else name)
     return out
 

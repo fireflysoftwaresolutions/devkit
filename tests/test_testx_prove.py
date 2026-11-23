@@ -629,6 +629,55 @@ class NamesakeTestTests(unittest.TestCase):
                       support_text("tests/a.test.js", before, after.replace("g() {\n  return 1;", "g() {\n  return 2 - 1;")))
 
 
+class DynamicMemberTests(unittest.TestCase):
+    # a rebuilt helper that now reaches code the change adds whose members are set from strings or expressions
+    # (setattr, type() with a dict, a class expression, Object.assign, Object.defineProperty, a statement outside the
+    # helpers) makes what it gives unknown: a test that reaches that helper, by its name or because the framework
+    # calls it, cannot be proven
+    def test_a_test_that_reaches_an_added_class_built_from_strings_or_expressions_cannot_be_proven(self):
+        old = "import unittest\n\n\nclass Old:\n    pass\n\n\ndef make():\n    return Old()\n\n\n"
+        extra = "\n    def test_extra(self):\n        self.assertEqual(make().extra(), 1)\n"
+        py = {
+            "a setattr in a decorator": "def with_extra(cls):\n    setattr(cls, 'extra', lambda self: 1)\n    return cls"
+                                        "\n\n\n@with_extra\nclass New:\n    pass\n\n\n",
+            "type() with a dict of members": "New = type('New', (), {'extra': lambda self: 1})\n\n\n",
+        }
+        for name, added in py.items():
+            with self.subTest(name):
+                after = old.replace("def make", added + "def make").replace("return Old()", "return New()") + PY_TEST + extra
+                r = testx._rebuild_helpers("tests/test_a.py", old + PY_TEST, after)
+                self.assertEqual({"T.test_extra"}, testx._reads_undone("tests/test_a.py", r))
+        old = "class Old {}\n\nfunction make() {\n  return new Old();\n}\n\n"
+        js = {
+            "a class expression set on globalThis": (
+                "globalThis.Neu = class {\n  extra() {\n    return 1;\n  }\n};\n\n", "globalThis.Neu"),
+            "a class passed to Object.assign": (
+                "const reg = {};\nObject.assign(reg, { Neu: class {\n  extra() {\n    return 1;\n  }\n} });\n\n", "reg.Neu"),
+            "a member defined by Object.defineProperty": (
+                "const Neu = class {};\nObject.defineProperty(Neu.prototype, 'extra', { value() { return 1; } });\n\n", "Neu"),
+            "a class expression held in a const": ("const Neu = class {\n  extra() {\n    return 1;\n  }\n};\n\n", "Neu"),
+        }
+        for name, (added, made) in js.items():
+            with self.subTest(name):
+                after = old.replace("function make", added + "function make").replace("new Old()", f"new {made}()") + \
+                    JS_TEST + "test('extra', () => { expect(make().extra()).toBe(1); });\n"
+                r = testx._rebuild_helpers("tests/a.test.js", old + JS_TEST, after)
+                self.assertEqual({"extra"}, testx._reads_undone("tests/a.test.js", r))
+        # a hook the framework calls reaches every test it runs for
+        before = "class Old {}\n\nconst state = {};\n\nbeforeEach(() => {\n  state.obj = new Old();\n});\n\n" + JS_TEST
+        after = before.replace("const state", "globalThis.Neu = class {\n  extra() {\n    return 1;\n  }\n};\n\n"
+                                              "const state").replace("new Old()", "new globalThis.Neu()") + \
+            "test('extra', () => { expect(state.obj.extra()).toBe(1); });\n"
+        r = testx._rebuild_helpers("tests/a.test.js", before, after)
+        self.assertEqual({"a", "extra"}, testx._reads_undone("tests/a.test.js", r))
+        # an added helper whose members are all declared still lets a test that reads none of them prove
+        before = "import unittest\n\n\ndef h(x):\n    return str(x)\n\n\n" + PY_TEST
+        after = before.replace("def h", "def quote(x):\n    return repr(x)\n\n\ndef h").replace("str(x)", "quote(x)") + \
+            "\n    def test_q(self):\n        self.assertEqual(h('a'), \"'a'\")\n"
+        self.assertEqual(set(), testx._reads_undone("tests/test_a.py", testx._rebuild_helpers("tests/test_a.py", before,
+                                                                                             after)))
+
+
 PY_SHARED = """
 import unittest
 
