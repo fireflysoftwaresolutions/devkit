@@ -118,6 +118,12 @@ class DomainErrorsAreRefusals(SeamCase):
                       "dev bug report --title ", err)
         self.assertEqual(path.read_text(), before)
 
+    def test_a_refused_record_write_never_asks_to_send_the_record_along(self):
+        # the record can hold private notes: the message stops at leaving the file, and the fix names a report whose
+        # title holds no file
+        rc, out, err = self.run_raising(work.RecordLossError(self.root / "T-1.md", ["## Notes kept by hand"]))
+        self.assertIn("otherwise devkit misread the record: leave the file as it is.\n  fix: ", err)
+
     def test_impeccable_refusal_exits_2(self):
         self.assertRefused(self.run_raising(impeccable.Refused("the engine is not installed: dev install --only "
                                                                "skills")),

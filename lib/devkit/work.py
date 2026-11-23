@@ -187,8 +187,7 @@ class RecordLossError(core.Refusal, ValueError):
         super().__init__(
             f"refused to write {path}: it would drop {len(self.lost)} line(s) of the record that this change does not "
             f"edit, first “{self.lost[0][:100]}”. Nothing was written. If the file changed after devkit read it, run "
-            f"the command again; otherwise devkit misread the record: leave the file as it is and report the bug with "
-            f"it.",
+            f"the command again; otherwise devkit misread the record: leave the file as it is.",
             fix="run the command again; if it refuses the same way, leave the file as it is and run dev bug report "
                 "--title \"a write of a work item or plan would drop lines it does not edit\"")
 
