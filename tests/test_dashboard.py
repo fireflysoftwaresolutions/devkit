@@ -2285,8 +2285,8 @@ class PageBehaviorTests(unittest.TestCase):
 
 @unittest.skipUnless(CHROME, NO_CHROME)
 class NamesAndUnknownFiguresTests(unittest.TestCase):
-    """A control is named first by the text it shows, and a pull request count the page could not read shows the dash
-    and never 0."""
+    """A control is named first by the text it shows, a pull request count the page could not read shows the dash and
+    never 0, and a long hostname never pushes the machine id out of sight."""
 
     setUpClass = PageBehaviorTests.__dict__["setUpClass"]
     tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
@@ -2329,6 +2329,20 @@ class NamesAndUnknownFiguresTests(unittest.TestCase):
             self.assertIn("Pull requests not known", out["panel"], width)
             self.assertNotIn("No open pull requests", out["panel"], width)
             self.assertTrue(out["modal"].startswith("Open PRs: not known Pull requests not known"), (width, out["modal"]))
+
+    # At 390 px a 40-character hostname takes the ellipsis: the machine id beside it stays whole and clear of the "you"
+    # badge, in Who is on it and on the person's card in Team
+    def test_a_long_hostname_never_pushes_the_machine_id_onto_the_you_badge_on_a_phone(self):
+        def long_host(d):
+            next(x for x in d["people"] if x["who"] == d["who"])["label"] = "studio-mac-pro-of-the-lending-team-4321x"
+        steps = """const row = el => { const n = el.querySelector(".ell"), id = el.querySelector(".mid"), you = el.querySelector(".tag"), b = x => x.getBoundingClientRect();
+                return {cut: n.scrollWidth > n.clientWidth, id: [id.textContent, id.scrollWidth <= id.clientWidth], order: [b(n).right <= b(id).left, b(id).right <= b(you).left],
+                        inside: b(you).right <= b(el).right + 0.5}; };
+            out.who = row($$(".prows .pw").find(p => p.querySelector(".tag")));
+            await go("#/team"); out.card = row($$(".pc-n h3").find(h => h.querySelector(".tag")));"""
+        out = self.probe(steps, 390, "#/initiatives/lending", page=self.variant(long_host))
+        for where in ("who", "card"):
+            self.assertEqual(out[where], {"cut": True, "id": [ME.split("@")[1], True], "order": [True, True], "inside": True}, where)
 
 
 @unittest.skipUnless(CHROME, NO_CHROME)

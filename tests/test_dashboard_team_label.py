@@ -54,7 +54,7 @@ class TeamLabelTests(unittest.TestCase):
         self.assertEqual(out["title"], "bob@mini")
         self.assertTrue(out["pline"].startswith(BOB_ID), out["pline"])
 
-    # on a phone the name keeps its room: the machine id gives way first, and nothing scrolls sideways
+    # on a phone a short name and the machine id both show whole, and nothing scrolls sideways
     def test_on_a_phone_the_name_keeps_its_room_and_the_page_never_scrolls_sideways(self):
         out = self.probe("""const bob = $$(".pcard3").find(c => $("h3 .rl", c) && text($("h3 .rl", c)).startsWith("bob@"));
             const name = $("h3 .rl", bob), id = $("h3 .mid", bob);
