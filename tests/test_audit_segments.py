@@ -619,6 +619,32 @@ class ResealControlTests(SegmentCase):
         self.assertTrue(res["ok"], res["first"])
 
 
+class WrittenControlTests(SegmentCase):
+    # the same patterns when devkit first writes the record
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def test_an_embargo_set_under_a_pattern_that_matches_its_branch_is_found(self):
+        from devkit import branches
+        sha = "b" * 40
+        self.policy({"redact": {"extra": ["fix/unshipped", "set: ", "b{40}"]}})
+        audit.record("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok", project="acme/app",
+                     branch="fix/unshipped", commit=sha)
+        branches._TRAIL_CACHE.clear()
+        self.assertEqual(branches.embargo_trail("acme/app").get("fix/unshipped", {}).get("commits"), [sha])
+        other = audit.record("dev.task", "pushed fix/unshipped")
+        self.assertNotIn("fix/unshipped", other["target"])  # every other record is cleaned as before
+
+    def test_a_reseal_written_under_a_pattern_that_matches_map_checks_still_verifies(self):
+        self.scene()
+        self.policy({"redact": {"extra": ["sha256:[0-9a-f]{64}", "[0-9A-Z]{26}"]}})
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertTrue(res["ok"], res)
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+
 class CommandTests(SegmentCase):
     def test_dev_audit_parses_reseal_and_apply(self):
         from devkit import cli

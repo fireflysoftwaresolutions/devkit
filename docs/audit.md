@@ -332,10 +332,8 @@ it. An agent's call is refused and recorded as `audit.reseal` blocked.
 3. It cleans each record with today's rules and chains the records of each file again from the first change. A
    segment's first record keeps its link to the old end of the segment before it; verify accepts that link only
    through a reseal map that an `audit.reseal` record backs. It never changes the fields devkit's own checks read
-   back, even when a pattern of `audit.redact.extra` matches them: a `git.embargo` record's `branch`, `target`,
-   `detail`, `project`, and `evidence.commit`, an `audit.reseal` record's `ref.id` and `evidence.check`, and every
-   field of an `audit.prune` record. A pattern in the team policy, which any teammate can commit, so cannot lift an
-   embargo or unhook the chain.
+   back, even when a pattern of `audit.redact.extra` matches them (see [Export and forwarding](#export-and-forwarding)):
+   a pattern in the team policy, which any teammate can commit, so cannot lift an embargo or unhook the chain.
 4. It rewrites this machine's copy in the handoff repository to match, with the map, and commits it.
 5. It records `audit.reseal` with the map's SHA-256 (`evidence.check`), then closes and publishes the segment that
    holds that record, so every machine can check the map.
@@ -649,7 +647,11 @@ To send every new record to another system as it is written, set `audit.forward`
 The daily summaries of `dev.sync` and handoff pushes at level `changes` are forwarded too, when they are written.
 
 `audit.redact.extra` adds your own regular expressions to the redactor, for secrets that only your team uses. A team
-policy can add patterns, never remove them.
+policy can add patterns, never remove them. These patterns never apply to the fields devkit's own checks read back
+from the trail, when a record is written or re-sealed: a `git.embargo` record's `branch`, `target`, `detail`,
+`project`, and `evidence.commit`, an `audit.reseal` record's `ref.id` and `evidence.check`, and every field of an
+`audit.prune` record. The built-in rules still redact them when the record is written. An embargo's reason is in the
+handoff note in plain text anyway.
 
 See also [Teams and machines](teams.md), [Configuration › Jobs and audit](configuration.md#jobs-and-audit), and
 [Scheduled jobs and the audit trail](jobs-and-audit.md).

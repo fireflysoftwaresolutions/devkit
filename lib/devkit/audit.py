@@ -2135,6 +2135,39 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
+# the fields devkit's own controls read back from stored records: the embargo check (branches.embargo_trails), which
+# reseal maps a record backs (verify and prune), and where a pruned chain starts (verify). audit.redact.extra never
+# cleans them, when a record is written (build) or re-sealed (_keep_controls): that list includes the team policy,
+# which any teammate can commit, and a pattern must not lift an embargo or unhook the chain's anchors. The built-in
+# rules still clean them when the record is written. None: every field of the record.
+_CONTROLS = {"git.embargo": ("branch", "target", "detail", "project", "evidence.commit"),
+             "audit.reseal": ("ref.id", "evidence.check"), "audit.prune": None}
+
+
+def _rules_for(action: str, field: str, rx) -> list:
+    """The audit.redact.extra rules a field of a new record is cleaned with: none for a field _CONTROLS names."""
+    fields = _CONTROLS.get(action, ())
+    return [] if fields is None or field in fields else rx
+
+
+def _keep_controls(stored: dict, clean: dict) -> dict:
+    """`clean` with the fields devkit's controls read put back as `stored` holds them (_CONTROLS)."""
+    action = stored.get("action")
+    if action not in _CONTROLS:
+        return clean
+    if _CONTROLS[action] is None:
+        return dict(stored)
+    out = dict(clean)
+    for f in _CONTROLS[action]:
+        group, _, key = f.partition(".")
+        if not key:
+            if group in stored:
+                out[group] = stored[group]
+        elif isinstance(stored.get(group), dict) and key in stored[group]:
+            out[group] = {**(out.get(group) if isinstance(out.get(group), dict) else {}), key: stored[group][key]}
+    return out
+
+
 def build(action: str, target="", detail="", outcome="ok", extra: dict = None, cfg: dict = None,
           now: float = None) -> dict:
     """One v2 record, without its chain fields (prev, hash)."""
@@ -2150,11 +2183,13 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     out, code, raw = outcome_of(outcome)
     cat, sev = kind(action)
     about = {"tool": extra.get("tool"), "irreversible": extra.get("irreversible"), "rule": extra.get("rule")}
-    rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": str(action)[:80],
-           "category": cat, "severity": sev, "target": _field(str(action), "target", target or "", rx, about)[:300],
-           "detail": _field(str(action), "detail", detail or "", rx, about)[:600], "outcome": out}
+    act = str(action)
+    rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": act[:80],
+           "category": cat, "severity": sev,
+           "target": _field(act, "target", target or "", _rules_for(act, "target", rx), about)[:300],
+           "detail": _field(act, "detail", detail or "", _rules_for(act, "detail", rx), about)[:600], "outcome": out}
     for k, v in extra.items():
-        _place(rec, k, v, rx)
+        _place(rec, k, v, _rules_for(act, EXTRAS.get(k) or k, rx))
     if str(action) in DECISION_ACTIONS:
         labels = _labels(options, rx)
         if labels:
@@ -2167,7 +2202,8 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     where = _context(str((rec.get("crew") or {}).get("lane") or ""), native=True)
     for k in ("project", "branch", "run", "step"):  # the run by its id, the step by its number: never their names
         if where.get(k) and not rec.get(k):
-            rec[k] = _run(where[k]) if k == "run" else _step(where[k]) if k == "step" else _clean(where[k], rx)
+            rec[k] = _run(where[k]) if k == "run" else _step(where[k]) if k == "step" else \
+                _clean(where[k], _rules_for(act, k, rx))
     found = where.get("crew") or {}
     if found == UNKNOWN_CREW and rec.get("crew"):
         found = {}  # a record that names its crew member keeps it: only who made the record is unknown
@@ -4098,32 +4134,6 @@ def config_report(now: float = None) -> dict:
 
 RESEAL_AGENT = ("dev audit reseal --apply rewrites the stored audit trail: run it from your own terminal, not an "
                 "agent's session")
-
-# the fields devkit's own controls read back from stored records: the embargo check (branches.embargo_trails), which
-# reseal maps a record backs (verify and prune), and where a pruned chain starts (verify). A reseal never rewrites
-# them, whatever audit.redact.extra matches: that list includes the team policy, which any teammate can commit, and
-# a pattern must not lift an embargo or unhook the chain's anchors. None: every field of the record.
-_CONTROLS = {"git.embargo": ("branch", "target", "detail", "project", "evidence.commit"),
-             "audit.reseal": ("ref.id", "evidence.check"), "audit.prune": None}
-
-
-def _keep_controls(stored: dict, clean: dict) -> dict:
-    """`clean` with the fields devkit's controls read put back as `stored` holds them (_CONTROLS)."""
-    action = stored.get("action")
-    if action not in _CONTROLS:
-        return clean
-    if _CONTROLS[action] is None:
-        return dict(stored)
-    out = dict(clean)
-    for f in _CONTROLS[action]:
-        group, _, key = f.partition(".")
-        if not key:
-            if group in stored:
-                out[group] = stored[group]
-        elif isinstance(stored.get(group), dict) and key in stored[group]:
-            out[group] = {**(out.get(group) if isinstance(out.get(group), dict) else {}), key: stored[group][key]}
-    return out
-
 
 def _reclean_v1(r: dict, rx) -> dict:
     """A v1 line as today's rules store its text, in its own shape: what lift shows of it, kept on disk."""
