@@ -190,7 +190,7 @@
         "scratchpad/**",
         ".tmp/**"
       ],
-      "content": "\\bfrom\\s+['\"](?:svelte(?:/[a-z-]+)?|@sveltejs/kit(?:/[a-z-]+)?|\\$app/[a-z]+)['\"]",
+      "content": "\\bfrom\\s+['\"](?:svelte(?:/[a-z-]+)*|@sveltejs/kit(?:/[a-z-]+)*|\\$app/[a-z]+)['\"]",
       "skills": {
         "claude": [
           "svelte-core-bestpractices"
@@ -345,6 +345,7 @@
         "*.swift",
         "*.kt",
         "*.kts",
+        "*.gradle",
         "*.java"
       ],
       "content_exclude": [
@@ -519,7 +520,7 @@
       "files": [
         "Cargo.toml"
       ],
-      "content": "(?m:^\\s*(?:axum|actix-web|rocket|poem|warp|salvo|tonic|sqlx|diesel|sea-orm|tokio-postgres|deadpool-postgres)\\s*=)",
+      "content": "(?m:^\\s*(?:axum|actix-web|rocket|poem|warp|salvo|tonic|sqlx|diesel|sea-orm|tokio-postgres|deadpool-postgres)\\s*=|^\\s*\\[[^\\]\\n]*dependencies\\.(?:axum|actix-web|rocket|poem|warp|salvo|tonic|sqlx|diesel|sea-orm|tokio-postgres|deadpool-postgres)\\s*\\])",
       "skills": {
         "claude": [
           "backend"
@@ -575,6 +576,7 @@
         "prisma migrate",
         "dotnet ef",
         "rails db:migrate",
+        "rake db:migrate",
         "sqlx migrate",
         "diesel migration",
         "goose up",

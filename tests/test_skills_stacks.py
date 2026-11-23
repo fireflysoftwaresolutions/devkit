@@ -31,6 +31,7 @@ STACKS = {
         "svelte.config.js": "import adapter from '@sveltejs/adapter-auto';\nexport default { kit: { adapter: adapter() } };\n",
         "src/routes/+page.ts": "import { error } from '@sveltejs/kit';\nexport const load = () => { error(404); };\n",
         "src/lib/format.ts": "export const format = (n: number) => n.toFixed(2);\n",
+        "src/lib/viewport.ts": "import { innerWidth } from 'svelte/reactivity/window';\nexport const wide = () => innerWidth.current > 800;\n",
     },
     "next": {
         "next.config.ts": "const nextConfig = { reactStrictMode: true };\nexport default nextConfig;\n",
@@ -70,6 +71,7 @@ STACKS = {
         "src/money.rs": "pub struct Money { pub cents: i64 }\n",
         "migrations/20261122093000_init.sql": "create table orders (id bigint primary key);\n",
         "tools/cli/Cargo.toml": '[package]\nname = "cli"\n\n[dependencies]\nclap = "4"\n',
+        "services/api/Cargo.toml": '[package]\nname = "api"\n\n[dependencies.axum]\nversion = "0.8"\nfeatures = ["macros"]\n',
     },
     "ruby": {
         "Gemfile": 'source "https://rubygems.org"\ngem "rails", "~> 8.1"\ngem "puma"\n',
@@ -111,6 +113,8 @@ STACKS = {
         "app/src/main/java/acme/ui/Home.kt": "package acme.ui\n\nimport androidx.compose.material3.Text\n",
         "app/build.gradle.kts": "plugins {\n    id(\"com.android.application\")\n}\n",
         "server/build.gradle.kts": "plugins {\n    kotlin(\"jvm\")\n}\n",
+        "legacy/build.gradle": "plugins {\n    id 'com.android.application'\n}\n",
+        "shared/build.gradle": "plugins {\n    id 'java-library'\n}\n",
         "server/src/main/kotlin/acme/Api.kt": "package acme\n\nimport org.springframework.web.bind.annotation.RestController\n",
     },
 }
@@ -130,6 +134,7 @@ EXPECT = {
         "svelte.config.js": ["svelte"],
         "src/routes/+page.ts": ["svelte"],
         "src/lib/format.ts": [],
+        "src/lib/viewport.ts": ["svelte"],
     },
     "next": {
         "next.config.ts": ["nextjs"],
@@ -159,6 +164,7 @@ EXPECT = {
         "src/money.rs": [],
         "migrations/20261122093000_init.sql": ["database"],
         "tools/cli/Cargo.toml": [],
+        "services/api/Cargo.toml": ["rust"],
     },
     "ruby": {
         "Gemfile": ["ruby"],
@@ -197,6 +203,8 @@ EXPECT = {
         "app/src/main/java/acme/ui/Home.kt": ["mobile"],
         "app/build.gradle.kts": ["mobile"],
         "server/build.gradle.kts": [],
+        "legacy/build.gradle": ["mobile"],
+        "shared/build.gradle": [],
         "server/src/main/kotlin/acme/Api.kt": ["spring"],
     },
 }
@@ -234,7 +242,8 @@ class FrontendFrameworkRules(StackRuleCase):
     def test_vue_rule_fires_on_vue_code_only(self):
         self.assert_stack("vue")
 
-    # Svelte components, rune modules (.svelte.ts), SvelteKit modules and the config need the Svelte skill
+    # Svelte components, rune modules (.svelte.ts), SvelteKit modules, modules that import a nested Svelte entry
+    # (svelte/reactivity/window) and the config need the Svelte skill
     def test_svelte_rule_fires_on_svelte_code_only(self):
         self.assert_stack("svelte")
 
@@ -268,7 +277,8 @@ class BackendStackRules(StackRuleCase):
     def test_csharp_controllers_match_by_their_base_class_not_their_name(self):
         self.assert_stack("csharp")
 
-    # a Rust service's manifest and its axum or actix routes need the backend skill; a CLI's manifest does not
+    # a Rust service's manifest, with its crates as keys or as tables ([dependencies.axum]), and its axum or actix
+    # routes need the backend skill; a CLI's manifest does not
     def test_rust_rules_fire_on_service_code(self):
         self.assert_stack("rust")
 
@@ -296,7 +306,7 @@ class BackendStackRules(StackRuleCase):
 
     # applying migrations is database work in every stack
     def test_migration_commands_need_the_database_rule(self):
-        for cmd in ("dotnet ef migrations add Init", "bin/rails db:migrate", "sqlx migrate run",
+        for cmd in ("dotnet ef migrations add Init", "bin/rails db:migrate", "bundle exec rake db:migrate", "sqlx migrate run",
                     "diesel migration run", "goose up", "GOOSE_DRIVER=postgres goose status", "goose create add_orders sql",
                     "goose postgres \"user=app dbname=orders\" up", "goose -dir db/migrations sqlite3 ./app.db down"):
             with self.subTest(cmd=cmd):
@@ -315,8 +325,8 @@ class MobileRules(StackRuleCase):
     def test_ios_rules_fire_on_app_code_only(self):
         self.assert_stack("ios")
 
-    # Android manifests, app code and the app module's build file need the mobile skill, the manifest the
-    # permissions skill too; a JVM server's build file and its Spring code do not
+    # Android manifests, app code and the app module's build file, in Kotlin or Groovy, need the mobile skill, the
+    # manifest the permissions skill too; a JVM server's or library's build file and its Spring code do not
     def test_android_rules_fire_on_app_code_only(self):
         self.assert_stack("android")
 
