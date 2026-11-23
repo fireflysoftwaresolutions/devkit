@@ -63,6 +63,7 @@ STACKS = {
         "src/cache.js": "const v = m.mapGet(key);\nconst verbs = [httpGet, httpPost];\n",
         "src/game.ts": "class Level<ApplicationController> { }\nscene.mapGroup('enemies');\n",
         "tools/bind.py": "def bind(c: controller):\n    return c\n",
+        "tools/routes.py": "class Routes(object):\n    Controller = None\n",
     },
     "csharp": {
         "Assets/Scripts/PlayerController.cs": "using UnityEngine;\n\npublic class PlayerController : MonoBehaviour\n{\n"
@@ -72,6 +73,7 @@ STACKS = {
                                              "\n{\n    public IActionResult Index() => View();\n}\n",
         "Web/Controllers/CartController.cs": "public sealed class CartController(ICart cart) : ControllerBase\n{\n"
                                              "    public IActionResult Get() => Ok(cart.Lines);\n}\n",
+        "Web/Controllers/ShopController.cs": "public class ShopController\n    : Controller\n{\n}\n",
     },
     "rust": {
         "Cargo.toml": '[package]\nname = "orders"\n\n[dependencies]\naxum = "0.8"\ntokio = { version = "1", '
@@ -180,12 +182,14 @@ EXPECT = {
         "src/cache.js": [],
         "src/game.ts": [],
         "tools/bind.py": [],
+        "tools/routes.py": [],
     },
     "csharp": {
         "Assets/Scripts/PlayerController.cs": [],
         "Platforms/iOS/ViewController.cs": [],
         "Web/Controllers/HomeController.cs": ["api", "aspnetcore"],
         "Web/Controllers/CartController.cs": ["api", "aspnetcore"],
+        "Web/Controllers/ShopController.cs": ["api", "aspnetcore"],
     },
     "rust": {
         "Cargo.toml": ["rust"],
