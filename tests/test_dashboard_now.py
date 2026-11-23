@@ -776,7 +776,7 @@ class CopyToastTests(unittest.TestCase):
                 $$("button").find(b => (b.getAttribute("aria-label") || "").startsWith(label)).click(); await tick(100); return text($("#toast")); };
             out.path = await said("#/tasks?task=T-a1", "Copy path:");
             out.remote = await said("#/projects/acme/widget?tab=branches", "Copy the command that adds a remote:");
-            out.clone = await said("#/initiatives/lending?tab=projects", "Copy command (dev clone <owner/repo>)");
+            out.clone = await said("#/initiatives/lending?tab=projects", "dev clone <owner/repo> (copy command)");
             out.member = await said("#/initiatives/lending", "Copy command to add a member project:");
             out.task = await said("#/initiatives/lending", "Copy command to add a task:");""", 1440, "#/now", now=T.NOW)
         self.assertIsNone(out.get("probeError") or out.get("pageError"))

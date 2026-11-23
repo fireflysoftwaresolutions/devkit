@@ -7,7 +7,7 @@
 # board's Closed dot, the Health meters and a quota tile's share were transparent that way. These tests read every
 # name the page can build from the page template, the styles and the script (lib/devkit/web/), and check that each
 # one paints in both themes, from the sources and in headless Chromium. They also check that a control which unsets
-# its styles still shows the focus ring to keyboard users.
+# its styles still shows the focus ring to keyboard users, and that a copy button showing its command is named by it.
 # Tests carry comments, not docstrings: `dev test prove` leaves out tests with a docstring.
 # Run: python3 -m unittest tests.test_dashboard_tokens
 import re
@@ -278,6 +278,23 @@ class RankedBarFocusTests(FixturePage, unittest.TestCase):
         for where, t in out["t"].items():
             self.assertEqual((t["visible"], t["style"], t["width"]), (True, "solid", "2px"), (where, t))
             self.assertEqual(T.rgb(t["color"]), T.rgb(t["focus"]), (where, t))
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class CopyButtonNameTests(FixturePage, unittest.TestCase):
+    # WCAG 2.5.3: a copy button that shows its command (a short one: dev gc --apply on Health, dev clone <owner/repo>
+    # on an initiative's projects) has a name that starts with that command, so a person who says what they see
+    # reaches it by voice; the name still says the button copies it
+    def test_a_copy_button_that_shows_its_command_is_named_by_it_first(self):
+        out = self.probe("""out.names = [];
+            for (const hs of ["#/health", "#/initiatives/lending?tab=projects"]) { await go(hs);
+              for (const b of $$("main button.btn[aria-label]")) out.names.push([text(b), b.getAttribute("aria-label")]); }""")
+        shown = {vis: name for vis, name in out["names"] if vis.startswith("dev ")}
+        self.assertLessEqual({"dev gc --apply", "dev clone <owner/repo>"}, set(shown), out)
+        for vis, name in out["names"]:
+            self.assertTrue(name.lower().startswith(vis.lower()), (vis, name))
+        for vis, name in shown.items():
+            self.assertIn("copy", name[len(vis):].lower(), (vis, name))
 
 
 if __name__ == "__main__":
