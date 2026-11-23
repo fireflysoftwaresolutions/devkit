@@ -446,5 +446,40 @@ class CodexTextPinTests(CodexTokenCase):
         self.call("dev progress add extra")  # with the exec's own limits Codex would not apply it: as written
 
 
+
+# Files the text pin writes in folders a member can also write: never through a link planted there.
+class TextPinFileTests(TextPinCase):
+    def test_a_kept_background_record_never_writes_through_a_planted_link(self):
+        victim = self.root / "victim.txt"
+        victim.write_text("keep")
+        path = identity.background_path("s1", "toolu_9001")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(victim, path)
+        identity.keep_background({"pin_by": "text", "background": True, "session": "s1",
+                                  "tool_use_id": "toolu_9001", "ts": 1.0})
+        self.assertEqual(victim.read_text(), "keep")
+
+    def test_the_pin_folder_is_never_changed_through_a_link_swapped_in_after_its_check(self):
+        import stat
+        victim = self.root / "victim"
+        victim.mkdir(mode=0o755)
+        os.chmod(victim, 0o755)
+        folder = identity.pin_path("s1", "x").parent
+        real = os.lstat
+
+        def swap(path, *a, **k):  # an attacker swaps the checked folder for a link right after the check
+            st = real(path, *a, **k)
+            if str(path) == str(folder) and stat.S_ISDIR(st.st_mode):
+                os.rmdir(folder)
+                os.symlink(victim, folder)
+            return st
+        with mock.patch.object(os, "lstat", swap):
+            try:
+                identity.make_pin_folder("s1")
+            except OSError:
+                pass
+        self.assertEqual(stat.S_IMODE(os.stat(victim).st_mode), 0o755)
+
+
 if __name__ == "__main__":
     unittest.main()

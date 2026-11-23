@@ -684,10 +684,19 @@ def make_pin_folder(sid: str):
     folder = pin_path(sid, "x").parent
     for d in (folder.parent, folder):
         d.mkdir(parents=True, exist_ok=True, mode=0o700)
-        st = os.lstat(d)
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():  # a link or another user's folder planted there
-            raise OSError(f"the pin folder {d} is not a folder of this user's own")
-        os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only)
+        # checked and set through one descriptor opened without following a link: a link swapped in after a check
+        # never redirects the mode change
+        try:
+            fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as e:
+            raise OSError(f"the pin folder {d} is not a folder of this user's own") from e
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():  # another user's folder planted there
+                raise OSError(f"the pin folder {d} is not a folder of this user's own")
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
     return folder
 
 
@@ -1122,12 +1131,34 @@ def keep_background(entry: dict):
     if entry.get("pin_by") != "text" or not entry.get("background"):
         return
     path = background_path(str(entry.get("session") or ""), str(entry.get("tool_use_id") or ""))
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    except OSError:
+    for _ in range(2):  # a file or link already there is removed, never written through
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            try:
+                os.unlink(path)
+            except OSError:
+                return
+            continue
+        except OSError:
+            return
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(entry))
         return
-    with os.fdopen(fd, "w") as fh:
-        fh.write(json.dumps(entry))
+
+
+def _read_kept(path):
+    """A kept background record, never through a link; None when it cannot be read as one."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd) as fh:
+            e = json.loads(fh.read(1 << 20))
+    except (OSError, ValueError):
+        return None
+    return e if isinstance(e, dict) else None
 
 
 def _kept_background(sid: str, now: float) -> list:
@@ -1139,11 +1170,8 @@ def _kept_background(sid: str, now: float) -> list:
     except OSError:
         return []
     for f in files:
-        try:
-            e = json.loads(f.read_text())
-        except (OSError, ValueError):
-            continue
-        if not isinstance(e, dict) or now - float(e.get("ts") or 0) > BACKGROUND_KEEP_S:
+        e = _read_kept(f)
+        if e is None or now - float(e.get("ts") or 0) > BACKGROUND_KEEP_S:
             try:
                 f.unlink()
             except OSError:
