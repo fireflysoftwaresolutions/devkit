@@ -611,6 +611,21 @@ def _execution_receipt_words(words, receipt, cwd, repo=""):
     return normalized
 
 
+def _lane_steps(agent, session, lane, positive=False) -> list:
+    """The steps the member's lane recorded in its session's run (`dev progress step` from the lane), with a ✓
+    check when `positive`: devkit's own record of the proof. [] without a run, a lane, or a readable record."""
+    if not session or not lane:
+        return []
+    try:
+        from . import progress
+        run = progress.load_run(agent or "claude", session)
+        updates = (((run or {}).get("agents") or {}).get(lane) or {}).get("updates") or []
+    except Exception:
+        return []
+    return [u for u in updates if isinstance(u, dict) and u.get("kind") == "step"
+            and (not positive or str(u.get("check") or "").lstrip().startswith("✓"))]
+
+
 def _member_checkout(cwd, agent, session) -> str:
     """The checkout of the member's repository: its session's run's repository, as a lane's scope counts from it
     (lanescope.scope_base). In a session whose folder is ~ (Claude Desktop, a terminal opened there) the stop names
@@ -810,10 +825,12 @@ def _verification_eligible(receipt, proof):
     return True
 
 
-def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo=""):
+def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="", recorded=()):
     """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
     (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
-    member's repository (`_member_checkout`), where a proof counts too."""
+    member's repository (`_member_checkout`), where a proof counts too. `recorded`: the steps the member's lane
+    recorded in its run (`_lane_steps`), which a `dev progress step` piped into a filter proves by: the pipe hides its
+    exit code, not the step devkit keeps."""
     relevant, missed = [], None
     for receipt in receipts:
         words = _receipt_words(receipt, cwd, agent, repo)
@@ -827,6 +844,8 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="")
             kind = "dev test prove" if words[:3] == ["dev", "test", "prove"] else proof
             relevant.append((receipt, kind))
     if relevant and (not successful or _verification_eligible(*relevant[-1])):
+        return True
+    if proof == "dev progress step" and relevant and relevant[-1][0].get("piped") and recorded:
         return True
     if why is not None:
         run = f"`{proof}{PROOF_ARGS.get(proof, '')}`"
@@ -1147,6 +1166,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     edited += list(native_written)
     paths = [str(Path(f) if os.path.isabs(f) else Path(cwd or ".") / f) for f in dict.fromkeys(edited) if f]
     repo = _member_checkout(cwd, agent, session)
+    recorded = _lane_steps(agent, session, lane, successful)
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else ""
     if not top and repo and os.path.isdir(repo):
         # the stop's folder is outside every repository (a session started in ~): the member's changes, the stubs
@@ -1171,7 +1191,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                 proof_kinds = [_rel(f, top) for f in delivered]
             why = []
             if proof and _proof_owed(x, proof_kinds, inv) and not _proof_met(proof, receipts, cwd, agent, successful, why,
-                                                                        repo):
+                                                                        repo, recorded):
                 ci = " ".join(str(proof).split()) == CI_PROOF
                 how = _ci_instead(transcript_path, top, by_lead) if ci else ""
                 if how:

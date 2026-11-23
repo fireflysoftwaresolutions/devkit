@@ -496,6 +496,48 @@ class CommandProofTests(unittest.TestCase):
         self.assertFalse(gates._proof_owed({"proof": "dev docs check"}, ["lib/x.py"], []))
 
 
+class PipedStepRecordTests(GateCase):
+    # `dev progress step … | tail -5` hides its exit code behind the filter's, but the step it records is in the
+    # member's lane of the run: that record is the proof, so a positive report is not sent back to record it again.
+    # A pipe that recorded nothing, and a piped `dev test`, whose exit code is the only record, still are.
+    def setUp(self):
+        super().setUp()
+        runs = Path(self.tmp.name) / "runs"
+        runs.mkdir()
+        for p in (mock.patch.object(pg, "RUNS", runs), mock.patch.object(pg, "CALLS", Path(self.tmp.name) / "calls")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.run_file = runs / "claude-s1.json"
+
+    def lane(self, *updates):
+        self.run_file.write_text(json.dumps(
+            {"v": 2, "agent": "claude", "session": "s1", "project": self.repo.name, "goal": "fix it",
+             "agents": {"a_kid": {"persona": "Kid", "label": "Kid: fix it", "state": "running",
+                                  "updates": list(updates)}}}))
+
+    def step_proofs(self, step_command, test_command="dev test"):
+        self.write("calc.py", "def add(a, b):\n    return a + b\n")
+        self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+        self.tx.bash(test_command)
+        self.tx.bash(step_command)
+        found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1", lane="a_kid", successful=True)
+        return [f for f in found if f["rule"] == "proofs"]
+
+    def test_a_piped_step_that_the_lane_recorded_counts(self):
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        self.assertEqual(self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" 2>&1 | tail -5'), [])
+
+    def test_a_piped_step_the_lane_did_not_record_or_a_piped_test_is_sent_back(self):
+        self.lane({"ts": int(time.time()), "kind": "note", "text": "half way", "check": ""})
+        found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | head -3')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `head -3`", found[0]["evidence"])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-test-piped.jsonl")
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass"', "dev test 2>&1 | tail -40")
+        self.assertEqual(self.rules(found), [("proofs", "dev test")])
+
+
 class SessionOutsideTheRepositoryTests(GateCase):
     # The session started in the home folder (Claude Desktop, a terminal opened in ~): the member's shell starts there
     # and its stop names that folder, while its run belongs to the repository (the project id under the workspace).
