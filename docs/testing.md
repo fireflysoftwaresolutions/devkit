@@ -219,21 +219,28 @@ never touched):
 1. **It fails without your change.** devkit restores the base version of every production file you changed (the
    merge-base with `origin/<default>`, or `--since REF`) and runs the test. A changed test helper or fixture counts
    as part of the change and is restored too, and so is changed helper code inside a Python test module, outside its
-   tests, so a fix that lives only in a helper is proven. Such a helper comes back whole, without the lines the change
-   added inside it; a helper the change adds stays. When one diff hunk both edits a helper that was there and adds
-   another, the hunk is undone line by line: the added helper's lines stay and the edited lines go back. If that
-   cannot be done cleanly, the module's tests are "cannot be proven." A test that still passes is reported as "does
-   not test the change."
+   tests, so a fix that lives only in a helper is proven. Such helpers are rebuilt one by one, matched by class and
+   name, from their own text at the base, never from where git's diff puts a changed line. A changed helper comes
+   back whole as its base text, a helper the change removed comes back, and a helper the change adds stays. The result
+   is checked: if a helper does not read as its base text (two members on one line, a name a removed import gave), the
+   module's tests are "cannot be proven." A test that reads a name only the change's helper edit gives is too (an
+   attribute or name in a changed helper's lines now but not at the base, or the other way round, or a helper whose
+   parameters changed), in its own text or in a helper the change adds that it reaches. A test that still passes is
+   reported as "does not test the change."
 2. **It is stable.** It runs the test five times with your change (`--runs N` changes the count). A test that is not
    five times green is reported as flaky. This is the rule Meta's TestGen-LLM applies to generated tests.
 
 A test counts as new or changed when its own text differs from the same-named test at the base, so a test that moved,
 or that new tests were inserted around, stays unchanged. A changed helper of the test file (a method of a shared test
-class, a module function, a JavaScript function between two `it()` blocks) changes the tests that call it, directly or
-through other helpers; `setUp`, a `beforeEach`, a module setup, or an autouse fixture changes every test it runs for.
+class, a module function, a JavaScript function between two `it()` blocks) changes the tests that call it directly or
+through other helpers. A helper the test framework calls rather than a test (a test class's `setUp`, `run` or
+`__init__`, a `beforeEach`, a module setup, `load_tests`, `pytestmark`, a pytest hook, any fixture) changes every test
+it runs for.
 A helper the change adds changes only the tests that call it, such as an unchanged test that called a base class's
 method of that name. A test file whose only change is a helper that no test calls has no changed tests, so `prove`
-leaves it out (`no_changed_tests` in `--json`). A change outside every test and helper, such as an import, still
+leaves it out (`no_changed_tests` in `--json`). This holds only for a helper the change adds: a helper that was there
+and changed counts every test of the file when no test names it. A change outside every test and helper, such as an
+import, still
 counts every test of the file.
 A JavaScript test ends at the bracket that closes its `it()` or `test()` call, and `it.each` and `test.each` are one
 test named by their title template (`'adds %i and one'`, `'returns $b for $a'`), which matches each of their cases.
@@ -253,7 +260,9 @@ in another letter case is still the checkout. `dev test prove` says "proves the 
   runs the rest of its words (`timeout 30 python`, `nice -n 5 python`, `xargs python`), also when that program starts
   a shell or `env` first (`timeout 30 bash -c "python -I …"`, `xargs sh -c …`, `timeout 30 env -i python`), through
   `subprocess`'s `executable=`, and after the value of `-W`, `-X` or `--check-hash-based-pycs`. The words of `echo`
-  and `printf` start nothing, so a Python word among them is not flagged. When the proof spans more than one
+  and `printf` start nothing, so a Python word among them is not flagged, but the recorder reads the inside of `$( )`
+  and backticks, outside single quotes, as commands of their own, so `echo $(python -I …)` is flagged. When the proof
+  spans more than one
   test file, each Python test file runs once more with a record of its own, so only the files that start such a child
   lose their proof; a file that does not load on that run (state the first run left stops it) has no record.
 - A failing test whose run imported none of the changed Python files from the copy, and read none of the changed data
