@@ -2632,11 +2632,31 @@ class LivePageTests(unittest.TestCase):
 
 @unittest.skipUnless(CHROME, NO_CHROME)
 class BoardAndScopeChipTests(unittest.TestCase):
-    """A keyboard user sees the scope chip (a task's project or initiative) focused on a Tasks board card too."""
+    """The scope chip (a task's project or initiative) is a target of at least 24 by 24 px that looks as before, and a
+    keyboard user sees it focused on a Tasks board card too."""
 
     setUpClass = PageBehaviorTests.__dict__["setUpClass"]
     tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
     probe = PageBehaviorTests.probe
+
+    # WCAG 2.5.8: the chip under a task title (an initiative's Overview) and on a board card is at least 24 by 24 px at
+    # both widths, while its text keeps the meta line's size and color, with no padding or background, and a long name
+    # still ends in an ellipsis within 240 px
+    def test_a_scope_chip_is_a_24_px_target_that_keeps_its_look_and_its_ellipsis(self):
+        steps = """const chip = c => { const r = c.getBoundingClientRect(), s = getComputedStyle(c), p = getComputedStyle(c.parentElement);
+                return {w: r.width, h: r.height, look: [s.fontSize === p.fontSize, s.color === p.color, s.paddingTop, s.paddingLeft, s.backgroundColor]}; };
+            const long = c => { c.textContent = "lending-platform-".repeat(6); const r = c.getBoundingClientRect();
+                return [r.width <= 240.5, c.scrollWidth > c.clientWidth, getComputedStyle(c).textOverflow]; };
+            out.row = $$("main .irow .imeta button.sc").map(chip);
+            await go("#/tasks"); out.card = $$("main .tc .meta button.sc").map(chip); out.long = long($("main .tc .meta button.sc"));"""
+        for width in (1440, 390):
+            out = self.probe(steps, width, "#/initiatives/lending")
+            for where in ("row", "card"):
+                self.assertTrue(out[where], (width, where))
+                for c in out[where]:
+                    self.assertGreaterEqual(min(c["w"], c["h"]), 24, (width, where, c))
+                    self.assertEqual(c["look"], [True, True, "0px", "0px", "rgba(0, 0, 0, 0)"], (width, where))
+            self.assertEqual(out["long"], [True, True, "ellipsis"], width)
 
     # WCAG 2.4.7: the card's reset of its meta buttons must not take the chip's focus ring away
     def test_a_scope_chip_on_a_board_card_shows_its_focus_ring(self):
