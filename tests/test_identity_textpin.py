@@ -700,22 +700,28 @@ class TextPinOrderTests(TextPinCase):
                 self.assertEqual(rc, want, out)
         self.assertEqual(len(self.contested()), 1)
 
-    # a foreground call whose result says it went on in the background (the developer moved it there) still has a
-    # running shell: it owns this process unless that shell runs its own command
-    def test_a_later_call_whose_result_moved_it_to_the_background_contests_the_call(self):
+    # a later call whose shell may run on after its result could own this process unless that shell runs its own
+    # command: a foreground call whose result says it went on in the background (Claude Code moved it there, or the
+    # developer did), a Monitor (its command runs on after it returns), and a call whose result says it was
+    # interrupted (timed out or cut off: a shell that ignores the signal lives on)
+    def test_a_later_call_whose_shell_may_run_on_after_its_result_contests_the_call(self):
         from devkit import hooks
         self.plan_with_link()
         now = time.time()
-        lead, lead_shell = self.call("dev progress add extra")
-        retime(lead, now - 10)
-        member, member_shell = self.call("npm test", aid="a_link")
-        retime(member, now - 9.95)
-        del self.argvs[member_shell]
-        hooks._close_call(dict(member, hook_event_name="PostToolUse", tool_response={"backgroundTaskId": "b1"}))
-        self.starts[lead_shell] = now - 9.9
-        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
-        self.assertEqual(rc, 2, out)
-        self.assertEqual(len(self.contested()), 1)
+        cases = (("Bash", {"backgroundTaskId": "b1"}), ("Bash", {"backgroundedByUser": True}), ("Monitor", {}),
+                 ("Bash", {"stdout": "", "stderr": "timed out", "interrupted": True}))
+        for n, (tool, result) in enumerate(cases):
+            with self.subTest(tool=tool, result=result):
+                lead, lead_shell = self.call(f"dev progress note c{n}")
+                retime(lead, now - 10 * (n + 1))
+                member, member_shell = self.call(f"npm test -- {n}", aid="a_link", tool=tool)
+                retime(member, now - 10 * (n + 1) + 0.05)
+                del self.argvs[member_shell]
+                hooks._close_call(dict(member, hook_event_name="PostToolUse", tool_response=result))
+                self.starts[lead_shell] = now - 10 * (n + 1) + 0.1
+                rc, out = self.in_shell(lead_shell, "progress", "note", f"c{n}")
+                self.assertEqual(rc, 2, out)
+                self.assertEqual(len(self.contested()), n + 1)
 
     # the red team's decoy: a member's call replaces its shell with the tech lead's call form while that call's prompt
     # is open, and a second member call, opened after that, replaces its own shell with the first member call's form
@@ -1060,6 +1066,24 @@ class TextPinRefusalTests(TextPinCase):
         self.assertIn(f"pinned to process {forger}", json.dumps(self.contested()[0]))
 
 
+class CodexTextPinPatchTests(CodexTextPinTests):
+    # an accepted patch writes the files it names and starts no shell: a patch call that opened after the tech
+    # lead's call never stands for a later call that could own its shell
+    def test_a_later_patch_call_never_contests_the_call(self):
+        from test_codex_identity_token import SID
+        data, shell = self.call("dev progress add extra")
+        patch = {"session_id": SID, "tool_use_id": "call_patch1", "tool_name": "apply_patch", "cwd": str(self.root),
+                 "hook_event_name": "PreToolUse",
+                 "tool_input": {"input": "*** Begin Patch\n*** Add File: notes.txt\n+x\n*** End Patch\n"}}
+        pg.call_opened("codex", patch)
+        self.assertTrue(pg.call_entry(patch)["edit_paths"])
+        self.starts[shell] = pg.call_entry(patch)["ts"] + 0.1
+        self.chain, self.own_pid = [(shell, "zsh"), (CODEX, "codex")], 71999
+        rc, out = self.lead()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.added())
+
+
 class CodexTextPinRefusalTests(CodexTextPinTests):
     def test_a_codex_thread_that_names_another_caller(self):
         from test_codex_identity_token import SUB
@@ -1311,6 +1335,24 @@ class TextPinRecordFailureTests(TextPinCase):
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
         self.assertEqual(len(self.contested()), 2)
+
+    # a later call that was interrupted (its result says so) but whose shell ignored the signal and took the tech
+    # lead's call form is still that later call: the tech lead's call is contested, never taken
+    def test_a_surviving_shell_of_an_interrupted_later_call_never_passes_as_the_tech_leads(self):
+        from devkit import hooks
+        self.plan_with_link()
+        now = time.time()
+        lead, lead_shell = self.call(LEAD)
+        retime(lead, now - 200)
+        del self.argvs[lead_shell]  # its prompt is still open
+        member, forger = self.member("trap '' TERM; sleep 130; exec /bin/zsh -c x")
+        retime(member, now - 190)
+        hooks._close_call(dict(member, hook_event_name="PostToolUse",
+                               tool_response={"stdout": "", "stderr": "timed out", "interrupted": True}))
+        self.starts[forger], self.argvs[forger] = now - 189.8, claude_argv(LEAD)
+        rc, out = self.in_shell(forger, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
 
     # the same for the tech lead's background wait, whose claims read its kept record once its call closed
     def test_a_contest_of_a_background_wait_whose_marker_cannot_be_written_still_refuses_a_later_claimant(self):

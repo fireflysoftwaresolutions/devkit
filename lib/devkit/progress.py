@@ -634,11 +634,11 @@ def call_closed(data: dict, ended: str = ""):
     else had a writing shell call during a reading lane's call even when it closed first (scope_written), and the
     text pin knows which closed call may still have a running shell (identity._later_calls). `ended`: how the call
     ended when it got no clean result ("failed"; "" when it did); `exited`: a Claude Code foreground call that got its
-    clean result, whose shell is gone (a Codex command may run on after its result). A call refused at PreToolUse
-    never ran and is not kept. Under the record's lock. When the record cannot be written (its lock stays busy past
-    the wait, which any process of the user can make happen), the entry stays in the ledger marked `closed`, as a
-    call that may still own a running shell, for as long as the record would have kept it (open_calls), and the drop
-    is audited (calls.close-unrecorded)."""
+    clean result, not one interrupted, whose shell is gone (a Codex command may run on after its result). A call
+    refused at PreToolUse never ran and is not kept. Under the record's lock. When the record cannot be written (its
+    lock stays busy past the wait, which any process of the user can make happen), the entry stays in the ledger
+    marked `closed`, as a call that may still own a running shell, for as long as the record would have kept it
+    (open_calls), and the drop is audited (calls.close-unrecorded)."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
     if not (tid and sid):
         return
@@ -653,13 +653,17 @@ def call_closed(data: dict, ended: str = ""):
     now = time.time()
     background = _ran_in_background(e, data)
     ended = str(ended or "")[:40]
+    # a result that says the call was interrupted (timed out, cut off) is no clean one: its shell may outlive the signal
+    out = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
+    interrupted = bool(out.get("interrupted"))
 
     def add(doc):
         kept = [c for c in doc.get("calls") or [] if isinstance(c, dict) and now - (c.get("closed") or 0) <= SHELL_KEEP]
         doc["calls"] = (kept + [{"tool_use_id": tid, "caller": str(e.get("caller") or "main")[:80], "opened": e["ts"],
                                  "closed": round(now, 3), "cmd_sha256": str(e.get("cmd_sha256") or ""),
                                  "background": background, "ended": ended,
-                                 "exited": e.get("agent") == "claude" and not ended and not background,
+                                 "exited": e.get("agent") == "claude" and not ended and not background
+                                 and not interrupted,
                                  **({"reads": True} if e.get("reads") else {}),
                                  **({"edit_paths": e["edit_paths"]} if e.get("agent") == "codex" and
                                     e.get("edit_paths") else {})}])[-SHELL_MAX:]
