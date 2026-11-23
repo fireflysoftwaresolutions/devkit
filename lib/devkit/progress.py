@@ -2403,14 +2403,15 @@ def _yield_for(run: dict, st: dict, aid: str, now: float) -> list:
     queue (`joined`) and has no update from the lane: those yield, back to pending, first for their member's next
     lane (a front intent) and never again for this one (`yielded`), and the lane takes `st`, so a member closes a
     step its brief named in any order. A joined step the lane recorded anything on stays: the lane works on it; and a
-    step its launch does not name waits its turn in the queue. -> the names of the steps that yielded"""
+    step its launch does not name waits its turn in the queue, and nothing yields for a step the lane may not take
+    (_may_take). -> the names of the steps that yielded"""
     lane = (run.get("agents") or {}).get(aid) or {}
     if st.get("state") != "pending" or deps_open(run, st) or st["name"] not in _launch_names(run, aid, lane):
         return []
     worked = {u.get("step") for u in lane.get("updates") or [] if isinstance(u, dict) and u.get("step")}
     held = [x for x in coord.held(run, aid) if x is not st]
-    if not held or any(x.get("joined") != aid or x["name"] in worked for x in held):
-        return []
+    if not held or any(x.get("joined") != aid or x["name"] in worked for x in held) or not _may_take(run, aid, st):
+        return []  # nothing yields, nor is logged, for a step the lane may not take
     who = lane.get("persona") or "the member"
     for x in held:
         x.update(owner="main", state="pending", started=None)
@@ -2433,14 +2434,22 @@ def _open_step_of(run: dict, aid: str, s: dict | None = None):
     return next((x for x in coord.held(run, aid) if x is not s and not (review and is_review_step(x))), None)
 
 
+def _may_take(run: dict, aid: str, s: dict) -> bool:
+    """May lane `aid` take step `s`? Not a review of its member's own work, nor a review for a lane devkit cannot
+    name as a crew member (coord.independent). The rule _take_step applies, which a caller checks before it changes
+    anything for the take."""
+    lane = (run.get("agents") or {}).get(aid) or {}
+    return not (is_review_step(s) and not coord.independent(run, s, lane, who=member_id, review=is_review_step))
+
+
 def _take_step(run: dict, aid: str, s: dict, now: float) -> bool:
     """Lane `aid` takes step `s`: it owns it and runs it from now (`taken`), its scope is the step's while it runs
     (lane_scope), and its member's step closes reach the plan. Never a review of its member's own work, nor a review
     for a lane devkit cannot name as a crew member (coord.independent), whichever caller asks: then nothing changes.
     -> whether it took it"""
-    lane = run["agents"][aid]
-    if is_review_step(s) and not coord.independent(run, s, lane, who=member_id, review=is_review_step):
+    if not _may_take(run, aid, s):
         return False
+    lane = run["agents"][aid]
     s.update(owner=aid, state="running", started=s.get("started") or now, taken=now)
     coord.add_author(s, aid)
     coord.drop_intent(s)
