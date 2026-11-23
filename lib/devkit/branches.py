@@ -215,11 +215,12 @@ def embargo_trails() -> tuple:
     records each set (with the tip) and `--lift` each lift, so an embargo the trail still holds was not lifted,
     whatever the note says now."""
     from . import audit
-    # this Mac's units first (open and closed segments, month files), then every machine's handoff copy; a closed
-    # segment that holds no git.embargo record is not read
-    files = audit.trail_files(action="git.embargo")
+    # this Mac's units first (open and closed segments, month files), then every machine's handoff copy, each one
+    # read: the manifest's index of actions is outside the chain, so an edited index must not hide an embargo (dev
+    # audit verify names such an edit)
+    files = audit.trail_files()
     mine = set(files)
-    files += [f for f in audit.trail_files(team=True, action="git.embargo") if f not in mine]
+    files += [f for f in audit.trail_files(team=True) if f not in mine]
     seen, by = set(), {}
     for f in files:
         recs = _embargo_records(f)

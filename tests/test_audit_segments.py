@@ -558,5 +558,56 @@ class CommandTests(SegmentCase):
         self.assertEqual((a.audit_cmd, a.apply), ("reseal", True))
 
 
+class ManifestIndexTests(SegmentCase):
+    # the manifest's index (time span, days, actions, v1 lines, head, kind) lets readers skip closed segments, so an
+    # edited index must fail verify, and the embargo check must never trust it to skip a segment
+    def embargo_scene(self) -> dict:
+        rec = audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
+                          {"project": "acme/app", "branch": "fix/unshipped"}, now=noon(3))
+        audit._append(rec, now=noon(3))
+        self.write(noon(3) + 5, 1)
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        return rec
+
+    def edit_index(self, mf: Path):
+        m = json.loads(mf.read_text())
+        for e in m["units"]:
+            e["actions"] = {"dev.task": e["records"]}
+            e["lo"] = e["hi"] = 86400.0
+        mf.write_text(json.dumps(m))
+
+    def test_verify_names_the_segment_whose_manifest_index_was_edited(self):
+        self.embargo_scene()
+        mf = audit.AUDIT / "manifest.json"
+        keep = mf.read_bytes()
+        edits = {"lo": lambda e: e["lo"] - 3600, "hi": lambda e: e["hi"] + 3600, "days": lambda e: {},
+                 "actions": lambda e: {"dev.task": e["records"]}, "v1": lambda e: 1, "head": lambda e: "0" * 64,
+                 "kind": lambda e: "month"}
+        for field, change in edits.items():
+            with self.subTest(field=field):
+                m = json.loads(keep)
+                m["units"][0][field] = change(m["units"][0])
+                mf.write_text(json.dumps(m))
+                res = audit.verify(team=False)
+                self.assertFalse(res["ok"])
+                self.assertEqual((res["first"]["kind"], res["first"]["path"]), ("manifest", str(self.closed(noon(3)))))
+                self.assertIn(field, res["first"]["problem"])
+                mf.write_bytes(keep)
+        self.assertTrue(audit.verify(team=False)["ok"])
+
+    def test_an_embargo_is_found_when_the_manifest_index_says_its_segment_holds_none(self):
+        from devkit import branches
+        self.embargo_scene()
+        audit.publish()
+        self.edit_index(audit.AUDIT / "manifest.json")
+        self.edit_index(audit.team_dir() / "manifest.json")
+        branches._TRAIL_CACHE.clear()
+        self.assertIn("fix/unshipped", branches.embargo_trail("acme/app"))
+        audit.AUDIT = self.elsewhere  # another Mac, from the handoff copy alone
+        branches._TRAIL_CACHE.clear()
+        self.assertIn("fix/unshipped", branches.embargo_trail("acme/app"))
+
+
 if __name__ == "__main__":
     unittest.main()

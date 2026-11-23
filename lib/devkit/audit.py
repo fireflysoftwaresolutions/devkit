@@ -3343,13 +3343,20 @@ def _problem(path, kind: str, text: str, line: int = 0, rid: str = "") -> dict:
 
 
 def _check_entry(res: dict, u: dict, chain: dict):
-    """A closed unit against its manifest entry: size, SHA-256, record count, and where its chain ends."""
+    """A closed unit against its manifest entry: every field the job wrote from the unit's bytes when it closed it
+    (size, SHA-256, records and v1 lines, time span, records per day and per action, kind, chain head and link) but
+    `file`, which no reader follows, and that the link is where its chain ends. Readers skip closed units by the
+    time span and actions, so an edited index must fail here."""
     e = u["entry"]
     if not e or res["first"] and res["first"]["kind"] == "unreadable":
         return
-    end = seal(chain.get("last", ""), chain.get("tail", b""))
-    off = [k for k, got in (("bytes", res.get("bytes")), ("sha256", res.get("sha256")), ("records", res["records"]),
-                            ("link", end)) if e.get(k) != got]
+    try:
+        want = _entry(u["name"], read_trail(u["path"]))
+    except _READ_ERRORS:
+        return
+    off = [k for k in want if k != "file" and e.get(k) != want[k]]
+    if e.get("link") != seal(chain.get("last", ""), chain.get("tail", b"")) and "link" not in off:
+        off.append("link")
     if off:
         res["checks"].append(_problem(u["path"], "manifest", f"{u['name']} differs from its manifest entry "
                                       f"({', '.join(off)}): the file or the manifest changed after it was closed"))

@@ -36,7 +36,8 @@ folder). The daily `audit` job closes each segment once its day has passed, comp
   removing a whole segment breaks the chain at the next one. See [Verify the chain](#verify-the-chain).
 - **Closed segments are compressed.** JSON lines compress about eight to ten times. Readers decompress them as they
   read, and skip the closed segments whose time span or actions a query rules out, so `dev audit --days 1` reads
-  about one day, not a month.
+  about one day, not a month. The embargo check reads every segment: the manifest is outside the chain, so it never
+  decides whether an embargo is found. `dev audit verify` reports an edited manifest.
 - **Month files of an earlier devkit stay as they are.** devkit 26.11.27 and earlier wrote one file per local month,
   each its own chain. devkit reads and verifies them as they are and never writes to them again: the first segment
   links to the end of the newest month file, and the manifest records that point as `origin`. A session still running
@@ -503,7 +504,8 @@ record of a segment links to the end of the segment before it (its manifest `lin
 segments. A month file of an earlier devkit is its own chain, and the first segment links to its end as it was when
 this devkit started writing segments (the manifest's `origin`). Editing, removing, or inserting a record, or removing
 a segment, breaks the chain from that point on. The manifest anchors each closed segment by its size, SHA-256, record
-count, and link. What the daily `audit` job publishes to the handoff repository is the anchor across machines: each
+count, and link, and verify reads each closed segment again to check the rest of its entry too: the time span and the
+records per day and per action that readers skip segments by. What the daily `audit` job publishes to the handoff repository is the anchor across machines: each
 closed segment must be the one published, and each local month file must start with the files published of its
 month, in order, and only add to them. A held day counts by its size and SHA-256.
 
@@ -532,7 +534,7 @@ record's id, and exits `1`:
 | no message of the developer backs it | A `crew.evidence` record points to no prompt or question tool answer of the developer in the session's transcript |
 | the transcript shows another answer, match, label, or asked | `dev audit verify` reran the matcher on the question and label in the transcript, against the decision as the session's run holds it, else as its `crew.decision` record keeps it (`options`, `labels`), and the evidence record says otherwise. `asked` is checked while the run still holds the question |
 | does not link to the one before it | A record was removed, inserted, or changed before this one, or a segment or a day file before it is missing |
-| differs from its manifest entry | A closed segment's size, SHA-256, record count, or link is not what the manifest recorded when the job closed it: the segment or the manifest changed |
+| differs from its manifest entry | A closed segment's size, SHA-256, record count, time span, records per day or per action, chain head, or link is not what the manifest recorded when the job closed it: the segment or the manifest changed. The problem names the fields that differ |
 | is in the manifest, but its file is gone | A closed segment was removed |
 | the first segment links to a month file as it was at byte N | The month file of an earlier devkit changed before the point where the segments start |
 | no audit.reseal record backs the reseal map | A reseal map was changed, or written by something other than `dev audit reseal` |
