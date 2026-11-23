@@ -4099,6 +4099,31 @@ def config_report(now: float = None) -> dict:
 RESEAL_AGENT = ("dev audit reseal --apply rewrites the stored audit trail: run it from your own terminal, not an "
                 "agent's session")
 
+# the fields devkit's own controls read back from stored records: the embargo check (branches.embargo_trails), which
+# reseal maps a record backs (verify and prune), and where a pruned chain starts (verify). A reseal never rewrites
+# them, whatever audit.redact.extra matches: that list includes the team policy, which any teammate can commit, and
+# a pattern must not lift an embargo or unhook the chain's anchors. None: every field of the record.
+_CONTROLS = {"git.embargo": ("branch", "target", "detail", "project", "evidence.commit"),
+             "audit.reseal": ("ref.id", "evidence.check"), "audit.prune": None}
+
+
+def _keep_controls(stored: dict, clean: dict) -> dict:
+    """`clean` with the fields devkit's controls read put back as `stored` holds them (_CONTROLS)."""
+    action = stored.get("action")
+    if action not in _CONTROLS:
+        return clean
+    if _CONTROLS[action] is None:
+        return dict(stored)
+    out = dict(clean)
+    for f in _CONTROLS[action]:
+        group, _, key = f.partition(".")
+        if not key:
+            if group in stored:
+                out[group] = stored[group]
+        elif isinstance(stored.get(group), dict) and key in stored[group]:
+            out[group] = {**(out.get(group) if isinstance(out.get(group), dict) else {}), key: stored[group][key]}
+    return out
+
 
 def _reclean_v1(r: dict, rx) -> dict:
     """A v1 line as today's rules store its text, in its own shape: what lift shows of it, kept on disk."""
@@ -4140,6 +4165,7 @@ def _reseal_bytes(data: bytes, kind: str, rx) -> tuple:
         if isinstance(r, dict) and r.get("v") == V and isinstance(r.get("hash"), str):
             clean = _reclean(r, rx)
             clean.pop("cleaned", None)
+            clean = _keep_controls(r, clean)
             want = r.get("prev") if first and kind == "day" else seal(last, tail)
             first = False
             if clean != r:
@@ -4155,7 +4181,7 @@ def _reseal_bytes(data: bytes, kind: str, rx) -> tuple:
             tail = b""
         else:
             if isinstance(r, dict):
-                clean = _reclean_v1(r, rx)
+                clean = _keep_controls(r, _reclean_v1(r, rx))
                 if clean != r:
                     v1n, changed = v1n + 1, True
                     new = json.dumps(clean, ensure_ascii=False).encode("utf-8") + end

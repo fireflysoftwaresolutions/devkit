@@ -572,6 +572,53 @@ class ResealDeveloperTests(SegmentCase):
         self.assertEqual(rec["outcome"], "blocked")
 
 
+class ResealControlTests(SegmentCase):
+    # a pattern of audit.redact.extra (this Mac's config, or the team policy any teammate can commit) that matches what
+    # devkit's own controls read back from the trail
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def test_an_embargo_is_still_found_after_a_reseal_under_a_pattern_that_matches_its_branch(self):
+        from devkit import branches
+        sha = "a" * 40
+        audit._append(audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
+                                  {"project": "acme/app", "branch": "fix/unshipped", "commit": sha}, now=noon(3)),
+                      now=noon(3))
+        self.write(noon(3) + 5, 1, target="pushed fix/unshipped")
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        audit.publish(now=noon(0))
+        self.policy({"redact": {"extra": ["fix/unshipped", "an unshipped security fix", "a{40}"]}})
+        with self.as_developer():
+            res = audit.reseal(apply=True, now=noon(0))
+        self.assertTrue(res["ok"], res)
+        stored = self.stored(self.closed(noon(3)))
+        self.assertNotIn("fix/unshipped", stored[1]["target"])  # the reseal ran: the other record was cleaned
+        self.assertEqual((stored[0]["branch"], stored[0]["target"], stored[0]["detail"], stored[0]["evidence"]),
+                         ("fix/unshipped", "fix/unshipped", "set: an unshipped security fix", {"commit": sha}))
+        branches._TRAIL_CACHE.clear()
+        self.assertEqual(branches.embargo_trail("acme/app")["fix/unshipped"]["commits"], [sha])
+        audit.AUDIT = self.elsewhere  # another Mac reads the embargo from the handoff copy only
+        branches._TRAIL_CACHE.clear()
+        self.assertEqual(list(branches.embargo_trail("acme/app")), ["fix/unshipped"])
+
+    def test_a_reseal_keeps_the_id_and_check_of_an_earlier_reseals_record(self):
+        self.scene()
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        rid, check = res["id"], "sha256:" + hashlib.sha256(Path(res["map"]).read_bytes()).hexdigest()
+        audit._append(self.sealed_record(time.time(), "the Acme roadmap once more"))
+        self.policy({"redact": {"extra": [rid, check]}})
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res["units"])
+        stored = [r for f in audit.trail_files() for r in self.stored(f) if r.get("action") == "audit.reseal"]
+        self.assertEqual((stored[0]["ref"]["id"], stored[0]["evidence"]["check"]), (rid, check))
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+
 class CommandTests(SegmentCase):
     def test_dev_audit_parses_reseal_and_apply(self):
         from devkit import cli

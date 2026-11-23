@@ -331,7 +331,11 @@ it. An agent's call is refused and recorded as `audit.reseal` blocked.
    chain heads stay there, outside the files it rewrites.
 3. It cleans each record with today's rules and chains the records of each file again from the first change. A
    segment's first record keeps its link to the old end of the segment before it; verify accepts that link only
-   through a reseal map that an `audit.reseal` record backs.
+   through a reseal map that an `audit.reseal` record backs. It never changes the fields devkit's own checks read
+   back, even when a pattern of `audit.redact.extra` matches them: a `git.embargo` record's `branch`, `target`,
+   `detail`, `project`, and `evidence.commit`, an `audit.reseal` record's `ref.id` and `evidence.check`, and every
+   field of an `audit.prune` record. A pattern in the team policy, which any teammate can commit, so cannot lift an
+   embargo or unhook the chain.
 4. It rewrites this machine's copy in the handoff repository to match, with the map, and commits it.
 5. It records `audit.reseal` with the map's SHA-256 (`evidence.check`), then closes and publishes the segment that
    holds that record, so every machine can check the map.
