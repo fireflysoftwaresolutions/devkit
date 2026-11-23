@@ -291,6 +291,21 @@ class ReviewIndependenceTests(Scenario):
         self.assertIn("own work", str(e.exception))
         self.assertIn("“y”", str(e.exception))
 
+    def test_an_author_naming_the_review_of_its_work_neither_takes_nor_closes_it(self):
+        # Neo was given review-x before anyone did x, then did x; its lane took z from the queue, and its
+        # dev progress step --step review-x made z give way and took the review of its own work
+        pg.start("Fix", plan=["x=30m", "z=30m", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("review-x", "Neo", why="a second look", now=self.m(0))  # nobody did x yet
+        pg.assign("x", "Neo", why="test", now=self.m(0))
+        pg.assign("z", "Neo", why="test", now=self.m(0))
+        launch("a_neo", "devkit:neo", "Neo: x", at=self.m(1))
+        pg.step("x done", which="x", check="ok", from_agent="a_neo", now=self.m(10))
+        self.assertEqual(self.held("z"), ("a_neo", "running"))  # joined by its member's queue
+        rc, out, err = self.cli("a_neo", "reviewed my own work", "--step", "review-x", "--check", "✓ approved")
+        self.assertEqual(rc, 2, out)
+        self.assertEqual((self.held("review-x"), self.held("z")), (("main", "pending"), ("a_neo", "running")))
+        self.sound()
+
 
 class BriefedStepTests(Scenario):
     # the Software architect, launched for approve-stack-skills-spike and the sandbox spike, closed the first; its lane

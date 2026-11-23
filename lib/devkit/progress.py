@@ -2144,12 +2144,13 @@ def _exact_intent(run, s, aid):
 
 def _queued_for(run: dict, aid: str) -> list:
     """The pending steps whose intent may go to lane `aid` (bound to it, or to its member), in the order it claims
-    them (coord.claimable): answered blocked steps first, then those bound to it, then its member's, oldest first."""
+    them (coord.claimable): answered blocked steps first, then those bound to it, then its member's, oldest first.
+    Never a review of work its member did (coord.independent): no queue, yield or naming gives it to that lane."""
     lane = (run.get("agents") or {}).get(aid) or {}
     marks = []
     for i, x in enumerate(run.get("plan") or []):
         it = coord.intent(x) if x.get("state") == "pending" else None
-        if not it:
+        if not it or (is_review_step(x) and not coord.independent(run, x, lane.get("persona") or "")):
             continue
         other = (run.get("agents") or {}).get(it["lane"]) or {} if it["lane"] else {}
         if it["lane"] == aid or (it["lane"] and other.get("state") != "running" and _label_matches(it["member"], lane)
