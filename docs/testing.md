@@ -218,28 +218,43 @@ never touched):
 
 1. **It fails without your change.** devkit restores the base version of every production file you changed (the
    merge-base with `origin/<default>`, or `--since REF`) and runs the test. A changed test helper or fixture counts
-   as part of the change and is restored too, and so is changed helper code inside a Python test module, outside its
-   tests, so a fix that lives only in a helper is proven. Such helpers are rebuilt one by one, matched by class, name,
-   and place among the helpers of that name, from their own text at the base, never from where git's diff puts a
-   changed line. A changed helper comes back whole as its base text, a helper the change removed comes back, and a
-   helper the change adds stays. The module's tests are "cannot be proven" when:
+   as part of the change and is restored too, and so is changed helper code inside a Python or JavaScript test
+   module, outside its tests, so a fix that lives only in a helper is proven. Such helpers are rebuilt one by one,
+   matched by class, name, and place among the entries of that name, from their own text at the base, never from
+   where git's diff puts a changed line. A changed helper comes back whole as its base text, a helper the change
+   removed comes back, and a helper the change adds stays. Every other statement keeps the change. The module's
+   tests are "cannot be proven" when:
 
    - a rebuilt helper does not read as its base text, such as two members on one line.
-   - the change adds, removes, or edits a helper in a group of helpers of one class and name with more than one on
-     either side: two `@fmt.register` functions named `_`, `CASES += [...]` twice, a static and an instance `get`, or
-     a `beforeEach` in each of two `describe` blocks. Their places shift, so the helpers cannot be told apart. A test
-     with the name of a changed helper, put before it, takes the helper's place the same way.
-   - a rebuilt helper reads a name that the module gave it outside the rebuilt helpers and that the change removed: a
-     removed import, or a name bound in an `if` or `try` block, by an expression statement (`globalThis.LIMIT = 1`),
-     or by a destructuring declaration. Only helpers come back, so the helper would fail on that name.
+   - the change adds or removes a helper in a group of helpers of one class and name with more than one on either
+     side, or the helpers and tests of that name change places, or its helpers trade texts: an `@fmt.register`
+     function named `_` added before two others, `CASES += [3]` added before `CASES += [2]`, a static `get` added
+     before an instance `get`, or a `beforeEach` in a new `describe` before two others. Their places shift, so the
+     helpers cannot be told apart. A group that keeps its shape comes back place by place, so a fix in a property
+     getter beside its setter, or in one of the `beforeEach` hooks of two `describe` blocks, is proven. A test with
+     the name of a helper, put before it, takes the helper's place: when the change edits or removes that helper, it
+     cannot be told apart either.
+   - a rebuilt helper reads a name that a removed import gave it.
+   - a statement outside the tests, helpers, and imports that the change adds, removes, edits, or moves names a name
+     that a rebuilt helper reads. The statement keeps the change, so the helper would run in another scope than at
+     the base, whatever binds that name now: an `if` or `try` block that set it, `REG.update(limit=1)`, `del LIMIT`,
+     `setattr(NS, 'limit', 1)`, `globalThis["LIMIT"] = 1`, `Object.defineProperty(globalThis, "LIMIT", ...)`, or
+     `LIMIT = 1;` beside a `let LIMIT;` that stays. The words in its strings count as names too; a docstring's words
+     and a title of a `describe`, `it`, or `test` do not.
 
    A test is "cannot be proven" too when it reads a name that only the change's helper edit gives, in its own text or
    in a helper the change adds that it reaches: an attribute or name in a changed helper's lines now but not at the
    base, or the other way round; a helper whose parameters changed; or a member of a class the change adds that a
-   changed helper now names, such as `make().extra()` after `make()` changed from `return Old()` to `return New()`. A
-   name an import binds in the module means the same with and without the change, so a helper fix that starts to use
-   a module both sides import, such as `json`, is still proven. A test that still passes is reported as "does not
-   test the change."
+   changed helper now names, such as `make().extra()` after `make()` changed from `return Old()` to `return New()`.
+   When a changed helper now reaches added code that sets members from strings or expressions, those members cannot
+   be named, so every test that reaches the helper, by its name or because the framework calls it, cannot be proven.
+   That code is `setattr`, `type()` with three arguments, `exec`, `namedtuple`, an `Enum(...)` call,
+   `SimpleNamespace`, or a store such as `x[key] = ...`; in JavaScript, a class expression such as
+   `globalThis.Neu = class {...}` or `Object.assign(reg, { Neu: class {...} })`, `Object.defineProperty`, `Reflect`,
+   or `eval`; and every statement outside the tests, helpers, and imports that the change adds or edits. A name an
+   import binds in the module means the same with and without the change, so a helper fix that starts to use a
+   module both sides import, such as `json`, is still proven. A test that still passes is reported as "does not test
+   the change."
 2. **It is stable.** It runs the test five times with your change (`--runs N` changes the count). A test that is not
    five times green is reported as flaky. This is the rule Meta's TestGen-LLM applies to generated tests.
 
