@@ -132,6 +132,26 @@ class ScreenAtLoadTests(LessonCase):
             policy.unlink()
             self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [les["meta"]["id"]])
 
+    def test_a_held_lesson_cannot_be_released_while_the_patterns_cannot_load(self):
+        # held for its URL alone, the screen could not see the team-only token beside it: a release then would let
+        # the token into recall once the repaired patterns load, since a release counts for the text it read
+        with mock.patch.dict(core.CFG, {"audit": {}}):
+            policy = audit.policy_file()
+            policy.parent.mkdir(parents=True)
+            policy.write_text('{"redact": ')
+            les = self.add("Rotate the deploy key", files=["db/**"],
+                           prevention="rotate acme-zulu-quebec-tango first, see https://wiki.example.com/rotate")
+            lid = les["meta"]["id"]
+            with self.assertRaises(ValueError) as cm:
+                lessons.release(lessons.find(lid), "reviewed: the URL is our wiki", a=A)
+            self.assertIn(core.tilde(policy), str(cm.exception))
+            self.assertIn("dev audit config", str(cm.exception))
+            policy.write_text('{"redact": {"extra": ["acme-zulu-[a-z]+-[a-z]+"]}}')  # repaired: the team lists it
+            self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [])
+            policy.write_text('{"redact": {"extra": []}}')  # the token is no secret after all: the URL alone holds it
+            lessons.release(lessons.find(lid), "reviewed: the URL is our wiki", a=A)
+            self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [lid])
+
     def test_a_definite_finding_in_any_field_wins_over_cannot_be_checked(self):
         # the title comes first and cannot be checked; a later field's token or override is still found and written
         from devkit import lessonlint

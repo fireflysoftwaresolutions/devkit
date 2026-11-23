@@ -709,12 +709,21 @@ def automate(les: dict, a=None, project: str = "") -> dict:
 def release(les: dict, why: str, a=None) -> dict:
     """Let a held lesson back into recall (`dev lesson release`): one held in its front matter, or one the screen
     holds as loaded (held_reasons). The release counts for the text that was read, on this machine (RELEASED): an
-    edit of that text, or a copy of the file on another machine, is screened again."""
+    edit of that text, or a copy of the file on another machine, is screened again. Refused while the redaction
+    patterns cannot load (audit.redaction_unavailable): the screen could not ask the team's patterns, so the reason it
+    shows (a URL, say) may not be the only one, and the release would let a secret they name into recall once they
+    load again."""
+    from . import audit
     if not (why or "").strip():
         raise ValueError("releasing a held lesson needs the reason: --why \"…\"")
     held = les["meta"].get("quarantine") or held_reasons([les]).get(les["meta"]["id"], "")
     if not held:
         raise ValueError(f"{les['meta']['id']} is not held")
+    unloaded = audit.redaction_unavailable()
+    if unloaded:
+        raise ValueError(f"{les['meta']['id']} cannot be released while the redaction patterns cannot load "
+                         f"({unloaded}): the screen could not check it for a secret those patterns name. "
+                         "Repair the file (dev audit config shows what is wrong), then release it")
     _remember_release(les)
     if not les["meta"].get("quarantine"):
         return update(les, f"released on this machine (the screen held it as loaded: {held})", why, a)

@@ -566,7 +566,9 @@ as one string instead of a list, a pattern that does not compile, or an unknown 
 - The lesson screen holds every lesson out of recall. It still runs the built-in rules, the patterns that did load,
   and its other screens on every field: a lesson they find something in is held for that reason, which is written
   into the lesson. Any other lesson's reason says that it cannot be checked for secrets, and nothing is written into
-  it, so it is recalled again once the patterns load.
+  it, so it is recalled again once the patterns load. `dev lesson release` is refused until then, with the file to
+  repair: the screen could not ask the team's patterns, so a lesson it holds for a URL may also hold a token only
+  those patterns know.
 - `dev audit config` lists the file's errors and says that text is withheld.
 
 Audit records go on being written, with lengths instead of text. Fix the file the `fix:` line or `dev audit config`
