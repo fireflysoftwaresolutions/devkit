@@ -242,12 +242,31 @@ class _Repo:
         self._text, self._graphs = {}, {}
         self._runners = None
         self._pytest = {}  # folder -> the pytest collection rules that govern it (_pytest_rules)
+        self.listed = {}  # file -> whether its runner's listing holds it (dev test --listed): the runner's word
+        self.tests = sorted(f for f in self.existing if self.runnable(f))
+        if listing_on():
+            self._apply_listing()
+
+    def _apply_listing(self):
+        """Which files hold tests, as each runner that can list says (list_tests): its listing replaces the file-name
+        rules for the files of its language under its root."""
+        for r in self.runners():
+            files = list_tests(self.top, r, self)
+            if files is None:
+                continue
+            for f in self.existing:
+                if _lang(f) == r["lang"] and _under(f, r["root"]) and owner(self.runners(), f) is r:
+                    self.listed[f] = f in files
+            r["selection"] = "listed"
         self.tests = sorted(f for f in self.existing if self.runnable(f))
 
     def runnable(self, f) -> bool:
         """A file a runner here executes as tests: named as one (_runnable) and, for Python, one pytest's own
         configuration collects. pytest collects any file named on its command line, so devkit applies its testpaths
-        and python_files itself: a production module named test_… outside them is no test."""
+        and python_files itself: a production module named test_… outside them is no test. With the runner's
+        listing (dev test --listed), the listing decides."""
+        if f in self.listed:
+            return self.listed[f]
         if not _runnable(f):
             return False
         if not f.endswith(".py"):
@@ -299,6 +318,141 @@ class _Repo:
         if lang not in self._graphs:
             self._graphs[lang] = {"py": _py_graph, "js": _js_graph, "go": _go_graph}[lang](self)
         return self._graphs[lang]
+
+
+# --------------------------------------------------------------------------- the runner's own listing
+
+LISTING_SECONDS = 300  # a listing that takes longer is no listing: the file rules decide
+_LIST_CONFIGS = ("pytest.ini", ".pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "conftest.py", "package.json",
+                 "angular.json") + tuple(f"{t}.config.{e}" for t in ("vitest", "vite", "jest", "playwright")
+                                         for e in ("ts", "js", "mjs", "cjs", "mts", "cts"))
+
+
+def listing_on() -> bool:
+    """dev test --listed, or config test.listing: the runners' own listings say which files hold tests."""
+    return os.environ.get("DEVKIT_TEST_LISTING") == "1" or bool((core.CFG.get("test") or {}).get("listing"))
+
+
+def _list_key(top, runner, repo) -> str:
+    """What a runner's listing depends on: the runner and its command, its configuration files (their text, conftest
+    files too) and the names of the files of its language under its root (a new test file lists again)."""
+    h = hashlib.sha256(json.dumps([runner["name"], runner["root"], runner.get("exec")]).encode())
+    for f in repo.existing:
+        if _under(f, runner["root"]) and (f.rpartition("/")[2] in _LIST_CONFIGS or _lang(f) == runner["lang"]):
+            h.update(f.encode() + b"\0")
+            if f.rpartition("/")[2] in _LIST_CONFIGS:
+                h.update(repo.text(f).encode("utf-8", "replace") + b"\0")
+    return h.hexdigest()
+
+
+_LIST_UNITTEST = """import json, sys, unittest
+start, top = sys.argv[1], sys.argv[2]
+suite = unittest.TestLoader().discover(start, top_level_dir=top)
+out = set()
+def walk(s):
+    for x in s:
+        if isinstance(x, unittest.TestSuite):
+            walk(x)
+        elif type(x).__module__ != "unittest.loader":
+            out.add(sys.modules[type(x).__module__].__file__)
+walk(suite)
+print(json.dumps(sorted(out)))
+"""
+
+
+def _list_command(top, runner) -> tuple:
+    """(argv, folder, parse(output, folder) -> absolute paths) of a runner's listing, or None."""
+    name, ex, root = runner["name"], list(runner.get("exec") or []), _rootdir(top, runner)
+
+    def lines(text, rx):
+        return [m.group(1) for m in re.finditer(rx, text)]
+
+    def json_files(text):
+        found = []
+
+        def walk(x):
+            if isinstance(x, dict):
+                if isinstance(x.get("file"), str):
+                    found.append(x["file"])
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+        try:
+            walk(json.loads(text[text.find("[") if text.lstrip().startswith("[") else text.find("{"):]))
+        except ValueError:
+            return None
+        return found
+    if name == "pytest":
+        return ex + ["--collect-only", "-q", "-p", "no:cacheprovider"], root, \
+            lambda out, d: [os.path.join(d, x) for x in dict.fromkeys(lines(out, r"(?m)^([^\s:]+\.py)::"))]
+    if name == "unittest":
+        start = runner.get("start") or "."
+        level = "." if runner.get("package") else start
+        return [runner.get("python") or sys.executable, "-c", _LIST_UNITTEST, start, level], root, \
+            lambda out, d: json.loads(out.strip().splitlines()[-1]) if out.strip() else None
+    if name == "vitest":
+        return ex + ["list", "--filesOnly", "--json"], root, \
+            lambda out, d: [os.path.join(d, x) for x in json_files(out) or []] if json_files(out) is not None else None
+    if name == "playwright":
+        return ex + ["--list", "--reporter=json"], root, _playwright_files
+    if name == "jest":
+        return ex + ["--listTests"], root, lambda out, d: [x.strip() for x in out.splitlines() if x.strip().startswith("/")]
+    return None
+
+
+def _playwright_files(out, d):
+    """The spec files of `playwright test --list --reporter=json`: each suite's file, relative to config.rootDir."""
+    try:
+        data = json.loads(out[out.find("{"):])
+    except ValueError:
+        return None
+    base = ((data.get("config") or {}).get("rootDir") if isinstance(data, dict) else None) or d
+    return [os.path.join(base, s["file"]) for s in data.get("suites") or [] if isinstance(s, dict) and s.get("file")]
+
+
+def list_tests(top, runner, repo=None):
+    """The files (relative to the top) that `runner`'s own listing says hold tests, or None when it cannot list them
+    (no listing for the runner, or the listing failed). Cached in devkit's state by _list_key."""
+    top = str(top)
+    repo = repo or _Repo(top)
+    cmd = _list_command(top, runner)
+    if cmd is None:
+        return None
+    key = _list_key(top, runner, repo)
+    cache = core.STATE / "test-lists" / f"{project_key(top)[1]}--{hashlib.sha256((runner['root'] + runner['name']).encode()).hexdigest()[:12]}.json"
+    held = core.read_json(cache, {}) or {}
+    if held.get("key") == key and isinstance(held.get("files"), list):
+        return set(held["files"])
+    from . import identity
+    argv, folder, parse = cmd
+    env = dict(identity.runner_env(dict(os.environ)), PYTHONDONTWRITEBYTECODE="1", CI="1")
+    t0 = time.time()
+    try:
+        p = subprocess.run([str(x) for x in argv], cwd=folder, env=env, capture_output=True, text=True,
+                           errors="replace", timeout=LISTING_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    try:
+        found = parse(p.stdout, folder) if p.returncode in (0, 5) else None
+    except (ValueError, IndexError, KeyError):
+        found = None
+    if found is None:
+        return None
+    real_top = os.path.realpath(top)
+    files = sorted({os.path.relpath(os.path.realpath(x), real_top).replace(os.sep, "/") for x in found
+                    if os.path.realpath(x).startswith(real_top + os.sep)})
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{cache.stem}-", suffix=".tmp", dir=str(cache.parent))
+    try:  # written whole, then moved in place: a reader never sees half of it
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"key": key, "files": files, "secs": round(time.time() - t0, 2), "at": time.time()}, fh)
+        os.replace(tmp, cache)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return set(files)
 
 
 # --------------------------------------------------------------------------- changed files
@@ -3272,6 +3426,8 @@ def _plan(a, top, runners) -> int:
         runs.append({"runner": r["name"], "root": r["root"], "files": sel["files"], "related": sel["related"],
                      "all": sel.get("all", False), "argv": cmd["argv"], "source": r.get("source") or "inferred",
                      "declared_by": r.get("declared_by") or "",
+                     "selection": next((x.get("selection") for x in repo.runners() if (x["name"], x["root"]) ==
+                                        (r["name"], r["root"])), None) or "file names",
                      "estimate": estimate(st, r, all_=True) if sel.get("all") else
                      estimate(st, r, sel["files"], n_files=n_files)})
     ests = [x["estimate"] for x in runs]
@@ -3306,6 +3462,8 @@ def _plan(a, top, runners) -> int:
             f"related to {len(x['related'])} file(s)" if x["related"] else f"{len(x['files'])} file(s)"
         print(f"  would run: {x['runner']} · {what} · ~{_fmt(x['estimate'])}")
         print(ui.dim(f"    $ {core.tilde(' '.join(shlex.quote(y) for y in x['argv']))}"))
+        if x["selection"] == "listed":
+            print(ui.dim("    tests: as the runner's own listing says (dev test --listed)"))
         print(ui.dim(f"    command: declared by {x['declared_by']}" if x["source"] == "declared" else
                      "    command: inferred from the project's files (no test entry in its delivery policy, CI "
                      "workflow or package.json declares one)"))
@@ -4731,6 +4889,13 @@ def _options(p, paths=False, sub=False):
     p.add_argument("--runner", metavar="NAME", help="only this runner: " + ", ".join(RUNNER_LANG), **keep)
     p.add_argument("--json", action="store_true", **keep)
     p.add_argument("-v", "--verbose", action="store_true", help="stream the runner's full output", **keep)
+    _listed_option(p, keep)
+
+
+def _listed_option(p, keep):
+    p.add_argument("--listed", action="store_true", help="the files that hold tests are those the runner's own listing "
+                   "names (pytest --collect-only, unittest discovery, vitest list, playwright --list), cached; config "
+                   "test.listing turns it on for every run", **keep)
 
 
 def register(add):
@@ -4748,6 +4913,7 @@ def register(add):
     q.add_argument("--since", metavar="REF", **_KEEP)
     q.add_argument("--runner", metavar="NAME", **_KEEP)
     q.add_argument("--json", action="store_true", **_KEEP)
+    _listed_option(q, _KEEP)
     q = sp.add_parser("prove", help="each new or changed test passes N times with the change and fails without it")
     q.add_argument("tests", nargs="*", help="test files (default: the new or changed ones)")
     q.add_argument("--since", metavar="REF", help="the base without your change (default: merge-base with origin, or "
@@ -4759,6 +4925,7 @@ def register(add):
                         "for lesson prevention receipts (checkout root, src and test folders)")
     q.add_argument("--runner", metavar="NAME", **_KEEP)
     q.add_argument("--json", action="store_true", **_KEEP)
+    _listed_option(q, _KEEP)
     try:
         mod = _audit_module()
         q = sp.add_parser("audit", help="tests that cannot fail: no or trivial assertions, skips, sleeps")
@@ -4777,6 +4944,8 @@ def cmd_test(a) -> int:
         os.chdir(cli._resolve(None, a.project)["path"])
     if sub == "audit":
         return _audit(a)
+    if getattr(a, "listed", False):
+        os.environ["DEVKIT_TEST_LISTING"] = "1"  # every _Repo of this command, and the dev processes it starts
     top = _top()
     if not top:
         return _refuse("not inside a git repository")
