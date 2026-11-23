@@ -447,6 +447,14 @@ def _key(c) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "__", c.pid)
 
 
+def _checkout_key(c) -> str:
+    """The project's key and a short hash of this checkout's real path (`acme__widget@3f9c0a1b2d4e`): the main
+    checkout and each worktree of a project keep their own dev ci --run logs and step records, which the evidence
+    markers, named by commit and tree, need not."""
+    import hashlib
+    return f"{_key(c)}@{hashlib.sha256(os.path.realpath(c.top).encode()).hexdigest()[:12]}"
+
+
 def work_tree(top):
     """Tree id of the working tree as it is now (tracked and untracked, not ignored); the real index is untouched."""
     import shutil
@@ -480,7 +488,7 @@ def record_evidence(c, how: str, tree: str, **extra) -> dict:
             "ts": int(time.time()), "user": os.environ.get("USER", ""), "host": os.uname().nodename.split(".")[0]}
     data.update(extra)
     (d / name).write_text(json.dumps(data, indent=1))
-    cutoff = time.time() - 30 * 86400
+    cutoff = time.time() - CI_KEEP_DAYS * 86400
     for f in d.glob("*.json"):
         try:
             if f.stat().st_mtime < cutoff:
@@ -2152,15 +2160,79 @@ def _expand(run: str, root: str) -> str:
 
 _PRUNABLE = frozenset({"system", "image", "container", "volume", "network", "builder", "buildx"})
 _SHELL_VAR = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+_BARE_VAR = re.compile(r"\$([A-Za-z_]\w*)")
+# what `${…}` holds that _expand_params resolves: a name, then a default (`-`, `=`) or an alternate (`+`) word, the
+# colon form also for an empty value
+_PARAM = re.compile(r"([A-Za-z_]\w*)(?:(:?[-=+])(.*))?", re.S)
+_UNKNOWN = "$"  # the value of a variable this Mac cannot tell: a path through it stays unknown (_shell_path)
+
+
+def _home_tilde(word: str) -> str:
+    return os.path.expanduser("~") + word[1:] if word == "~" or word.startswith("~/") else word
+
+
+def _brace_end(text: str, i: int) -> int:
+    """The index of the `}` that closes the `${` whose content starts at text[i], or -1 when it does not close."""
+    depth = 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text.startswith("${", i):
+            depth += 1
+            i += 2
+            continue
+        if text[i] == "}":
+            depth -= 1
+            if not depth:
+                return i
+        i += 1
+    return -1
+
+
+def _expand_params(text: str, env: dict) -> str:
+    """`text` with its variables expanded as the shell does here, from `env`: `$VAR`, `${VAR}` (unset is empty), the
+    defaults `${VAR-word}` and `${VAR=word}` (the word when VAR is unset; with a colon, also when it is empty) and the
+    alternates `${VAR+word}` and `${VAR:+word}`, whose word starts with `~` for the home folder. Any other expansion (a
+    command's output, `${#VAR}`, `${VAR%…}`, `$1`) keeps its `$`, so a path through it stays one this Mac cannot
+    tell."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] != "$":
+            out.append(text[i])
+            i += 1
+            continue
+        bare = _BARE_VAR.match(text, i)
+        if bare:
+            out.append(env.get(bare.group(1)) or "")
+            i = bare.end()
+            continue
+        end = _brace_end(text, i + 2) if text.startswith("${", i) else -1
+        param = _PARAM.fullmatch(text, i + 2, end) if end > 0 else None
+        if not param:
+            out.append("$")
+            i += 1
+            continue
+        name, op, word = param.groups()
+        value = env.get(name)
+        given = value is not None and (value != "" or not op or not op.startswith(":"))
+        if not op:
+            out.append(value or "")
+        elif op[-1] in "-=":
+            out.append(value if given else _expand_params(_home_tilde(word), env))
+        else:
+            out.append(_expand_params(_home_tilde(word), env) if given else "")
+        i = end + 1
+    return "".join(out)
 
 
 def _shell_path(word: str, cwd, env: dict):
-    """The absolute path a shell word names, as the shell expands it here: `~`, and `$VAR` / `${VAR}` from `env`
-    (an unset variable is empty, so `"$UNSET/"` is `/`). None when this Mac cannot tell: a command's output (the
-    shell reader leaves a `$` for `$(…)`), another expansion, or a folder `cd` went to that is not known."""
-    if word == "~" or word.startswith("~/"):
-        word = os.path.expanduser("~") + word[1:]
-    word = _SHELL_VAR.sub(lambda m: env.get(m.group(1) or m.group(2)) or "", word)
+    """The absolute path a shell word names, as the shell expands it here: `~`, and the variables _expand_params
+    resolves from `env` (an unset variable is empty, so `"$UNSET/"` is `/`; `${TMPDIR:-/tmp}` is TMPDIR, or /tmp
+    when it is unset or empty). None when this Mac cannot tell: a command's output (the shell reader leaves a `$`
+    for `$(…)`), another expansion, a variable whose value is not known here, or a folder `cd` went to that is not
+    known."""
+    word = _expand_params(_home_tilde(word), env)
     if "$" in word or "`" in word or word.startswith("~") or (cwd is None and not os.path.isabs(word)):
         return None
     return os.path.realpath(os.path.join(cwd or "/", word))
@@ -2398,8 +2470,9 @@ _HOME_KINDS = ("home", "home-dot", "home-root")  # a write into the home folder,
 # a write outside the checkout, or a command run as root: setup with no check beside it; next to one, all but "home"
 # block the step instead, and "root-system" (a root write into a system folder) and "root-setup" (any other setup
 # command run with sudo, `sudo systemctl start …`) only next to a check that is not a download (_SETUP_FEEDS): a
-# check piped into sudo (`pytest | sudo cat`) cannot run here; "unknown" (a redirect or tee target this Mac cannot
-# tell, _unknown_write) may be any file, a dotfile of the home folder as well, so it blocks next to a check too
+# check piped into sudo (`pytest | sudo cat`) cannot run here; "unknown" (a redirect, or a file a writing command
+# writes, whose path this Mac cannot tell, _unknown_write) may be any file, a dotfile of the home folder as well, so it
+# blocks next to a check too
 _OUTSIDE_KINDS = _HOME_KINDS + ("root-write", "root-system", "root-setup", "unknown")
 _ROOT_SETUP_KINDS = ("root-system", "root-setup")
 # the folders a hosted runner's own system setup writes as root (`curl … | sudo tee /etc/apt/keyrings/…`, a tool into
@@ -2438,11 +2511,11 @@ def _home_write(targets, as_root: bool, state: dict):
 
 
 def _unknown_write(targets, state: dict):
-    """("unknown", why) for the first file a redirect or tee writes whose path this Mac cannot tell (_shell_path:
-    a command's output, another expansion, a relative path after a `cd` it could not follow): it may be any file, a
-    dotfile of the home folder as well, so devkit cannot rule out a write outside the checkout. None when every
-    target is known; a known one inside the checkout or a temporary folder is never in doubt. `targets`: the words
-    that name the files, as written."""
+    """("unknown", why) for the first file a redirect or a writing command (_WRITERS: tee, cp, mv, dd of=, …) writes
+    whose path this Mac cannot tell (_shell_path: a command's output, another expansion, a variable read or set at
+    run time, a relative path after a `cd` it could not follow): it may be any file, a dotfile of the home folder as
+    well, so devkit cannot rule out a write outside the checkout. None when every target is known; a known one inside
+    the checkout or a temporary folder is never in doubt. `targets`: the words that name the files, as written."""
     for w in targets:
         if _shell_path(w, state["here"], state["env"]) is None:
             return "unknown", f"runner prep (writes {w}, a path this Mac cannot tell)"
@@ -2451,42 +2524,104 @@ def _unknown_write(targets, state: dict):
 
 _DECLARES = frozenset({"export", "declare", "typeset", "readonly", "local"})
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=(.*)", re.S)
-# a variable the step sets to a fresh file or folder mktemp makes in the temporary folder (`LOG=$(mktemp)`,
+_NAME = re.compile(r"[A-Za-z_]\w*")
+# a word that sets a variable to a fresh file or folder mktemp makes in the temporary folder (`LOG=$(mktemp)`,
 # `export DIR="$(mktemp -d -t ci)"`): with no template or folder of its own it is a new path there, never a file that
-# already exists. The shell reader keeps only `LOG=$` of it, so the piece's own text tells (_temp_assigned).
-_MKTEMP_ASSIGN = re.compile(r"(?:^|[\s;&|(])(?:(?:export|declare|typeset|readonly|local)(?:\s+[-+]\w+)*\s+)?"
-                            r"([A-Za-z_]\w*)=(\"?)(?:\$\(|`)\s*mktemp(?:\s+(?:-[dqu]+|-t\s*[\w.-]+|--tmpdir))*\s*"
-                            r"(?:\)|`)\2(?=$|[\s;&|)])")
+# already exists. The shell reader keeps only `LOG=$` of it, so the piece's own text tells (_fresh_temps).
+_ASSIGN_AT = re.compile(r"([A-Za-z_]\w*)=")
+_FRESH_TEMP = re.compile(r"(\"?)(?:\$\(|`)\s*mktemp(?:\s+(?:-[dqu]+|-t\s*[\w.-]+|--tmpdir))*\s*(?:\)|`)\1"
+                         r"(?=$|[\s;&|)])")
+# commands that set the variables they name to a value read when the step runs: from their input (read, mapfile),
+# their list (for, select) or their format (printf -v)
+_READS_INTO = frozenset({"read", "mapfile", "readarray"})
 
 
-def _temp_assigned(code: str, state: dict) -> None:
-    """Each variable the piece sets to a fresh mktemp path (_MKTEMP_ASSIGN) holds a path in the temporary folder for
-    the rest of the step, so a log written through it (`pytest > "$LOG"`) is known to stay there."""
-    for m in _MKTEMP_ASSIGN.finditer(code):
-        state["env"][m.group(1)] = os.path.join(tempfile.gettempdir(), f"mktemp-{m.group(1)}")
+def _fresh_temps(code: str) -> dict:
+    """{name: [whether it sets a fresh mktemp path (_FRESH_TEMP), for each `name=` word of the piece, in order]}, read
+    from the piece's text outside quotes and heredoc bodies. Only a word at the piece's own level is fresh: one inside
+    a subshell or a command substitution sets the variable there alone. _assign takes the marks in the order the
+    shell reader gives the words, so a later assignment of the same command wins, as in the shell."""
+    text = shellparse.strip_heredocs(code)
+    out, stack, i, n = {}, [], 0, len(text)
+    while i < n:
+        ch, top = text[i], (stack[-1] if stack else None)
+        if top == "'":
+            if ch == "'":
+                stack.pop()
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == '"' and top == '"' or ch == "`" and top == "`" or ch == ")" and top == "(":
+            stack.pop()
+        elif text.startswith("$(", i) or (ch == "(" and top != '"'):
+            stack.append("(")
+            i += 2 if ch == "$" else 1
+            continue
+        elif ch == "`" or (ch in "'\"" and top != '"'):
+            stack.append(ch)
+        elif top is None and (i == 0 or text[i - 1] in " \t\n;&|"):
+            m = _ASSIGN_AT.match(text, i)
+            if m:
+                out.setdefault(m.group(1), []).append(bool(_FRESH_TEMP.match(text, m.end())))
+                i = m.end()
+                continue
+        i += 1
+    return out
+
+
+def _set_by_command(argv, words, env: dict) -> None:
+    """Each variable a command sets to a value read when the step runs (_READS_INTO, a for or select loop, printf -v)
+    holds a path this Mac cannot tell for the rest of the step: `read LOG <<< "$HOME/.bashrc"; pytest > "$LOG"`."""
+    names = []
+    k = 0
+    while k < len(argv) and argv[k] in shellparse.RESERVED and argv[k] != "select":
+        k += 1
+    if argv[k:k + 1] in (["for"], ["select"]):
+        names = argv[k + 1:k + 2]
+    elif words and os.path.basename(words[0]) in _READS_INTO:
+        names = words[1:]  # its options' values too: a name too many only makes devkit more careful
+    elif words and os.path.basename(words[0]) == "printf":
+        for j, w in enumerate(words[1:], 1):
+            if w == "-v":
+                names = words[j + 1:j + 2]
+            elif w.startswith("-v"):
+                names = [w[2:]]
+            if not w.startswith("-") or w == "--" or names:
+                break
+    for name in names:
+        if _NAME.fullmatch(name):
+            env[name] = _UNKNOWN
 
 
 def _assign(argv, words, state: dict) -> None:
     """A variable the step sets for the rest of its script (`LOG=~/.bashrc`, `export LOG="$HOME/.npmrc"`) goes into
-    the step's variables (`state["env"]`), expanded as the shell does (`~`, the variables known here), so a later
-    redirect or tee target that names it (`pytest > $LOG`) is the file it holds. A value made of a command's output
-    keeps its `$`, so _shell_path cannot tell where it points; an assignment in front of a command (`LOG=x pytest`) is
-    that command's own and is left alone."""
-    if not words:
-        given = argv
-    elif os.path.basename(words[0]) in _DECLARES:
-        given = [w for w in words[1:] if not w.startswith(("-", "+"))]
-    else:
-        return
-    env = state["env"]
-    for w in given:
+    the step's variables (`state["env"]`), expanded as the shell does (`~`, the variables _expand_params knows), so a
+    later redirect or tee target that names it (`pytest > $LOG`) is the file it holds. The words count in their
+    order: a fresh mktemp path (`state["fresh"]`, _fresh_temps) holds a path in the temporary folder until a later
+    word sets the variable again. A value made of a command's output keeps its `$`, so _shell_path cannot tell where
+    it points, and so does one that read, for or printf -v sets (_set_by_command); an assignment in front of a command
+    (`LOG=x pytest`) is that command's own and is left alone."""
+    env, fresh = state["env"], state.get("fresh") or {}
+    marks = []  # whether each word of argv sets a fresh mktemp path, in the order of the piece's `name=` words
+    for w in argv:
         m = _ASSIGNMENT.fullmatch(w)
+        queue = fresh.get(m.group(1)) if m else None
+        marks.append(queue.pop(0) if queue else False)
+    if not words:
+        given = range(len(argv))
+    elif os.path.basename(words[0]) in _DECLARES and list(argv[len(argv) - len(words):]) == list(words):
+        given = [k for k in range(len(argv) - len(words) + 1, len(argv)) if not argv[k].startswith(("-", "+"))]
+    else:
+        _set_by_command(argv, words, env)
+        return
+    for k in given:
+        m = _ASSIGNMENT.fullmatch(argv[k])
         if not m:
             continue
-        value = m.group(2)
-        if value == "~" or value.startswith("~/"):
-            value = os.path.expanduser("~") + value[1:]
-        env[m.group(1)] = _SHELL_VAR.sub(lambda v: env.get(v.group(1) or v.group(2)) or "", value)
+        if marks[k]:
+            env[m.group(1)] = os.path.join(tempfile.gettempdir(), f"mktemp-{m.group(1)}")
+        else:
+            env[m.group(1)] = _expand_params(_home_tilde(m.group(2)), env)
 
 
 def _prep_one(argv, words, as_root: bool, state: dict):
@@ -2540,8 +2675,7 @@ def _prep_one(argv, words, as_root: bool, state: dict):
         # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs. A
         # dotfile or dot folder, or a write as root, blocks the step instead next to a check.
         targets = _written(words, _WRITERS[name])
-        found = _home_write(targets, as_root, state) or (_unknown_write(targets, state) if name == "tee" and
-                                                         not as_root else None)
+        found = _home_write(targets, as_root, state) or (None if as_root else _unknown_write(targets, state))
         if found:
             return found
         # A write as root cannot run here, so next to a check it blocks: skipping `pytest | sudo tee /tmp/x.log`
@@ -2651,9 +2785,10 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     a substitution that runs the setup, next to a check, is tangled: the setup cannot be taken out without the check.
     `source`/`.` and a command or process substitution (see _substitutions) are checks. A write into the home folder,
     by a writing command or a shell redirect, is setup only in a piece that runs no check: `pytest | tee
-    ~/pytest.log` and `pytest > ~/pytest.log` are the check, and run. A redirect or tee target this Mac cannot tell
-    (_unknown_write) is setup alone too, and next to a check it blocks the piece, as a dotfile does: `LOG=$(echo
-    ~/.bashrc); pytest > $LOG` is not run. A variable set to a fresh mktemp path is known (_temp_assigned)."""
+    ~/pytest.log` and `pytest > ~/pytest.log` are the check, and run. A redirect or a writing command's target this
+    Mac cannot tell (_unknown_write) is setup alone too, and next to a check it blocks the piece, as a dotfile does:
+    `LOG=$(echo ~/.bashrc); pytest > $LOG` is not run. A variable set to a fresh mktemp path is known until a later
+    word sets it again (_fresh_temps, _assign)."""
     code = piece["code"]
     piped = _PIPED_INSTALLER.search(code)
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
@@ -2679,6 +2814,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
                                        f"write outside the checkout: write the log to a path inside the checkout or "
                                        f"from mktemp")
 
+    state["fresh"] = _fresh_temps(code)
     for argv, words, as_root, container, redirects in _commands(code, state=state):
         # `pytest > ~/.bashrc`, `pytest > "$(…)"`: the shell writes it, whatever the command
         shell = _home_write(*redirects, state) or _unknown_write(redirects[0], state)
@@ -2700,7 +2836,6 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             roots.append(got[1])
         elif not _informational(argv, words):
             checks.append(words)
-    _temp_assigned(code, state)
     fed = not roots and all(os.path.basename(c[0]) in _SETUP_FEEDS for c in checks)  # only downloads beside it
     if system and not held and not fed:  # `pytest | sudo tee /var/log/pytest.log`: a check's output, as root
         held = ("root", f"runs {system} as root (sudo), which dev ci --run does not do on this Mac")
@@ -2715,7 +2850,8 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
         # runs cannot be left out without the command that uses its output, so next to a check it is tangled; one
         # that only feeds the setup (`apt-get install "linux-headers-$(uname -r)"`) leaves the piece setup.
         checks.append([script])
-        inside = dict(state, env=dict(state["env"]))  # a subshell of its own: its `cd` and variables stay in it
+        # a subshell of its own: its `cd` and variables stay in it
+        inside = dict(state, env=dict(state["env"]), fresh=_fresh_temps(script))
         for argv, words, as_root, container, redirects in _commands(script, state=inside):
             got = None if container else _prep_one(argv, words, as_root, inside)
             got = got if got and got[0] in ("setup",) + _OUTSIDE_KINDS else \
@@ -3039,19 +3175,59 @@ def _fmt_secs(s) -> str:
     return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
 
 
+CI_KEEP_DAYS = 30  # the local CI evidence, and the step logs and records of a checkout nothing has run in since
+
+
 def _steps_file(c) -> Path:
-    return _ci_dir() / "steps" / f"{_key(c)}.json"
+    return _ci_dir() / "steps" / f"{_checkout_key(c)}.json"
 
 
 def step_records(c) -> dict:
-    """The last result of every local CI step: {"<job> › <step>": {rc, tree, sha, secs, how, failed_tests, …}}."""
+    """The last result of every local CI step in this checkout: {"<job> › <step>": {rc, tree, sha, secs, how,
+    failed_tests, …}}. Each checkout keeps its own (_checkout_key): another worktree's run never changes what
+    --resume keeps here."""
     data = core.read_json(_steps_file(c), {})
     return (data.get("steps") or {}) if isinstance(data, dict) else {}
 
 
+def _step_history(c) -> dict:
+    """{"<job> › <step>": {"longest": seconds}}: the longest whole pass of each step in any checkout of the project,
+    and in the one file the project kept before each checkout had its own, so the limit it sets (step_limit) holds
+    in a new worktree too."""
+    found = {}
+    files = [_ci_dir() / "steps" / f"{_key(c)}.json"] + \
+        [Path(f) for f in _glob.glob(str(_ci_dir() / "steps" / (_glob.escape(_key(c)) + "@*.json")))]
+    for f in files:
+        data = core.read_json(f, {})
+        steps = data.get("steps") if isinstance(data, dict) else None
+        for key, rec in (steps.items() if isinstance(steps, dict) else ()):
+            secs = _longest_pass(rec)
+            if secs and secs > (found.get(key) or 0):
+                found[key] = secs
+    return {key: {"longest": secs} for key, secs in found.items()}
+
+
+def _prune_ci_runs() -> None:
+    """Remove the step logs and records of every checkout nothing has run dev ci --run in for CI_KEEP_DAYS days (a
+    worktree removed long ago), as record_evidence does with the evidence markers."""
+    cutoff = time.time() - CI_KEEP_DAYS * 86400
+    for d in ((_ci_dir() / "logs").iterdir() if (_ci_dir() / "logs").is_dir() else ()):
+        try:
+            if d.is_dir() and d.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+    for f in (_ci_dir() / "steps").glob("*.json"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
 def _save_step(c, key, rec) -> None:
-    """Record step `key`'s result in the project's steps file, read, changed and written under the file's lock (a
-    second `dev ci --run` of the project saving at once waits instead of dropping this step) and written in one step
+    """Record step `key`'s result in this checkout's steps file, read, changed and written under the file's lock (a
+    second `dev ci --run` of the checkout saving at once waits instead of dropping this step) and written in one step
     through a temporary file of its own (core.replace_text). A lock still held after its wait is written over: a lost
     record only runs its step again on --resume."""
     f = _steps_file(c)
@@ -3494,8 +3670,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
               [(s["job"], s["name"], s["skip"], s["blocking"]) for j in jobs if not j["skip"] for s in j["steps"]
                if s["skip"] and s["skip"] != "setup"]
     setup = sum(1 for j in jobs for s in j["steps"] if s["skip"] == "setup")
-    history = step_records(c)  # each step's last record: what --resume keeps, and its longest pass for its limit
-    records = history if resume else {}
+    history = _step_history(c)  # each step's longest pass in any checkout of the project: its limit (step_limit)
+    records = step_records(c) if resume else {}  # each step's last record in this checkout: what --resume keeps
     if resume and not records:
         info("nothing recorded yet: --resume runs every step")
         resume = False
@@ -3535,7 +3711,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
         launcher.write_text(f"#!/bin/sh\nexec {shlex.quote(shutil.which('python3'))} \"$@\"\n")
         launcher.chmod(0o700)
         info("python → python3 for these steps (setup-python provides `python` on the runner)")
-    logs = _ci_dir() / "logs" / _key(c)
+    _prune_ci_runs()
+    logs = _ci_dir() / "logs" / _checkout_key(c)  # this checkout's own: a run in another worktree never empties it
     logs.mkdir(parents=True, exist_ok=True)
     for f in logs.glob("*.log"):
         f.unlink()

@@ -328,9 +328,11 @@ it gets 1.5 times its longest local pass when that is over 30 minutes, else 30. 
 every step. A step past its limit ends with exit 124, prints the limit and where it came from, and names
 `dev ci --run --resume --step-timeout <twice the limit>`. A step past its limit, Ctrl-C, SIGTERM, or SIGHUP stops
 every process the step started, and `dev` then exits 124, 130, 143, or 129; under `nohup`, SIGHUP leaves the step
-running. Each step's log is kept in
-`~/.local/state/devkit/ci/logs/<repo>/`. When macOS has only `python3`, a `python` shim stands in for what
-`setup-python` provides on the runner.
+running. Each checkout keeps its own step logs and step records, so two worktrees of one repository can run
+`dev ci --run` at once: the logs are in `~/.local/state/devkit/ci/logs/<repo>@<checkout>/`, where `<checkout>` is a
+short hash of the checkout's path, and a checkout's logs and records go after 30 days without a run. A step's limit
+still comes from its longest pass in any checkout of the repository. When macOS has only `python3`, a `python` shim
+stands in for what `setup-python` provides on the runner.
 
 Steps that cannot or must not run on your Mac are skipped, with the reason:
 
