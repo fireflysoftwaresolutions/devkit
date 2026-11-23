@@ -108,6 +108,17 @@ class ApprovalTests(unittest.TestCase):
         with self.assertRaisesRegex(ap.ApprovalError, "“ui” is unverified"):
             ap.record(run, "seraph", ["ui"], "approved", T + 60, roster=ROSTER)
 
+    def test_an_approvers_check_mark_takes_unverified_work_only_when_the_caller_closes_it(self):
+        # an approver's ✓ on work that ended unverified closes it, as a review step's ✓ does: record names the steps
+        # its caller ends done; a ✗, or another member's verdict, is still refused
+        run = run_of(step("ui", "trinity", "frontend", state="unverified"))
+        self.assertEqual(ap.record(run, "seraph", ["ui"], "approved", T + 60, unverified=True,
+                                   roster=ROSTER)["closes"], ["ui"])
+        with self.assertRaisesRegex(ap.ApprovalError, "only its approver's ✓ closes"):
+            ap.record(run, "seraph", ["ui"], "changes", T + 60, unverified=True, roster=ROSTER)
+        with self.assertRaisesRegex(ap.ApprovalError, "Seraph.* approves “ui”"):
+            ap.record(run, "link", ["ui"], "approved", T + 60, unverified=True, roster=ROSTER)
+
     def test_an_approval_counts_only_after_the_work_it_approves(self):
         run = run_of(step("api", "tank", "backend"))
         ap.record(run, "seraph", ["api"], "changes", T + 60, roster=ROSTER)

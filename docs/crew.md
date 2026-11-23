@@ -207,7 +207,9 @@ The kind of work decides three things:
 member's verdict, its review step's Check or its `--approves`, counts only at the end of its lane, when the crew gates
 pass its report without a finding (see [Every report is checked](#every-report-is-checked)). A report the gates sent
 back or only recorded approves nothing, and the work stays owed until a review whose report passes. The tech lead's
-`--approves` counts at once. Nobody approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves code
+`--approves` counts at once. An approver's ✓ with `--approves` on a step that ended unverified also closes it, done
+with that verdict as its evidence, as a review step's ✓ closes the unverified work it follows; a ✗ leaves it
+unverified. Nobody approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves code
 and configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer and
 incidents by the tech lead.
 

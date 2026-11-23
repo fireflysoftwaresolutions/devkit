@@ -5052,16 +5052,29 @@ def approvals_owed(run: dict) -> list:
         return []
 
 
-def _approve(run: dict, by: str, approves: str, check: str, now: float):
+def _approve(run: dict, by: str, approves: str, check: str, now: float, agent: str = "", sid: str = ""):
     """The tech lead's `dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's
-    Check, recorded at once; a member's waits in its lane (_approve_later). ApprovalError becomes
-    StepError."""
+    Check, recorded at once; a member's waits in its lane (_approve_later). A ✓ on a step that ended unverified,
+    from its approver, closes it (_close_approved). ApprovalError becomes StepError."""
     from . import approvals
     try:
-        approvals.record(run, by, approves, approvals.verdict_of(check), now, check=check,
-                         doer_of=lambda s: member_of_step(run, s))
+        entry = approvals.record(run, by, approves, approvals.verdict_of(check), now, check=check,
+                                 doer_of=lambda s: member_of_step(run, s), unverified=True)
     except approvals.ApprovalError as e:
         raise StepError(str(e))
+    _close_approved(run, entry, "main", "the tech lead", now, agent, sid)
+
+
+def _close_approved(run: dict, entry: dict, by: str, who: str, now: float, agent: str, sid: str):
+    """The unverified steps an approval's ✓ closes (approvals.record's `closes`) end done, at the verdict's time, with
+    the verdict as their evidence, as a review step's ✓ closes the unverified work it follows (_verified_by_review)."""
+    steps = _by_name(run.get("plan") or [])
+    for n in entry.get("closes") or []:
+        x = steps.get(n)
+        if not x or x.get("state") != "unverified":
+            continue
+        _finish_step(run, x, entry["ts"], agent, sid)
+        _log_change(run, x, "unverified", "done", by, f"approved by {who}: {entry.get('check') or ''}", now)
 
 
 def _approve_later(run: dict, lane: dict, by: str, approves: str, check: str, now: float) -> str:
@@ -5072,16 +5085,19 @@ def _approve_later(run: dict, lane: dict, by: str, approves: str, check: str, no
     from . import approvals
     try:  # on a copy: nothing is recorded yet
         entry = approvals.record({**run, "approvals": list(run.get("approvals") or [])}, by, approves,
-                                 approvals.verdict_of(check), now, check=check, doer_of=lambda s: member_of_step(run, s))
+                                 approvals.verdict_of(check), now, check=check, doer_of=lambda s: member_of_step(run, s),
+                                 unverified=True)
     except approvals.ApprovalError as e:
         raise StepError(str(e))
     lane["verdicts"] = (lane.get("verdicts") or [])[-19:] + [{"ts": now, "by": by, "steps": entry["steps"],
                                                               "check": str(check)[:300]}]
     names = ", ".join(f"“{n}”" for n in entry["steps"])
-    return f"your verdict on {names} counts once your report passes the crew gates"
+    closes = ", ".join(f"“{n}”" for n in entry.get("closes") or [])
+    return f"your verdict on {names} counts once your report passes the crew gates" + \
+        (f", and then closes {closes}, unverified now" if closes else "")
 
 
-def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
+def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float, agent: str = "", sid: str = ""):
     """At a lane's end, the `--approves` verdicts its member gave (_approve_later): each is recorded as given, at the
     time it was given (approvals.record), when the crew gates passed this stop cleanly (`passed`), and is not counted
     otherwise, with the reason in the history of each step it named and in the audit trail, so that work stays owed
@@ -5104,8 +5120,10 @@ def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
             _audit("crew.approval-refused", ", ".join(names) or "?", why, "refused", project=run.get("project") or "")
             continue
         try:
-            approvals.record(run, v["by"], names, approvals.verdict_of(v.get("check")), v["ts"], check=v.get("check"),
-                             doer_of=lambda s_: member_of_step(run, s_))
+            entry = approvals.record(run, v["by"], names, approvals.verdict_of(v.get("check")), v["ts"],
+                                     check=v.get("check"), doer_of=lambda s_: member_of_step(run, s_), unverified=True)
+            from . import crew
+            _close_approved(run, entry, aid, crew.who(who), now, agent, sid)
         except (approvals.ApprovalError, KeyError, TypeError) as e:
             _audit("crew.approval-refused", ", ".join(names) or "?", str(e)[:300], "refused",
                    project=run.get("project") or "")
@@ -5263,7 +5281,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             _log_change(run, target, old_state, "done", "main",
                         f"{gone}; closed on the tech lead's evidence: {check or text}" if gone else check or text, now)
             if approves:
-                _approve(run, "morpheus", approves, check, now)
+                _approve(run, "morpheus", approves, check, now, agent, sid)
             _advance_main(run, now)
             run["state"] = "running"
         elif kind == "blocked":
@@ -7145,7 +7163,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             passed = _passed_now(token, lane or {}, now)
             spent.append(passed)
             _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid, passed=passed)
-            _lane_verdicts(run, lane or {}, aid, passed, now)
+            _lane_verdicts(run, lane or {}, aid, passed, now, agent, rsid)
             # what the gates still found goes in the session's own run, once
             # a run that does not list the lane names the member from the stop's own agent type
             _tell_uncounted(run, lane or {"persona": kind}, now, findings if rsid == sid else "")

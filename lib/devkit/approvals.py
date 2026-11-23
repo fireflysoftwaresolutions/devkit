@@ -235,10 +235,12 @@ def owed(run: dict, doer_of=None, roster=None) -> list:
 
 
 def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step", check: str = "",
-           doer_of=None, roster=None) -> dict:
+           doer_of=None, roster=None, unverified: bool = False) -> dict:
     """Record `by`'s verdict ("approved" or "changes") on the named steps, in the run -> the entry. Refused, whole,
     when a step is not done, has no kind of work (so no approver), when `by` did it (self-approval) or is not its
-    approver. The developer approves through a decision that names the steps (verdicts), never here."""
+    approver. `unverified`: the caller closes the unverified steps an approval names, as a review step's ✓ closes the
+    unverified work it follows, so its approver's ✓ takes them, listed in the entry's `closes`; a ✗ still leaves them
+    unverified, refused. The developer approves through a decision that names the steps (verdicts), never here."""
     from . import raci
     if verdict not in VERDICTS:
         raise ApprovalError(f"the verdict is one of {', '.join(VERDICTS)}")
@@ -248,13 +250,20 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
                             "their answer with dev crew decide")
     doer_of = doer_of or (lambda s: doer(run, s, roster))
     targets = _steps(run, steps)
-    problems = []
+    problems, closes = [], []
     for s in targets:
-        if s.get("state") != "done":
+        if s.get("state") == "unverified" and unverified and verdict != "approved":
+            problems.append(f"“{s['name']}” is unverified: only its approver's ✓ closes it; a ✗ leaves it for the "
+                            f"tech lead to reopen (dev progress reopen \"{s['name']}\" --why \"…\")")
+            continue
+        closing = s.get("state") == "unverified" and unverified  # the caller ends it done, at or before this verdict
+        if closing:
+            closes.append(s["name"])
+        elif s.get("state") != "done":
             problems.append(f"“{s['name']}” is {s.get('state') or 'pending'}, not done: Morpheus closes it with "
                             f"evidence first (dev progress step --step \"{s['name']}\" --check \"…\")")
             continue
-        if not s.get("finished"):
+        if not closing and not s.get("finished"):
             problems.append(f"“{s['name']}” has no finish time, so no approval can be shown to come after its "
                             f"work: dev progress reopen \"{s['name']}\" --why \"…\", then close it with evidence")
             continue
@@ -274,6 +283,8 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
     entry = {"ts": now, "by": by, "steps": [s["name"] for s in targets], "verdict": verdict, "via": via}
     if check:
         entry["check"] = str(check)[:300]
+    if closes:
+        entry["closes"] = closes
     run["approvals"] = [a for a in run.get("approvals") or []][-399:] + [entry]
     return entry
 

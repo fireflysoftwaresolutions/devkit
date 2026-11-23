@@ -210,5 +210,53 @@ class NonReviewCloseTests(unittest.TestCase):
         self.assertIn(("keymaker", ["pipeline"]), pg.approvals_owed(run))
 
 
+class UnverifiedApprovalTests(unittest.TestCase):
+    # The Release engineer's pipeline ended unverified (its Check ⚠). Its approver checks it and gives a ✓ with
+    # --approves: the step ends done with that approval, as a review step's ✓ closes the unverified work it follows,
+    # where approvals.record refused it as not done.
+    REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** api · `main` · threat\n- **Done:** x\n"
+              "- **Check:** ✓ ran the 3 jobs\n- **Next:** the tech lead merges")
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Work", plan="pipeline=10m; threat=10m; docs=10m; wrap=5m", now=self.t0)
+        pg.assign("pipeline", "Link", activity="cicd", now=self.t0)
+        launch("a_link", "devkit:link", "Release engineer (Link): pipeline", self.t0 + 60)
+        pg.step("pipeline built", which="pipeline", check="⚠ 2 of 3 jobs run locally", from_agent="a_link",
+                now=self.t0 + 600)
+
+    def plan(self):
+        return {s["name"]: s for s in pg.load_run("claude", "s1")["plan"]}
+
+    def test_a_members_check_mark_closes_its_unverified_work_once_the_gates_pass_its_report(self):
+        from test_progress import gates_passed
+        self.assertEqual(self.plan()["pipeline"]["state"], "unverified")
+        pg.assign("threat", "Keymaker", activity="security", now=self.t0 + 660)
+        launch("a_key", "devkit:keymaker", "Security engineer (The Keymaker): threat", self.t0 + 720)
+        run = pg.step("threat model done", which="threat", check="✓ ran the 3 jobs", from_agent="a_key",
+                      approves="pipeline", now=self.t0 + 1200)
+        self.assertIn("closes “pipeline”", run["lane_outcome"]["why"])
+        self.assertEqual(self.plan()["pipeline"]["state"], "unverified")  # it counts with the gates' pass
+        gates_passed("a_key", at=self.t0 + 1290)
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_key", "agent_type": "devkit:keymaker",
+                                  "last_assistant_message": self.REPORT}, False, now=self.t0 + 1300)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(self.plan()["pipeline"]["state"], "done")
+        self.assertNotIn(("keymaker", ["pipeline"]), pg.approvals_owed(run))
+        self.assertIn("approved by Security engineer (The Keymaker)",
+                      [h for h in run["history"] if h["step"] == "pipeline"][-1]["why"])
+
+    def test_the_tech_leads_check_mark_closes_unverified_work_he_approves(self):
+        pg.assign("docs", "Ghost", activity="docs", now=self.t0)
+        launch("a_ghost", "devkit:ghost", "Technical writer (Ghost): docs", self.t0 + 60)
+        pg.step("docs written", which="docs", check="⚠ links not checked", from_agent="a_ghost", now=self.t0 + 600)
+        self.assertEqual(self.plan()["docs"]["state"], "unverified")
+        pg.step("wrap done", which="wrap", check="✓ read the docs, links resolve", approves="docs",
+                now=self.t0 + 900)
+        self.assertEqual(self.plan()["docs"]["state"], "done")
+
+
 if __name__ == "__main__":
     unittest.main()
