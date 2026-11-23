@@ -2002,7 +2002,10 @@ def _scope_clash(run: dict, aid: str, lane: dict, clash: list, globs: list, chec
                 f"{core.tilde(checkout)} too"
     else:
         where = "neither scope names a checkout, so each holds its files in every checkout"
-    fix = (f"dev progress assign {shlex.quote(step['name'])} --to {shlex.quote(step.get('label') or who)} --scope "
+    label = (step or {}).get("label") or ""
+    mem = crew._for_label(label) if label and ":" not in label else None  # a launch description binds one lane
+    fix = (f"dev progress assign {shlex.quote(step['name'])} --to {mem['id'] if mem else shlex.quote(label or who)} "
+           f"--scope "
            f"\"{bind}\", then this "
            "assign again" + ("" if checkout else f" with --scope \"{_in_worktree(globs)}\"")) if step else \
         "give each scope as paths in its worktree (--scope \"<worktree>/<glob>\")"

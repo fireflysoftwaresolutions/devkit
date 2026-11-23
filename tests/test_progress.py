@@ -860,7 +860,7 @@ class AbsoluteScopeTests(unittest.TestCase):
             told = str(e.exception)
             self.assertIn("names no checkout", told)
             self.assertIn(f"in every checkout, {core.tilde(os.path.realpath(wt))} too", told)  # the new one's
-            self.assertIn('''dev progress assign 'release notes' --to Link --scope "<their worktree>/lib/**"''',
+            self.assertIn('''dev progress assign 'release notes' --to link --scope "<their worktree>/lib/**"''',
                           told)  # a command the shell runs as it reads
             pg.assign("release notes", "Link", scope=f"{main}/lib/**", cwd=str(main), why="test", now=self.m(3))
             self.assertEqual(pg.assign("ext", "Kid", scope=f"{wt}/lib/**", cwd=str(main), why="test",
