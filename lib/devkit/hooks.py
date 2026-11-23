@@ -1536,6 +1536,8 @@ def _close_call(data: dict):
         try:
             from . import identity, progress
             entry = progress.call_entry(data)
+            if data.get("tool_name") in SHELL_TOOLS and data.get("hook_event_name") != "PreToolUse":
+                identity.keep_background(entry)  # a background call closes as it starts: kept for its reads
             if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
                 progress.call_closed(data)
             if data.get("tool_name") in SHELL_TOOLS and entry.get("agent") and data.get("tool_use_id"):
@@ -1738,6 +1740,64 @@ def _stamped_token(agent: str, data: dict, new, token: str, digest: str):
         _token_skipped(agent, data, "the session record is busy")
         return None
     return tokened
+
+
+def _text_pinnable(agent: str, data: dict) -> bool:
+    """Does this shell call go out exactly as the agent wrote it, its dev command named by the text pin
+    (identity._text_verdict)? Where the agent checks the developer's permission rules on the command it runs (not
+    _unasked), on sh, bash or zsh, for one dev call of plain words with nothing in front (_bare_dev_call): the host
+    then judges that very text, so an allow rule such as Bash(dev progress:*) matches it, and devkit changes nothing
+    the host judges (ADR-9). On Codex, only when Codex would not apply devkit's rewrite (_pre_tool)."""
+    if data.get("tool_name") not in SHELL_TOOLS or _unasked(agent, data) or not _sh_family(agent, data):
+        return False
+    cmds = _shell_inputs(data)
+    return len(cmds) == 1 and bool(cmds[0][0]) and _bare_dev_call(cmds[0][1])
+
+
+def _bare_dev_call(cmd: str) -> bool:
+    """One dev call made only of plain words (_PLAIN_WORD), `dev` first as the shell finds it on PATH, unquoted, and
+    nothing in front: no variable, no path, no separator, redirection, newline or word a shell expands."""
+    if not isinstance(cmd, str):
+        return False
+    words, at = [], 0
+    while True:
+        m = _PLAIN_WORD.match(cmd, at)
+        if not m:
+            break
+        words.append(m.group(1))
+        at = m.end()
+    return not cmd[at:].strip(" \t") and len(words) > 1 and words[0] == "dev"
+
+
+def _text_call(agent: str, data: dict):
+    """Record a call that goes out as written for the text pin: its entry names its pin (pin_by "text"), the loop
+    that launches the agent's calls when the agent's hook runs below one, a background call as such, and on Claude
+    Code the Codex thread it carries; the session record lists it as opened. A failure is audited
+    (calls.token-skipped): its dev command then falls to the ledger's rules, and a state change is refused."""
+    from . import identity, progress
+    sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
+    owner = progress.call_entry(data).get("agent_pid")
+    launched = isinstance(owner, int) and _hook_launched_by(owner)
+    if isinstance(owner, int) and not launched:
+        progress.call_note(data, agent_pid=None)  # an agent further up started what runs this hook, not the hook
+    try:
+        identity.make_pin_folder(sid)
+    except OSError:
+        _token_skipped(agent, data, "its pin folder could not be made")
+        return
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    background = inp.get("run_in_background") is True or data.get("tool_name") == "Monitor"
+    host = (os.environ.get(identity.THREAD_VAR) or "").strip()[:80] if agent == "claude" else ""
+    fields = {"pin": str(identity.pin_path(sid, tid)), "pin_by": "text",
+              **({"launcher_pid": os.getppid()} if launched else {}), **({"background": True} if background else {}),
+              **({"host_thread": host} if host else {})}
+    progress.call_note(data, **fields)
+    entry = progress.call_entry(data)
+    if any(entry.get(k) != v for k, v in fields.items()):
+        _token_skipped(agent, data, "its call ledger entry does not hold its pin")
+        return
+    if not identity.note_opened(agent, sid, tid):
+        _token_skipped(agent, data, "the session record is busy")
 
 
 def _identity_strip_advice(agent: str, data: dict) -> list:
@@ -3356,16 +3416,28 @@ def _pre_tool(agent: str, data: dict):
         except Exception:
             _log(f"pre-tool edit ledger {agent}: {traceback.format_exc()[-300:]}")
     held = []  # the routing steps whose rewrite Codex's gate turned down (_routed)
-    routed = _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent), held)
-    stamped = None if routed else _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
-    unroutable = [] if routed or stamped else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
+    # a plain dev call where the agent checks the developer's rules goes out as written (_text_pinnable): Claude Code
+    # judges the text the agent wrote, and Codex applies no rewrite it would ask about
+    text = bool(token) and _text_pinnable(agent, data)
+    routed = None if text and agent != "codex" else \
+        _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent), held)
+    stamped = None if routed or text and agent != "codex" else \
+        _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
+    text = text and not (routed or stamped)
+    unroutable = [] if routed or stamped or text else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
         _advice(agent, "crew-lane", lambda: _unroutable_lane_advice(agent, data))
     advice += unroutable + _advice(agent, "identity", lambda: _identity_strip_advice(agent, data))
     for line in advice:
         _log(f"pre-tool {agent} advice: {line[:160]}")
     _post_codex_advice(agent, data, advice, bool(unroutable))
     final = None
-    if tool in SHELL_TOOLS:
+    if tool in SHELL_TOOLS and text:
+        try:
+            _text_call(agent, data)
+        except Exception as e:  # the call goes out as written; its dev command then has no text pin
+            _log(f"pre-tool text pin {agent}: {traceback.format_exc()[-300:]}")
+            _token_skipped(agent, data, f"its text pin failed ({type(e).__name__}: {e})")
+    elif tool in SHELL_TOOLS:
         try:
             final = _stamped_token(agent, data, routed or stamped, token, digest)
         except Exception as e:  # the call goes out without its token, never without its route, advice and lessons

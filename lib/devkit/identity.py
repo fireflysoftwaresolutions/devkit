@@ -113,7 +113,7 @@ class Speaker:
     agent: str  # "claude" | "codex" | "human"
     session: str  # the session id ("shell-<ppid>" for a developer's shell)
     lane: str  # "main" | a crew member's agent_id | "" (not known)
-    how: str  # "payload" | "token" | "thread" | "stamped" | "ledger" | "sole" | "human" | "unknown"
+    how: str  # "payload" | "token" | "text-pinned" | "thread" | "stamped" | "ledger" | "sole" | "human" | "unknown"
     verified: bool  # False for a Codex main session (its hooks carry no mark) and for anyone devkit cannot name
     why: str = field(default="", compare=False)  # why devkit refuses this caller a state change ("" when it does not)
 
@@ -216,7 +216,7 @@ def verified_lane(lane: str, cwd: str | None = None, now: float | None = None) -
     one. Codex selects its session by the lane and refuses one that belongs to none (progress.resolve_session)."""
     from . import progress
     got = _find(cwd, None, now, settle=False)
-    if got.speaker.how == "token":
+    if got.speaker.how in ("token", "text-pinned"):
         if got.speaker.lane != lane:
             raise IdentityError(f"{CONFLICT}: run the dev command as a command of your own, in your lane")
         return lane
@@ -278,6 +278,13 @@ def _find(cwd=None, argv=None, now=None, exact: bool = False, settle: bool = Tru
                       members)
     if token is not None and changes:
         return _Found(Speaker(agent, sid, "", "unknown", False, token.why), agent, how, (), "")
+    text = _text_resolved(agent, sid, args, changes, now) if token is None else None
+    if text is not None and text.caller:  # rule 0c: a plain dev call the hook left as it was, pinned by the kernel
+        members = (text.caller,) if text.caller != "main" else ()
+        return _Found(Speaker(agent, sid, text.caller, "text-pinned", True), agent, how, (text.tid,), text.caller,
+                      members)
+    if text is not None and changes:
+        return _Found(Speaker(agent, sid, "", "unknown", False, text.why), agent, how, (), "")
     if token is None and agent == "codex":  # rule 0b: the Codex thread that runs the command
         thread = _thread_rule(agent, sid, args, changes, now)
         if thread:
@@ -729,6 +736,56 @@ def _proc(pid):
         return None
 
 
+def _argv(pid):
+    """The argument list of process `pid` as the kernel keeps it (sysctl KERN_PROCARGS2 on macOS, /proc/<pid>/cmdline
+    on Linux): each argument whole, never `ps`'s joined and escaped line. None when it cannot be read."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if sys.platform == "darwin":
+        import ctypes
+        import struct
+        try:
+            libc = _argv.libc = getattr(_argv, "libc", None) or ctypes.CDLL("/usr/lib/libc.dylib", use_errno=True)
+            mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or not size.value:
+                return None
+            buf = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+                return None
+        except (OSError, AttributeError):
+            return None
+        raw = buf.raw[:size.value]
+        if len(raw) < 4:
+            return None
+        argc = struct.unpack_from("i", raw, 0)[0]
+        rest = raw[4:]
+        at = rest.find(b"\0")  # the executable's path, then NUL padding, then argc arguments
+        if at < 0:
+            return None
+        while at < len(rest) and rest[at:at + 1] == b"\0":
+            at += 1
+        parts = rest[at:].split(b"\0")
+        if argc < 0 or len(parts) < argc:
+            return None
+        return [p.decode("utf-8", "surrogateescape") for p in parts[:argc]]
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    return [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0")[:-1]] if raw else None
+
+
+def _children(parents) -> list:
+    """The processes whose parent is one of `parents`, from the process table (progress._ps)."""
+    from . import progress
+    want = {p for p in parents if isinstance(p, int)}
+    return [pid for pid, (ppid, _) in progress._ps().items() if ppid in want]
+
+
 def _read_pin(path):
     """The pid a pin names; None when there is no pin; -1 when it holds anything but digits."""
     try:
@@ -988,6 +1045,252 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
             inode = None
         _mark_used(sid, tid, pinned, start, inode)
     return pinned
+
+
+# --------------------------------------------------------------------------- the text pin (ADR-9)
+# Where the agent checks the developer's permission rules on the command it runs (Claude Code outside
+# bypassPermissions; Codex where it asks and would not apply devkit's rewrite), the hook leaves a plain dev call as
+# the agent wrote it, so an allow rule such as Bash(dev progress:*) matches it, and records its ledger entry with
+# pin_by "text". The dev command then names its caller by kernel facts, never by text alone (how "text-pinned"):
+#   - exactly one open text entry of this session types this very dev command (_is_exactly); two, from any callers,
+#     refuse a state change (identical concurrent commands);
+#   - the nearest agent process above this command is the entry's, and the call's process sits right below it (or
+#     below the loop that launches its calls): on Claude Code the call's shell with this command as its child, on
+#     Codex that shell or the dev process it replaced itself with;
+#   - the call's shell carries the entry's exact command in its own argument list, read from the kernel, in the
+#     host's form (Claude Code: `eval '<command>' … && pwd -P >| …-cwd`; Codex: `<shell> -lc <command>`), compared by
+#     the SHA-256 the entry keeps of the whole command;
+#   - that process started within TEXT_WINDOW_S of the call opening, in this command's process session;
+#   - for a state change: no other process right below the agent, started in that window, claims the same command
+#     (a second claimant), and the call's pin, written by its first dev command with O_EXCL, names that same process;
+#     either one marks the call contested, which refuses it for everyone and is audited.
+# A read or a wait that fails these checks falls to the ledger rules (text equality decides reads and waits only). A
+# background call's entry closes as soon as it starts; its record is kept for BACKGROUND_KEEP_S for its reads and
+# waits only (keep_background), and a state change in it is refused with the foreground fix.
+TEXT_WINDOW_S = 10.0  # its shell starts after the PreToolUse hooks end: about 0.13 s measured, 10 s under load
+BACKGROUND_KEEP_S = 60.0
+AMBIGUOUS = ("several open calls of this session run this very command, so devkit cannot tell whose it is: run it "
+             "again in a moment, as a command of its own")
+NOT_THE_CALL = ("devkit could not tie this command to its call (it does not run as that call's own dev command): run "
+                "it again as a command of its own")
+CONTESTED = "another process claimed this call's command first, so it names nobody: run it again in your own call"
+_CLAUDE_EVAL = re.compile(r"""(?:^|[\s;&|(])eval '((?:[^']|'"'"')*)'(?: \\?< /dev/null)? && pwd -P >\| \S+\Z""",
+                          re.S)
+
+
+def text_command(agent: str, argv) -> str | None:
+    """The command a call's shell runs, from its kernel argument list in the host's form: Claude Code's
+    `<shell> -c <script>` whose script ends with `eval '<command>' [< /dev/null] && pwd -P >| <cwd file>` (Claude Code
+    2.1.330), Codex's `<shell> -lc <command>` or `-c` (Codex 0.167). None for any other form."""
+    if not isinstance(argv, list) or len(argv) < 3 or os.path.basename(str(argv[0])) not in ("zsh", "bash", "sh"):
+        return None
+    if agent == "codex":
+        return argv[-1] if len(argv) == 3 and argv[1] in ("-lc", "-c") else None
+    if argv[1] not in ("-c", "-lc") and argv[1:3] != ["-c", "-l"]:
+        return None
+    m = _CLAUDE_EVAL.search(argv[-1])
+    return m.group(1).replace("'\"'\"'", "'") if m else None
+
+
+def _holds(agent: str, argv, entry: dict) -> bool:
+    """Does a process's argument list run exactly the entry's whole command (its SHA-256, as the entry keeps it)?"""
+    cmd = text_command(agent, argv)
+    want = entry.get("cmd_sha256")
+    return cmd is not None and isinstance(want, str) and hmac.compare_digest(
+        hashlib.sha256(cmd.encode()).hexdigest(), want)
+
+
+def _runs_dev(argv, args: list) -> bool:
+    """Is a process's argument list a `dev` command with exactly these arguments (a shell that replaced itself with
+    it)?"""
+    if not isinstance(argv, list) or len(argv) <= len(args):
+        return False
+    head = argv[:len(argv) - len(args)] if args else argv
+    return argv[len(argv) - len(args):] == list(args) and bool(head) and os.path.basename(str(head[-1])) == "dev"
+
+
+def background_path(sid: str, tid: str):
+    """A background text call's kept record: CALLS/<sid>/.<tid>.background (a dot-file: no reader of the ledger takes it
+    for an open call)."""
+    from . import progress
+    return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.background"
+
+
+def keep_background(entry: dict):
+    """The PostToolUse of a background text call (it closes as soon as it starts): its entry is kept for
+    BACKGROUND_KEEP_S so the dev command it starts can still name its caller for a read or a wait."""
+    if entry.get("pin_by") != "text" or not entry.get("background"):
+        return
+    path = background_path(str(entry.get("session") or ""), str(entry.get("tool_use_id") or ""))
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except OSError:
+        return
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps(entry))
+
+
+def _kept_background(sid: str, now: float) -> list:
+    """The background text calls of session `sid` kept for their reads and waits; older ones go."""
+    from . import progress
+    out = []
+    try:
+        files = list((progress.CALLS / progress._safe_name(sid)).glob(".*.background"))
+    except OSError:
+        return []
+    for f in files:
+        try:
+            e = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(e, dict) or now - float(e.get("ts") or 0) > BACKGROUND_KEEP_S:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            continue
+        out.append(e)
+    return out
+
+
+def _contest(entry: dict):
+    """Mark a text call contested: its pin's `.contested` marker, which refuses it for every later claimant."""
+    path = str(entry.get("pin") or "")
+    if not path:
+        return
+    try:
+        os.close(os.open(f"{path}.contested", os.O_WRONLY | os.O_CREAT, 0o600))
+    except OSError:
+        pass
+
+
+def _types(entry: dict, args: list) -> bool:
+    """Does a text call's entry type this very dev command? The hook records one only for a single plain dev call, so
+    its text is that command (_is_exactly); a text the ledger cut or redacted counts by the exact argument list it
+    kept the hash of (progress.args_hash)."""
+    from . import progress
+    if entry.get("cut") or entry.get("dev_args"):
+        return bool(args) and progress.args_hash(args) in (entry.get("dev_args") or [])
+    return _is_exactly(entry, args)
+
+
+def _text_resolved(agent: str, sid: str, args: list, changes: bool, now):
+    """Rule 0c, once per process (_RESOLVED): the text pin's verdict, None when no text call of this session types
+    this command (the other rules then apply). A failure is audited, as a denial for a state change."""
+    from . import progress
+    key = ("text", os.getpid(), tuple(args), str(progress.CALLS), agent, sid)
+    if key not in _RESOLVED:
+        _RESOLVED[key] = v = _text_verdict(agent, sid, args, changes, now)
+        if v is not None and v.code and (changes or v.code != "calls.text-ambiguous"):
+            _audit_identity(v.code, v, agent, sid, args, "deny" if changes else "flagged")
+    return _RESOLVED[key]
+
+
+def _text_verdict(agent: str, sid: str, args: list, changes: bool, now):
+    """The checks of the text pin, in order (the notes above)."""
+    from pathlib import Path
+    from . import core, progress
+    now = now or time.time()
+    found = [e for e in progress.open_calls(sid, now) if e.get("pin_by") == "text" and _types(e, args)]
+    if not found:
+        found = [e for e in _kept_background(sid, now) if _types(e, args)]
+    if not found:
+        return None
+    if len(found) > 1:
+        return _Verdict("", code="calls.text-ambiguous", why=AMBIGUOUS,
+                        detail=f"{len(found)} open calls run this very command")
+    entry = found[0]
+    tid = str(entry.get("tool_use_id") or "")
+
+    def no(code, detail, why=NOT_THE_CALL, ancestors=()):
+        return _Verdict(tid, code=code, why=why, detail=detail, ancestors=ancestors)
+    if str(entry.get("session")) != str(sid) or str(entry.get("agent")) != str(agent):
+        return no("caller.foreign-session", "its entry names another session", FOREIGN)
+    if entry.get("background") and changes:
+        return no("caller.stale-token", "a background call's state change", STALE)
+    chain = _chain()
+    pids = [p for p, _ in chain]
+    owner, launcher = entry.get("agent_pid"), entry.get("launcher_pid")
+    above = tuple(pids[:pids.index(owner) + 1] if owner in pids else pids)
+    if not isinstance(owner, int):
+        return no("caller.token-unpinned", "its call's agent process is not known", UNPINNED, above)
+    agents = [p for p, line in chain if core.is_agent_process(line)]
+    if not agents:
+        return no("caller.stale-token", "no agent process runs it (detached)", STALE, above)
+    if agents[0] != owner:
+        return no("caller.foreign-agent", f"its nearest agent process is {agents[0]}, its call's is {owner}", FOREIGN,
+                  above)
+    me = _pid()
+    own = [p for p in pids[:pids.index(owner)] if p != launcher]
+    if agent == "codex":  # the call's shell, or the dev process it replaced itself with
+        if len(own) > 1:
+            return no("caller.text-not-the-call", f"it runs {len(own)} processes below its call's agent", ancestors=above)
+        call = own[0] if own else me
+    else:  # Claude Code's call shell never replaces itself: this command is its child
+        if len(own) != 1:
+            return no("caller.text-not-the-call", f"it runs {len(own)} processes below its call's agent", ancestors=above)
+        call = own[0]
+    if call != me and not _holds(agent, _argv(call), entry):
+        return no("caller.text-mismatch", f"its call's process {call} does not run the call's command", ancestors=above)
+    info = _proc(call)
+    if info is None:
+        return no("caller.stale-token", f"its call's process {call} has exited", STALE, above)
+    parent, start = info
+    if parent not in (owner, launcher):
+        return no("caller.text-not-the-call", f"its call's process {call} is not a call shell of the agent (its parent "
+                                              f"is {parent})", ancestors=above)
+    ts = float(entry.get("ts") or 0)
+    if start < ts - 0.001 or start > ts + TEXT_WINDOW_S:
+        return no("calls.pin-early", f"its call's process {call} started at {start:.6f}, outside its call's window "
+                                     f"({ts:.3f} + {TEXT_WINDOW_S:g} s)", ancestors=above)
+    if call != me and _session_of(0) != _session_of(call):
+        return no("caller.stale-token", "it runs in a process session of its own (detached)", STALE, above)
+    if agent == "claude" and str(entry.get("host_thread") or "") != (os.environ.get(THREAD_VAR) or "").strip():
+        return no("caller.foreign-agent", "it carries a Codex thread id its Claude Code call did not", FOREIGN, above)
+    caller = str(entry.get("caller") or "main")[:80]
+    lane = (os.environ.get(LANE_VAR) or "").strip()[:80]
+    if lane and lane != caller:
+        return no("caller.conflict", f"the call names {caller}, the lane variable {lane}", CONFLICT, above)
+    if agent == "codex":
+        clash = _thread_evidence(agent, sid, caller, owner, tid)
+        if clash:
+            return no("caller.conflict", clash, CONFLICT, above)
+    if changes:
+        path = Path(str(entry.get("pin") or ""))
+        if not entry.get("pin"):
+            return no("caller.token-foreign-use", "its call recorded no pin", ancestors=above)
+        if os.path.lexists(f"{path}.contested"):
+            return no("calls.pin-contested", "another process claimed this call first", CONTESTED, above)
+        for other in _children({owner, launcher} - {None}):
+            if other in (call, me):
+                continue
+            o = _proc(other)
+            if o is None or not ts - 0.001 <= o[1] <= ts + TEXT_WINDOW_S:
+                continue
+            argv = _argv(other)
+            if _holds(agent, argv, entry) or (agent == "codex" and _runs_dev(argv, args)):
+                _contest(entry)
+                return no("calls.pin-contested", f"process {other} claims this call's command too", CONTESTED, above)
+        pinned = call if _write_pin(path, call) else _read_pin(path)
+        if pinned is None or pinned == -1:  # no pin could be written or read: nobody claimed it, nothing contested
+            return no("calls.pin-malformed", "its call's pin could not be written or read", ancestors=above)
+        if pinned != call:
+            _contest(entry)
+            return no("calls.pin-contested", f"its call is pinned to process {pinned}, and this command runs in "
+                                             f"{call}", CONTESTED, above)
+        used = _read_used(sid, tid)
+        if used and (used.get("pid") != call or used.get("start") != start):
+            _contest(entry)
+            return no("calls.pin-contested", f"its pin named process {used.get('pid')} at its first use",
+                      CONTESTED, above)
+        if not used:
+            try:
+                inode = os.stat(path).st_ino
+            except OSError:
+                inode = None
+            _mark_used(sid, tid, call, start, inode)
+        _note_use(sid, tid, entry, list(args))
+    return _Verdict(tid, caller=caller, ancestors=above)
 
 
 def _unpinned_once(agent: str, sid: str, tid: str, above: tuple):

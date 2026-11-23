@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, bugs, canary, core, hooks, identity, lanescope, progress as pg, registry, stubs, work  # noqa: E402,E501
+from devkit import audit, bugs, canary, core, hooks, lanescope, progress as pg, registry, stubs, work  # noqa: E402,E501
 from test_language_neutral_hooks import HookCase  # noqa: E402
 from test_progress import gates_passed, launch  # noqa: E402
 import test_threaded_turn_endings as turns  # noqa: E402  (its TurnCase fixture; its tests run in their own module)
@@ -235,12 +235,12 @@ class FailOpenTests(WiringCase):
         call = self.bash('dev progress step "parser done" --check "3 tests"', aid="a_tank")
         with mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
             out = self.hook("pre-tool", call)
-        spec = json.loads(out)["hookSpecificOutput"]
+        spec = (json.loads(out) if out.strip() else {}).get("hookSpecificOutput") or {}
         self.assertNotIn("permissionDecision", spec)
-        command = spec["updatedInput"]["command"]
-        # no bypass mode in the payload: the plain form, the token right before dev
-        self.assertRegex(command, r"\ADEVKIT_FROM_AGENT=a_tank DEVKIT_CALL=toolu_1\.[A-Za-z0-9_-]{22} dev progress step ")
-        self.assertTrue(identity.strip_token(command).startswith("DEVKIT_FROM_AGENT=a_tank dev progress step"), out)
+        # no bypass mode in the payload: the call goes out as written (ADR-9), and its entry still names the lane
+        self.assertNotIn("updatedInput", spec)
+        entry = pg.call_entry(call)
+        self.assertEqual((entry["caller"], entry["pin_by"]), ("a_tank", "text"))
 
 
 class MainSessionTests(WiringCase):
