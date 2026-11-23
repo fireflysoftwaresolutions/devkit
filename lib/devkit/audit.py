@@ -1191,11 +1191,54 @@ _OLD_VALUE_TYPE = {"bool": "a boolean", "NoneType": "null", "int": "a number", "
                    "str": "a string", "list": "a list", "dict": "an object"}
 
 
-def _old_json(s: str):
+# A record nests three levels (record, group, value); a policy file four. Any teammate can write the handoff
+# repository's audit copies and policy, and a value nested far deeper exhausts the stack: in the parser (Python 3.9
+# to 3.13 at about a thousand levels, 3.15 past a hundred thousand) or, after it, in what reads the value (repr,
+# json.dumps, ==). So no value nested deeper than this is read at all.
+MAX_DEPTH = 64
+
+
+def _deeper(v, text) -> bool:
+    """Is parsed value `v` nested deeper than MAX_DEPTH? `text` is what it was parsed from: with no more brackets
+    than that, it cannot be, which spares the walk for nearly every line."""
+    brackets = (b"[", b"{") if isinstance(text, (bytes, bytearray)) else ("[", "{")
+    if sum(text.count(b) for b in brackets) <= MAX_DEPTH:
+        return False
+    todo = [(v, 1)]
+    while todo:
+        x, depth = todo.pop()
+        items = x.values() if isinstance(x, dict) else x if isinstance(x, list) else None
+        if items is None:
+            continue
+        if depth > MAX_DEPTH:
+            return True
+        todo.extend((y, depth + 1) for y in items)
+    return False
+
+
+def _json(text):
+    """json.loads for text another machine or person may have written -> its value, or ValueError when no reader can
+    read it: not JSON (cut short, say), past what the parser can nest or hold (RecursionError, MemoryError), or
+    nested deeper than MAX_DEPTH."""
     try:
-        d = json.loads(s)
+        v = json.loads(text)
+    except (RecursionError, MemoryError):
+        raise ValueError("nested too deep to parse") from None
+    if _deeper(v, text):
+        raise ValueError(f"nested deeper than {MAX_DEPTH} levels")
+    return v
+
+
+def _line(text):
+    """A stored audit line's value (_json), or None when no reader can read it."""
+    try:
+        return _json(text)
     except ValueError:
         return None
+
+
+def _old_json(s: str):
+    d = _line(s)
     return d if isinstance(d, dict) else None
 
 
@@ -1902,7 +1945,7 @@ def _team_policy(path: Path):
     except (OSError, UnicodeDecodeError):
         return None, "cannot be read"
     try:
-        return json.loads(body), ""
+        return _json(body), ""
     except ValueError:
         return None, "is not valid JSON"
 
@@ -2011,7 +2054,7 @@ def publishable_text(name: str, data: bytes) -> str:
     """publishable_policy for a version git holds rather than a file (a staged or committed blob): `name` the file's
     name (audit.json is checked as the audit section), `data` its bytes. -> why it must not be published, or ""."""
     try:
-        raw, broken = json.loads(data.decode("utf-8")), ""
+        raw, broken = _json(data.decode("utf-8")), ""
     except UnicodeDecodeError:
         raw, broken = None, "cannot be read"
     except ValueError:
@@ -2615,10 +2658,7 @@ def seal(last_hash: str, tail: bytes) -> str:
 def _v2(line: bytes):
     if b'"v":2' not in line and b'"v": 2' not in line:
         return None
-    try:
-        r = json.loads(line)
-    except ValueError:
-        return None
+    r = _line(line)
     return r if isinstance(r, dict) and r.get("v") == V and isinstance(r.get("hash"), str) else None
 
 
@@ -2953,10 +2993,7 @@ def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
         except OSError:
             continue
         for ln in data.splitlines():
-            try:
-                r = json.loads(ln)
-            except ValueError:
-                continue
+            r = _line(ln)
             if not isinstance(r, dict) or _stand_in(r) and r.get("unreadable") is True:
                 continue
             v2 = r.get("v") == V
@@ -3124,10 +3161,7 @@ def verify_file(path: Path, chain: dict = None, published: bool = False) -> dict
     carry = lines.pop() if c.get("more") and lines and not lines[-1].endswith((b"\n", b"\r")) else b""
     for n, raw in enumerate(lines, 1):
         body = raw.rstrip(b"\r\n")
-        try:
-            r = json.loads(body) if body.strip() else None
-        except ValueError:
-            r = None
+        r = _line(body) if body.strip() else None
         if isinstance(r, dict) and r.get("v") == V:
             res["records"] += 1
             # the link it must have; None when a held day left a link and lines outside the chain follow it here
@@ -3168,6 +3202,10 @@ def verify_file(path: Path, chain: dict = None, published: bool = False) -> dict
             continue
         if isinstance(r, dict):
             res["v1"] += 1
+        elif body.strip():  # named by the id publish gives its stand-in (_published_line)
+            res["notes"].append({"path": str(path), "line": n, "id": _v1_id({}, body), "kind": "note",
+                                 "note": "this line cannot be read (cut short, not a JSON object, or nested deeper "
+                                         f"than {MAX_DEPTH} levels): no reader shows it and verify cannot check it"})
         blind = blind or published and _stand_in(r)
         tail += raw
     if chain is not None:
@@ -3199,7 +3237,7 @@ def _parts(where: Path, month: str) -> list:
 def _held_info(path: Path):
     """A held day's record (what _held_day wrote), or None when it cannot be read."""
     try:
-        info = json.loads(Path(path).read_text())
+        info = _json(Path(path).read_text())
     except (OSError, ValueError):
         return None
     ok = isinstance(info, dict) and isinstance(info.get("bytes"), int) and isinstance(info.get("sha256"), str)
@@ -3281,10 +3319,7 @@ def _published_line(ln: bytes, rx) -> bytes:
     short, not an object), as a stand-in that only names it. `rx`: the compiled redaction patterns readers use."""
     if not ln.strip():
         return ln
-    try:
-        r = json.loads(ln)
-    except (ValueError, RecursionError):
-        r = None
+    r = _line(ln)
     if not isinstance(r, dict):
         return _dump({"v": 1, "id": _v1_id({}, ln), "cleaned": True, "unreadable": True})
     if r.get("v") == V or _stand_in(r):
@@ -3314,16 +3349,10 @@ def _stands_for(p: bytes, ln: bytes, rx) -> bool:
     line; and both must read as the local line reads (_reader_view), so a record changed in the handoff repository
     and marked `cleaned` to pass still differs. Reading compares rather than bytes, so a redaction pattern added
     since the day was published does not make it differ."""
-    try:
-        pr = json.loads(p)
-    except (ValueError, RecursionError):
-        return False
+    pr = _line(p)
     if not isinstance(pr, dict) or pr.get("cleaned") is not True:
         return False
-    try:
-        lr = json.loads(ln)
-    except (ValueError, RecursionError):
-        lr = None
+    lr = _line(ln)
     if not isinstance(lr, dict):
         return _stand_in(pr) and pr.get("unreadable") is True and pr.get("id") == _v1_id({}, ln)
     if pr.get("unreadable"):
@@ -3476,10 +3505,7 @@ def _day_of(line: bytes):
     """(the UTC day of a line's record, or None when it has no time; 1 when it is a v2 record, else 0)."""
     if not line.startswith(b"{"):
         return None, 0
-    try:
-        r = json.loads(line)
-    except ValueError:
-        return None, 0
+    r = _line(line)
     if not isinstance(r, dict):
         return None, 0
     v2 = 1 if r.get("v") == V and isinstance(r.get("hash"), str) else 0
@@ -3707,7 +3733,7 @@ def _this_macs_copy(f: Path) -> bool:
     from . import identity
     try:
         lines = [ln for ln in f.read_bytes().splitlines() if ln.strip()]
-        last = json.loads(lines[-1]) if lines else {}
+        last = _json(lines[-1]) if lines else {}
     except (OSError, ValueError):
         return False
     a = last.get("actor") if isinstance(last, dict) else None

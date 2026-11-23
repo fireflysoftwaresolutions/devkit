@@ -3015,6 +3015,121 @@ class PublishCleaningTests(AuditCase):
         self.assertEqual(audit.publish(), [self.day(14), self.day(15), self.day(16)])
 
 
+class DeepNestingTests(AuditCase):
+    # Any teammate can write a line into the handoff repository's audit copies. A line nested 100,000 levels deep
+    # must read as one no reader can read, as a line cut short does, instead of exhausting the stack: `dev audit
+    # --team` lists the other records and `dev audit verify` names the line. Python 3.15 parses 100,000 levels and
+    # then fails in what reads the value (repr, dumps); a million is past the parser's own limit on every Python.
+    DEPTHS = (100_000, 1_000_000)
+
+    @staticmethod
+    def shapes(d: int, now: float = None) -> dict:
+        now, deep_obj, deep_list = now or time.time(), '{"a":' * d + "1" + "}" * d, "[" * d + "]" * d
+        v2 = json.dumps({"v": 2, "id": "01JDEEPNESTEDRECORD0000000", "ts": now, "action": "watch.wait",
+                         "hash": "0" * 64, "actor": {"user": "mate", "host": "mini", "agent": "", "session": ""}})
+        v1 = json.dumps({"ts": now, "action": "watch.wait", "user": "mate", "host": "mini", "target": "deep"})
+        return {"a bare array": deep_list,
+                "a v2 record's evidence": v2[:-1] + ', "evidence": ' + deep_obj + "}",
+                "a v1 record's why": v1[:-1] + ', "why": ' + deep_list + "}"}
+
+    @staticmethod
+    def v1(target: str, **more) -> str:
+        return json.dumps({"ts": time.time(), "action": "watch.wait", "user": "mate", "host": "mini", "target": target,
+                           "detail": "", "outcome": "ok", **more})
+
+    def team_copy(self, *lines) -> Path:
+        f = core.HANDOFF / "audit" / "mate@mini" / f"{time.strftime('%Y-%m')}.jsonl"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("".join(ln + "\n" for ln in lines))
+        return f
+
+    def team_view(self) -> tuple:
+        # `dev audit --team` -> (exit code, output)
+        import argparse
+        a = audit.add_arguments(argparse.ArgumentParser()).parse_args(["--team"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = audit.cmd_audit(a)
+        return rc, out.getvalue()
+
+    def test_a_deeply_nested_line_in_a_team_copy_reads_as_unreadable_and_stops_no_reader(self):
+        for d in self.DEPTHS:
+            for shape, deep in self.shapes(d).items():
+                with self.subTest(depth=d, shape=shape):
+                    f = self.team_copy(self.v1("before"), deep, self.v1("after"))
+                    rc, text = self.team_view()
+                    self.assertEqual(rc, 0)
+                    self.assertIn("· team · 2 record(s)", text)
+                    self.assertEqual(re.findall(r"watch\.wait\s+(before|after|deep)\b", text), ["before", "after"])
+                    res = audit.verify()
+                    self.assertTrue(res["ok"], res["first"])  # v1 lines: no chain for the line to break
+                    noted = [n for n in res["notes"] if n["path"] == str(f)]
+                    self.assertEqual([(n["line"], n["id"], n["kind"]) for n in noted],
+                                     [(2, audit._v1_id({}, deep.encode()), "note")])
+                    self.assertIn("cannot be read", noted[0]["note"])
+
+    def test_a_deeply_nested_line_in_a_chain_breaks_only_the_link_it_was_sealed_into(self):
+        # a teammate's v2 record replaced with a deep line: the record after it no longer links, and verify says so
+        audit._append(audit.build("dev.task", "one", now=time.time()))
+        audit._append(audit.build("dev.task", "two", now=time.time()))
+        local = sorted(audit.AUDIT.glob("*.jsonl"))[0].read_text().splitlines()
+        f = self.team_copy(local[0], self.shapes(100_000)["a v2 record's evidence"], local[1])
+        res = audit.verify()
+        self.assertFalse(res["ok"])
+        self.assertEqual((res["first"]["path"], res["first"]["line"], res["first"]["kind"]), (str(f), 3, "unlinked"))
+        self.assertEqual([n["line"] for n in res["notes"] if n["path"] == str(f)], [2])
+
+    def test_a_deeply_nested_detail_in_an_old_record_leaves_the_record_readable(self):
+        # an older devkit's jobs.set detail is JSON a reader parses again: past any depth, the detail stays text
+        for d in self.DEPTHS:
+            with self.subTest(depth=d):
+                self.team_copy(self.v1("before"), json.dumps({"ts": time.time(), "action": "jobs.set", "user": "mate",
+                                                              "host": "mini", "target": "nightly",
+                                                              "detail": '{"every":' * d + "1" + "}" * d}))
+                rc, text = self.team_view()
+                self.assertEqual(rc, 0)
+                self.assertIn("· team · 2 record(s)", text)
+                self.assertEqual([r["target"] for r in audit.query(team=True)], ["before", "nightly"])
+
+    def test_a_deeply_nested_local_line_is_published_as_a_stand_in_and_the_anchor_holds(self):
+        ym = audit.months_back(time.time(), 1)  # last month: every day is closed
+        noon = calendar.timegm((int(ym[:4]), int(ym[5:]), 14, 12, 0, 0, 0, 0, 0))
+        audit._append(audit.build("watch.wait", "before", now=noon))
+        month = audit.AUDIT / f"{ym}.jsonl"
+        deep = self.shapes(100_000, now=noon + 1)["a v1 record's why"]
+        with month.open("a") as fh:
+            fh.write(deep + "\n")
+        audit._append(audit.build("watch.wait", "after", now=noon + 2))
+        self.assertEqual(audit.publish(), [audit.team_dir() / ym / f"{ym}-14.jsonl"])
+        published = (audit.team_dir() / ym / f"{ym}-14.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(published[1]), {"v": 1, "id": audit._v1_id({}, deep.encode()), "cleaned": True,
+                                                    "unreadable": True})
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["unpublished"], 0)
+        self.assertEqual([r["target"] for r in audit.query(team=True, since=ym + "-01")], ["before", "after"])
+
+    def test_a_deeply_nested_held_day_record_reads_as_one_that_cannot_be_read(self):
+        ym = time.strftime("%Y-%m")
+        held = core.HANDOFF / "audit" / "mate@mini" / ym / f"{ym}-01.held.json"
+        held.parent.mkdir(parents=True)
+        held.write_text('{"bytes": 1, "sha256": "x", "day": ' + "[" * 1_000_000 + "]" * 1_000_000 + "}")
+        res = audit.verify()
+        self.assertEqual((res["first"]["path"], res["first"]["kind"]), (str(held), "unreadable"))
+
+    def test_a_deeply_nested_team_policy_fails_closed_as_one_that_is_not_json(self):
+        f = audit.policy_file()
+        f.parent.mkdir(parents=True)
+        for d in self.DEPTHS:
+            body = '{"redact": {"extra": ' + "[" * d + "]" * d + "}}"
+            with self.subTest(depth=d):
+                f.write_text(body)
+                cfg = audit.settings()
+                self.assertIn("is not valid JSON", audit.redaction_unavailable(cfg))
+                self.assertEqual(audit.publishable_policy(f), "is not valid JSON")
+                self.assertEqual(audit.publishable_text("audit.json", body.encode()), "is not valid JSON")
+
+
 class CliWiringTests(unittest.TestCase):
     # `dev audit` must reach the new subcommands, and `dev config validate` must check the audit keys
     def test_dev_audit_parses_the_new_subcommands_and_filters(self):
