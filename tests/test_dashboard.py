@@ -345,9 +345,12 @@ class RenderTests(unittest.TestCase):
         self.assertIn('document.addEventListener("focusin"', js)
         self.assertIn('document.addEventListener("pointerover"', js)
         self.assertGreaterEqual(js.count('"data-tip"'), 12)
-        for token in ("--s-ok:var(--ff-green)", "--s-caution:var(--ff-", "--s-risk:var(--ff-red)", "--ff-red:#d03b3b"):
+        for token in ("--s-ok:var(--ff-green)", "--s-caution:var(--ff-", "--s-risk:var(--ff-red)"):
             self.assertIn(token, dashboard.LIGHT)
             self.assertIn(token, dashboard.DARK)
+        # the dark theme lightens the red so a red fill keeps 3:1 on its darker track
+        self.assertIn("--ff-red:#d03b3b", dashboard.LIGHT)
+        self.assertIn("--ff-red:#d55050", dashboard.DARK)
 
     def test_rows_are_links(self):
         """Clickable rows hold a real link (keyboard, screen readers, j/k) instead of being focusable themselves."""
@@ -2723,6 +2726,8 @@ class BoardAndScopeChipTests(unittest.TestCase):
         for theme, t in out["t"].items():
             # Claude Code at 75 %, Codex exhausted; replies 95 % (claude), 90 % (codex) and 50 % (gemini) with the block
             self.assertEqual([rgb(b, rgb(t["track"])) for b in t["bars"]], [rgb(t[k]) for k in ("ink", "alert", "ok", "ink", "alert")], (theme, t))
+            # a red fill is a graphical object (WCAG 1.4.11): it needs 3:1 against the track it fills, in both themes
+            self.assertGreaterEqual(contrast(rgb(t["alert"]), rgb(t["track"])), 3, (theme, t))
 
     # The quota tiles at the top of Health draw the used share at 70 % or more in the caution color (--s-caution) on
     # the tile's bar, an HTML element; .k-warn set only an SVG fill, so the share was transparent and the quota read as
