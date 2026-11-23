@@ -3602,8 +3602,10 @@ def _stop_group(proc, grace: float = 5.0) -> None:
         proc.wait()
 
 
-def _exit_on_signal(signum, frame):
-    raise SystemExit(128 + signum)  # the shell's exit code for a process the signal ended
+def _signal_exit(signum) -> BaseException:
+    """What a signal raises in dev while a step runs: KeyboardInterrupt for Ctrl-C, else SystemExit with the shell's
+    exit code for a process the signal ended."""
+    return KeyboardInterrupt() if signum == signal.SIGINT else SystemExit(128 + signum)
 
 
 def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float = 5.0):
@@ -3612,20 +3614,40 @@ def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float
     suite the shell started ran on, writing the step's log. Ctrl-C stops them too, and so do SIGTERM and SIGHUP to
     dev (a stopped agent task, a closed terminal), which no longer reach a session of their own: while the step runs
     they raise SystemExit where they would end dev at once, and dev exits 128 + the signal once the step stopped. A
-    signal dev ignores (SIGHUP under nohup) or handles itself keeps its handler. The shell gets `env` without the
-    call token (identity.detached_env), whoever built it: a step's processes never act for the call that ran dev."""
+    signal dev ignores (SIGHUP under nohup) or handles itself keeps its handler. A Ctrl-C, SIGTERM or SIGHUP that
+    comes while Popen still starts the shell, which may run already, waits until Popen hands it over, then stops it
+    the same way: raised inside Popen, it left dev no shell to stop, and the step ran on after dev exited. The shell
+    gets `env` without the call token (identity.detached_env), whoever built it: a step's processes never act for the
+    call that ran dev."""
     from . import identity
+    starting, held = [True], []
+
+    def on_signal(signum, frame):
+        if starting:
+            held.append(signum)
+            return
+        raise _signal_exit(signum)
     saved = {}
-    for sig in (signal.SIGTERM, signal.SIGHUP):
+    for sig, default in ((signal.SIGINT, signal.default_int_handler), (signal.SIGTERM, signal.SIG_DFL),
+                         (signal.SIGHUP, signal.SIG_DFL)):
         try:
-            if signal.getsignal(sig) == signal.SIG_DFL:
-                saved[sig] = signal.signal(sig, _exit_on_signal)
+            if signal.getsignal(sig) == default:
+                saved[sig] = signal.signal(sig, on_signal)
         except (ValueError, OSError):  # not the main thread: only the main thread can handle a signal
             pass
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT, env=identity.detached_env(env),
-                                start_new_session=True)
         try:
+            proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT,
+                                    env=identity.detached_env(env), start_new_session=True)
+        except BaseException:
+            starting.clear()  # no shell started: a signal from here on ends dev at once
+            if held:
+                raise _signal_exit(held[0]) from None
+            raise
+        try:
+            starting.clear()
+            if held:
+                raise _signal_exit(held[0])
             return subprocess.CompletedProcess(argv, proc.wait(timeout=timeout))
         except BaseException:  # the limit, KeyboardInterrupt, or SystemExit from SIGTERM or SIGHUP
             _stop_group(proc, grace)

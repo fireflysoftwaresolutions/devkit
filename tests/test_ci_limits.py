@@ -256,6 +256,36 @@ class StepStopTests(StepLimitCase):
                 self.assertEqual(dev_.wait(timeout=BOUND), 128 + sig)
                 self.assertFalse(alive(pid), f"the step's child {pid} still runs after {sig.name} to dev")
 
+    def test_a_signal_while_popen_still_starts_the_step_shell_stops_the_step_too(self):
+        # under load SIGTERM or SIGHUP, sent once the step's child ran, raised dev's exit inside Popen, before dev held
+        # the shell to stop: dev exited 143 or 129 and the step ran on; a Ctrl-C there left it running the same way.
+        # Here dev stays inside Popen's start of the shell, which already runs, until a signal comes, and its handler
+        # runs there, as under load
+        starting = f"""import os, select, signal, subprocess
+start = subprocess.Popen._execute_child
+
+def starting(self, *args, **kwargs):
+    start(self, *args, **kwargs)
+    r, w = os.pipe()
+    os.set_blocking(w, False)
+    old = signal.set_wakeup_fd(w)
+    try:
+        select.select([r], [], [], {BOUND})
+    finally:
+        signal.set_wakeup_fd(old)
+        os.close(r)
+        os.close(w)
+subprocess.Popen._execute_child = starting
+"""
+        for sig, rc in ((signal.SIGTERM, 128 + signal.SIGTERM), (signal.SIGHUP, 128 + signal.SIGHUP),
+                        (signal.SIGINT, -signal.SIGINT)):  # an uncaught KeyboardInterrupt ends Python by SIGINT
+            with self.subTest(signal=sig.name), mock.patch(f"{__name__}.DEV_RUNNING_A_STEP",
+                                                           starting + DEV_RUNNING_A_STEP):
+                dev_, pid = self.dev_running_a_step()
+                dev_.send_signal(sig)
+                self.assertEqual(dev_.wait(timeout=BOUND), rc)
+                self.assertFalse(alive(pid), f"the step's child {pid} still runs after {sig.name} to dev")
+
     def test_dev_gets_its_own_signal_handlers_back_once_the_step_ends(self):
         self.assertEqual(self.step("true", timeout=30).returncode, 0)
         for sig in (signal.SIGTERM, signal.SIGHUP):
