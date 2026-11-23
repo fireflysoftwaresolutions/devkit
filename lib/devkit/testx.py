@@ -605,6 +605,14 @@ def detect(top, repo=None) -> list:
                           "python": py, "start": start,
                           "package": start != "." and os.path.isfile(os.path.join(absd(d), start, "__init__.py"))})
 
+    # A Python project nested in a pytest runner's folder has a runner of its own: pytest run there for the whole suite
+    # (no file arguments) would walk into it and collect its tests in the outer process
+    py_roots = [x["root"] for x in found if x["lang"] == "py"]
+    for x in found:
+        if x["name"] == "pytest":
+            x["nested"] = sorted(r if x["root"] == "." else r[len(x["root"]) + 1:] for r in py_roots
+                                 if r != x["root"] and _under(r, x["root"]))
+
     # Node: jest or vitest per package.json
     for d in sorted(d for d in by_dir if has(d, "package.json")):
         pkg = core.read_json(os.path.join(absd(d), "package.json"), {}) or {}
@@ -1250,9 +1258,9 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
     files, ids, related = list(files), list(ids), list(related)
     rel = [_rel(top, runner, f) for f in files]
     env, names, only = {}, [], ""
-    if name == "pytest":
+    if name == "pytest":  # the whole suite leaves out the nested Python projects, which their own runners run
         argv = ex + ["-q"] + ([f"--junitxml={report}"] if report else []) + \
-            ([] if all_ else rel + [_id(i) for i in ids])
+            ([f"--ignore={n}" for n in runner.get("nested", ())] if all_ else rel + [_id(i) for i in ids])
     elif name == "unittest":
         start = runner.get("start") or "."
         sdir = os.path.join(_rootdir(top, runner), start)

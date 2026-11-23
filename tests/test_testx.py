@@ -537,6 +537,24 @@ class CommandTests(unittest.TestCase):
         cmd = testx.build_command(top, rn, ids=["tests/test_a.py::test_x"], report="R")
         self.assertEqual(cmd["argv"][-1], "tests/test_a.py::test_x")
 
+    # A separately packaged Python project inside this one (a worker with its own pyproject and tests) has a runner of
+    # its own. pytest run for the whole suite with no file arguments walks into it and collects its tests in the outer
+    # process, where its test modules clash with the outer ones by name (import file mismatch) and its imports do not
+    # resolve: the outer run leaves every nested project's folder out, and each nested runner runs its own.
+    def test_the_whole_pytest_suite_leaves_out_nested_python_projects(self):
+        top, rn = self.runner({"pyproject.toml": "[tool.pytest.ini_options]\naddopts = '-q'\n",
+                               "tests/test_api.py": "def test_api():\n    pass\n",
+                               "services/worker/pyproject.toml": "[tool.pytest.ini_options]\n",
+                               "services/worker/tests/test_api.py": "def test_api():\n    pass\n",
+                               "tools/lint/setup.py": "", "tools/lint/test_rules.py": "def test_rules():\n    pass\n",
+                               "docs/test_snippets.py": "def test_snippet():\n    pass\n"}, "pytest")
+        self.assertEqual(testx.build_command(top, rn, all_=True)["argv"],
+                         [PY, "-m", "pytest", "-q", "--ignore=services/worker", "--ignore=tools/lint"])
+        self.assertEqual(testx.build_command(top, rn, files=["tests/test_api.py"])["argv"],
+                         [PY, "-m", "pytest", "-q", "tests/test_api.py"])
+        worker = {(x["name"], x["root"]): x for x in testx.detect(top)}[("pytest", "services/worker")]
+        self.assertEqual(testx.build_command(top, worker, all_=True)["argv"], [PY, "-m", "pytest", "-q"])
+
     def test_unittest_module_names_from_the_start_dir(self):
         top, rn = self.runner({"tests/test_calc.py": ""}, "unittest")
         cmd = testx.build_command(top, rn, files=["tests/test_calc.py"])
