@@ -103,8 +103,8 @@ def _procedure_errors(proc) -> list:
         return ["`procedure` must be a non-empty list of phases"]
     out = []
     for i, x in enumerate(proc, 1):
-        if not isinstance(x, dict) or not str(x.get("phase") or "").strip() or not str(x.get("do") or "").strip():
-            out.append(f"procedure phase {i} needs `phase` and `do`")
+        if not isinstance(x, dict) or not all(isinstance(x.get(k), str) and x[k].strip() for k in ("phase", "do")):
+            out.append(f"procedure phase {i} needs `phase` and `do` as text")
             continue
         extra = set(x) - PHASE_KEYS
         if extra:
@@ -2073,7 +2073,7 @@ def set_member(name: str, field: str, value: str, why: str, by: str = "") -> dic
         raise ValueError(f"`{field}` cannot be changed; these can: {', '.join(EDITABLE)}")
     if field == "procedure":  # a JSON list of phases: [{"phase": "…", "do": "…", "devkit": ["dev test"], "proof": "…"}]
         try:
-            v = json.loads(value)
+            v = core.load_json(value)  # written to the team's crew file, which no reader reads past JSON_MAX_DEPTH
         except ValueError as e:
             raise ValueError(f"procedure takes a JSON list of phases ({e})") from None
         bad = _procedure_errors(v)

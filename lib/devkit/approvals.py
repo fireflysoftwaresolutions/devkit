@@ -591,8 +591,9 @@ def interrupted_at(path):
     lines = [ln for ln in tail.split("\n") if ln.strip()]
     if not lines or (size > TAIL_BYTES and len(lines) < 2):
         return None  # the window starts inside the last record: too long to be an interruption
+    from . import core
     try:
-        rec = json.loads(lines[-1])
+        rec = core.load_json(lines[-1])  # written from what the agent's model produced: depth-bounded
     except ValueError:
         return None
     msg = rec.get("message") if isinstance(rec, dict) else None
