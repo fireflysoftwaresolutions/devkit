@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import identity  # noqa: E402
 from devkit import progress as pg  # noqa: E402
-from test_codex_identity_token import CodexTokenCase  # noqa: E402
+from test_codex_identity_token import SID as CODEX_SID, CodexTokenCase  # noqa: E402
 from test_identity_token import AGENT, TokenCase  # noqa: E402
 
 CODEX = 70101
@@ -459,6 +459,21 @@ class CodexTextPinTests(CodexTokenCase):
         rc, out = self.lead()
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
+
+    # Codex has no PostToolUseFailure: a failed command reaches PostToolUse, and devkit closes it as failed, so a state
+    # change that ran under its name is audited (the red team's race on Codex, then the tech lead's call failed)
+    def test_a_failed_codex_command_after_a_state_change_under_its_name_is_audited(self):
+        import contextlib
+        import io
+        from devkit import hooks
+        data, shell = self.call("dev progress add extra")
+        self.chain, self.own_pid = [(shell, "zsh"), (CODEX, "codex")], 71999
+        self.assertEqual(self.lead()[0], 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            hooks._tool_failed("codex", dict(data, hook_event_name="PostToolUse"), "PostToolUse")
+        self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
+        closed = [c for c in pg.shells_since(CODEX_SID, 0) if c.get("tool_use_id") == data["tool_use_id"]]
+        self.assertEqual([c["ended"] for c in closed], ["failed"])
 
     def test_a_rewrite_codex_applies_keeps_the_token(self):
         data, token, new = self.exec("dev progress add extra")  # its command alone: devkit's rewrite and allow

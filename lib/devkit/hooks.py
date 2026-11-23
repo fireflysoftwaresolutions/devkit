@@ -1522,10 +1522,11 @@ def _reconcile(agent: str, data: dict):
         _log(f"reconcile {agent}: {traceback.format_exc()[-300:]}")
 
 
-def _close_call(data: dict):
+def _close_call(data: dict, failed: bool = False):
     """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused). An edit
     call in flight that failed or was refused writes nothing, so its record goes; one that ran gives way to the
-    record of its result at the end of its PostToolUse (progress.note_edit)."""
+    record of its result at the end of its PostToolUse (progress.note_edit). `failed`: the call failed though its
+    event is PostToolUse (a Codex command, which has no PostToolUseFailure)."""
     if data.get("tool_name") in ("Write", "Edit", "MultiEdit") and data.get("hook_event_name") != "PostToolUse":
         try:
             from . import progress
@@ -1537,7 +1538,8 @@ def _close_call(data: dict):
             from . import identity, progress
             entry = progress.call_entry(data)
             # a call that got no result (refused, failed) is told apart for the text pin's audit and order rule
-            ended = {"PostToolUse": "", "PreToolUse": "refused"}.get(str(data.get("hook_event_name")), "failed")
+            ended = "failed" if failed else \
+                {"PostToolUse": "", "PreToolUse": "refused"}.get(str(data.get("hook_event_name")), "failed")
             if data.get("tool_name") in SHELL_TOOLS and data.get("hook_event_name") != "PreToolUse":
                 identity.keep_background(entry)  # a background call closes as it starts: kept for its reads
             if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
@@ -4218,7 +4220,7 @@ def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     from . import progress
     _check_writes(agent, data)  # a call that failed may have written too
     _note_plan_writes(agent, data, failed=True)
-    _close_call(data)
+    _close_call(data, failed=True)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
     keys = ("", "")
