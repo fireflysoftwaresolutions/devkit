@@ -763,15 +763,27 @@ class TeamPolicySyncTests(unittest.TestCase):
 
     def test_a_file_name_with_a_control_character_never_hides_a_broken_policy(self):
         # the commits were split on \x01, which a file name may hold: policy/\x01zz beside a broken audit.json gave a
-        # fake commit and the broken file was never read
-        with TwoMacs() as m:
-            policy, good, remote = self.published(m)
-            policy.write_text("{")
-            (m.here / "policy" / "\x01zz").write_text("x")
-            _git(m.here, "add", "-A")
-            _git(m.here, "commit", "-qm", "a raw commit")
-            self.assertEqual([sha for _, _, sha in work.unpublishable_commits(m.here)], [""])
-            self.assert_unchecked(m, remote, good)
+        # fake commit and the broken file was never read, and policy/\x01beef (hex, like a commit id) passed as one
+        # and the push went out. A name that copies an earlier unpushed commit's id hides nothing either.
+        for name in ("\x01zz", "\x01beef", "\x01" + "0" * 40, "earlier"):
+            with self.subTest(name=name), TwoMacs() as m:
+                policy, good, remote = self.published(m)
+                write_note(m.here, note_text("an earlier unpushed commit"))
+                _git(m.here, "add", "-A")
+                _git(m.here, "commit", "-qm", "a note")
+                if name == "earlier":
+                    name = "\x01" + _git(m.here, "rev-parse", "--short", "HEAD")
+                policy.write_text("{")
+                (m.here / "policy" / name).write_text("x")
+                _git(m.here, "add", "-A")
+                _git(m.here, "commit", "-qm", "a raw commit")
+                head = _git(m.here, "rev-parse", "--short", "HEAD")
+                self.assertEqual([(rel, sha) for rel, _, sha in work.unpublishable_commits(m.here)],
+                                 [("policy/audit.json", head)])
+                ok, err = work.push_handoff()
+                self.assertFalse(ok)
+                self.assertTrue(err.startswith(work.POLICY_REFUSED + work._REFUSAL_REPAIR), err)
+                self.assertEqual(_git(remote, "show", "main:policy/audit.json"), good)
 
     def test_a_policy_file_that_cannot_be_read_refuses_the_push(self):
         # git cat-file timed out or could not start: the change was skipped as if the file were deleted
@@ -792,6 +804,21 @@ class TeamPolicySyncTests(unittest.TestCase):
             with mock.patch.object(core, "git", lambda root, *a, **k: (128, "", "fatal: boom") if a[:1] == ("log",)
                                    else real(root, *a, **k)):
                 self.assert_unchecked(m, remote, good)
+
+    def test_git_log_output_the_check_cannot_read_refuses_the_push(self):
+        # a field that is no commit id and no policy path (a name before any commit, a commit id that is no hex)
+        # means the output is not what the check reads, so nothing is known clean
+        for log in ("policy/audit.json\0", "\x01zz\0\npolicy/audit.json\0", "\x01abcd\0\nnotes/a.md\0"):
+            with self.subTest(log=log), TwoMacs() as m:
+                policy, good, remote = self.published(m)
+                write_note(m.here, note_text("waits"))
+                _git(m.here, "add", "-A")
+                _git(m.here, "commit", "-qm", "a note")
+                real = core.git
+                with mock.patch.object(core, "git", lambda root, *a, **k: (0, log, "") if a[:1] == ("log",)
+                                       else real(root, *a, **k)):
+                    self.assertEqual([sha for _, _, sha in work.unpublishable_commits(m.here)], [""])
+                    self.assert_unchecked(m, remote, good)
 
     def test_the_policy_check_reads_only_the_policy_files_each_unpushed_commit_changed(self):
         # A long unpushed history (a Mac offline for weeks) is checked by one git log and one read per policy change,

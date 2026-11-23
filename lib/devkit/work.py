@@ -1513,8 +1513,8 @@ def unpublishable_commits(root: Path) -> list:
     commit counts, not only HEAD's version: a repair on top still publishes the broken text in the history. A merge
     counts for what it changes itself (git's combined diff), so a broken file the remote already has publishes
     nothing new. A deletion publishes nothing broken. One git log reads the policy paths each commit changed, then
-    one read per change. When the commits cannot be read (git log fails, a file name holds the marker that separates
-    the commits, a policy file the commit holds cannot be read), the push is refused too, with no commit:
+    one read per change. When the commits cannot be read (git log fails or gives output that is no commit id and no
+    policy file, a policy file the commit holds cannot be read), the push is refused too, with no commit:
     [("policy", the cause, "")], which _refuse_policy_push says in its own words.
     -> [(path, reason, short commit)], oldest first."""
     from . import audit
@@ -1524,20 +1524,30 @@ def unpublishable_commits(root: Path) -> list:
                           "--", "policy", timeout=120)
     if rc != 0 and core.git(root, "rev-parse", "-q", "--verify", "HEAD")[0] == 0:
         return [("policy", "git log failed", "")]
-    out = []
-    for chunk in log.split("\x01")[1:]:
-        sha, *names = chunk.split("\0")
-        if not _SHORT_SHA.fullmatch(sha):  # a file name held \x01: the commits cannot be told apart
-            return [("policy", "a file name in policy/ holds a control character", "")]
-        for rel in dict.fromkeys(n.lstrip("\n") for n in names):
-            if not _POLICY_FILE.fullmatch(rel):
-                continue
-            data = _blob(root, f"{sha}:{rel}")
-            if data is None and core.git(root, "cat-file", "-e", f"{sha}:{rel}")[0] == 0:
-                return [("policy", f"{rel} at commit {sha} could not be read", "")]  # there, but not read
-            why = audit.publishable_text(Path(rel).name, data) if data is not None else ""
-            if why:
-                out.append((rel, why, sha))
+    out, sha, seen = [], "", set()
+    # -z ends every commit id and every name with NUL, which no path can hold. A field is a commit when it begins with
+    # \x01 and a name when it begins with "policy" (git names only the paths under the pathspec), so a name that holds
+    # \x01 or copies a commit id stays a name; any other field is output this check cannot read.
+    for field in log.split("\0"):
+        field = field.lstrip("\n")
+        if not field:
+            continue
+        if field.startswith("\x01"):
+            sha = field[1:]
+            if not _SHORT_SHA.fullmatch(sha):
+                return [("policy", "git log gave a commit id that cannot be read", "")]
+            continue
+        if not sha or not (field == "policy" or field.startswith("policy/")):
+            return [("policy", "git log gave a line that is no commit and no policy file", "")]
+        if not _POLICY_FILE.fullmatch(field) or (sha, field) in seen:
+            continue
+        seen.add((sha, field))
+        data = _blob(root, f"{sha}:{field}")
+        if data is None and core.git(root, "cat-file", "-e", f"{sha}:{field}")[0] == 0:
+            return [("policy", f"{field} at commit {sha} could not be read", "")]  # there, but not read
+        why = audit.publishable_text(Path(field).name, data) if data is not None else ""
+        if why:
+            out.append((field, why, sha))
     return out
 
 
