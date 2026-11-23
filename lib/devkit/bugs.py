@@ -278,7 +278,8 @@ def record_occurrence(kind: str, fp: str, *, impact: str = "blocked", command: s
                       session: str = "", text: str = "", security: bool = False) -> dict:
     """Record one hit of `fp` on this machine with a fresh one-time code, in BUGS/occurrences.jsonl. `text`: the raw
     error message, read only to tell a security failure (is_security), never kept. -> the record, with `saved` False
-    when the state folder could not be written (the code then matches nothing)."""
+    when the state folder could not be written or the log's lock was not free within 0.1 s, the budget a hook can
+    spend (the code then matches nothing)."""
     rec = {"ts": round(time.time(), 3), "kind": kind, "fingerprint": fp,
            "code": _code(), "impact": impact, "session": session,
            "version": core.VERSION, "command": command, "event": event, "refusal_id": refusal_id, "word": word,
