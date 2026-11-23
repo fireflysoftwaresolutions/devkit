@@ -711,8 +711,8 @@ class TimeFormatTests(unittest.TestCase):
 
 @unittest.skipUnless(T.CHROME, T.NO_CHROME)
 class CopyToastPlaceholderTests(unittest.TestCase):
-    """A value the command quotes as data (shlex.quote wraps it in single quotes) is never a placeholder the copy toast
-    names, even a branch named feat/<x>."""
+    """The copy toast names three or more placeholders as a list, with "and" before the last one only, and a value the
+    command quotes as data (shlex.quote wraps it in single quotes) is never a placeholder, even a branch named feat/<x>."""
 
     @classmethod
     def setUpClass(cls):
@@ -732,6 +732,11 @@ class CopyToastPlaceholderTests(unittest.TestCase):
         self.assertIsNone(out.get("probeError") or out.get("pageError"))
         self.assertEqual(out["copied"], [command])
         return out["said"]
+
+    def test_three_placeholders_read_as_a_list_with_and_before_the_last_one_only(self):
+        self.assertEqual(self.said("git remote add <name> <url> && git push -u <name> <branch>"),
+                         "Copied. Replace <name>, <url>, and <branch>, then run it.")
+        self.assertEqual(self.said("git remote add <name> <url>"), "Copied. Replace <name> and <url>, then run it.")
 
     def test_a_single_quoted_value_is_data_and_never_a_placeholder(self):
         self.assertEqual(self.said("dev wt rm 'feat/<x>'"), "Copied. Run it in your terminal.")
