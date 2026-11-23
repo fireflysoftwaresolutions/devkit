@@ -755,18 +755,17 @@ class AbsoluteScopeTests(unittest.TestCase):
 
     def test_an_absolute_scope_inside_a_worktree_is_kept_repository_relative(self):
         from devkit import hooks
-        with TempState(), tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as scratch:
+        with TempState(), tempfile.TemporaryDirectory() as d:
             main, wt = self.repo_with_worktree(d)
             pg.start("Feature", plan=["installer"], now=self.m(0))
             with mock.patch.dict(os.environ, {"HOME": d}):  # the ~ form the tech lead wrote: ~/<worktree>/…
-                run = pg.assign("installer", "Kid", scope=f"{wt}/install.sh,~/wt/tests/**,{scratch}/kid/**",
-                                cwd=str(main), now=self.m(0))
-            self.assertEqual(run["plan"][0]["scope"], ["install.sh", "tests/**", f"{scratch}/kid/**"])  # outside: as is
+                run = pg.assign("installer", "Kid", scope=f"{wt}/install.sh,~/wt/tests/**", cwd=str(main),
+                                now=self.m(0))
+            self.assertEqual(run["plan"][0]["scope"], ["install.sh", "tests/**"])
             told = [m["text"] for m in run.get("messages") or [] if m["from"] == "devkit"]
             self.assertEqual(len(told), 1, told)
             self.assertIn(f"{wt}/install.sh → install.sh", told[0])
             self.assertIn("~/wt/tests/** → tests/**", told[0])
-            self.assertNotIn(scratch, told[0])
             launch("a1", "devkit:kid", "Kid: installer", self.m(1))
             real_temp = hooks.core.is_temp  # the fixture lives in a temp folder; real worktrees do not
             patch = mock.patch.object(hooks.core, "is_temp", lambda p: real_temp(p) and not str(p).startswith(d))
@@ -807,17 +806,6 @@ class AbsoluteScopeTests(unittest.TestCase):
                     with self.assertRaises(pg.StepError) as e:
                         pg.assign("installer", "Kid", scope=scope, cwd=str(main), now=self.m(0))
                     self.assertIn(why, str(e.exception))
-
-    def test_a_scope_with_dot_dot_counts_in_the_checkout_it_resolves_to(self):
-        with TempState(), tempfile.TemporaryDirectory() as d:
-            main, wt = self.repo_with_worktree(d)
-            pg.start("Feature", plan=["installer"], now=self.m(0))
-            run = pg.assign("installer", "Kid", scope=f"{wt}/lib/../tests/**,{wt}/../api/docs/**", cwd=str(main),
-                            now=self.m(0))
-            self.assertEqual(run["plan"][0]["scope"], ["tests/**", "docs/**"])  # the worktree's, then the main one's
-            with self.assertRaises(pg.StepError) as e:  # climbs above both checkouts
-                pg.assign("installer", "Kid", scope=f"{wt}/../**", cwd=str(main), now=self.m(0))
-            self.assertIn("2 checkouts", str(e.exception))
 
     def test_a_rewritten_scope_still_clashes_with_a_working_lane_s_files(self):
         # two working members never share files: the clash check compares the rewritten, repository-relative glob

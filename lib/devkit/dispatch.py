@@ -149,10 +149,11 @@ SCOPE_HELP = ("--scope takes repository-relative paths or globs, such as lib/** 
 
 
 def _scope_entries(scope: str) -> list:
-    """The paths or globs of a delegation's --scope, each one repository-relative or an absolute path that
-    progress._scope_globs turns into one. Raises StepError, quoting none of the text, for a scope that holds a
-    secret or an entry that cannot be a path in the repository: a URL or a remote (any ":"), a ".." segment, or a
-    control character. The step keeps its scope, so text that is not a path would be saved in the run unchecked."""
+    """The paths or globs of a step's --scope (delegate, dev progress assign), each one repository-relative or an
+    absolute path that _repository_globs turns into one. Raises StepError, quoting none of the text, for a scope that
+    holds a secret or an entry that cannot be a path in the repository: a URL or a remote (any ":"), a ".." segment,
+    or a control character. The step keeps its scope, so text that is not a path would be saved in the run
+    unchecked."""
     if messaging.secret_shaped(scope):
         raise StepError(f"{SCOPE_HELP}; this one holds a secret, so devkit saved nothing")
     entries = [x.strip() for x in scope.split(",") if x.strip()]
@@ -161,6 +162,17 @@ def _scope_entries(scope: str) -> list:
             raise StepError(f"{SCOPE_HELP}; one entry is a URL, a remote, a path outside the repository or text "
                             f"with a control character, so devkit saved nothing")
     return entries
+
+
+def _repository_globs(entries: list, project: str, cwd: str | None) -> tuple:
+    """The globs a step keeps for the checked entries of its --scope (_scope_entries): an absolute or ~ path inside
+    one checkout of the run's repository in its repository-relative form (progress._scope_globs) -> (globs,
+    rewrites). Raises StepError, quoting none of the text, for an entry that names files outside every checkout of
+    the repository; delegate and dev progress assign refuse a scope by this one rule."""
+    globs, rewrites = progress._scope_globs(entries, project, cwd)
+    if any(g.startswith(("/", "~")) for g in globs):
+        raise StepError(f"{SCOPE_HELP}; one entry names files outside the repository, so devkit saved nothing")
+    return globs, rewrites
 
 
 def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: str = "", est: str = "",
@@ -199,10 +211,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
         s = _new_step(name, progress.parse_minutes(est) or None)
         s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500], added=round(now, 1))
         if entries:  # repository-relative, as dev progress assign keeps it: the form the edit advice matches
-            globs, rewrites = progress._scope_globs(entries, run.get("project") or "", cwd)
-            if any(g.startswith(("/", "~")) for g in globs):  # outside every checkout of the repository
-                raise StepError(f"{SCOPE_HELP}; one entry names files outside the repository, so devkit saved "
-                                f"nothing")
+            globs, rewrites = _repository_globs(entries, run.get("project") or "", cwd)
             s["scope"] = globs
             progress._tell_rewrites(run, name, rewrites, now)
         if after:
