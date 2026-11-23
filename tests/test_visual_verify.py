@@ -371,6 +371,24 @@ class BeforeElsewhereTest(VerifyCase):
         doc = self.record(f["id"])
         self.assertEqual((out["result"], doc["status"], doc["verification"]["compared"]), ("fail", "reopened", False))
 
+    # a capture from before the machine id names its Mac by hostname: the line a person reads may show it, the
+    # history, which syncs to the handoff repository, never takes it
+    def test_the_history_never_takes_a_hostname_from_an_older_capture_before(self):
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        self.elsewhere(before)
+        rec = self.record(before["id"])
+        rec["by"]["host"], rec["image"]["where"] = "bobs-macbook", "local:bobs-macbook"
+        store.save(P, rec)
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {doc['verification']['capture']} · "
+                                                    "nothing compared: the picture before was taken on another Mac and "
+                                                    "is not on this Mac")
+        self.assertNotIn("bobs-macbook", (self.records / "findings" / f"{f['id']}.json").read_text())
+        self.assertIn("taken on bobs-macbook and is not on this Mac", out["message"])
+
     # judgment decides no fix by itself: with the picture before elsewhere, the reviewer looks at the new capture and
     # accepts it with a reason, the command the outcome names
     def test_a_judgment_finding_whose_picture_before_is_elsewhere_names_accept_and_accept_verifies_it(self):

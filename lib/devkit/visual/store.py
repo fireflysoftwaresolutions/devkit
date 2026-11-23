@@ -1602,7 +1602,9 @@ def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = 
     away = v.get("compared") is False
     taken = "picture before was taken on {} and is not on this Mac"
     said = taken.format(vmap.mac_name(before_on))
-    kept = f" · nothing compared: the {taken.format(before_on or 'another Mac')}" if away else ""  # the record's words
+    # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history
+    on_id = before_on if identity.MACHINE_ID.fullmatch(str(before_on or "")) else "another Mac"
+    kept = f" · nothing compared: the {taken.format(on_id)}" if away else ""
     nothing = f" · nothing compared: the {said}" if away else ""  # the words a person reads
 
     def fn(doc):
