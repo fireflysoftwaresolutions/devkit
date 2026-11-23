@@ -567,7 +567,6 @@ class TeamPolicySyncTests(unittest.TestCase):
             sync()
             self.assertEqual(_git(remote, "show", "main:policy/audit.json"), repaired)
 
-
     TOKEN = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
 
     def published(self, m) -> tuple:
@@ -638,6 +637,32 @@ class TeamPolicySyncTests(unittest.TestCase):
             _git(m.here, "commit", "-qam", "drop the team policy")
             self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
             self.assertNotIn("policy/audit.json", _git(remote, "ls-tree", "-r", "--name-only", "main"))
+
+    def test_a_staged_good_policy_is_kept_when_its_working_copy_is_held(self):
+        # git checkout HEAD -- path reset the index too, so a good version staged before the copy broke was lost.
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            staged = json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}", "staged-[a-z]+"]}})
+            policy.write_text(staged)
+            _git(m.here, "add", "policy/audit.json")
+            policy.write_text('{"redact": ')
+            sync()
+            self.assertEqual(_git(remote, "show", "main:policy/audit.json"), staged)
+            self.assertEqual(policy.read_text(), staged)
+            self.assertEqual([Path(h["saved"]).read_text() for h in work.held_policies()], ['{"redact": '])
+        # a staged version that is broken too is held as well, and the repository keeps its last commit
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            policy.write_text("[1")
+            _git(m.here, "add", "policy/audit.json")
+            policy.write_text('{"redact": ')
+            sync()
+            self.assertEqual(_git(remote, "show", "main:policy/audit.json"), good)
+            self.assertEqual(policy.read_text(), good)
+            self.assertEqual(_git(m.here, "status", "--porcelain"), "")
+            self.assertEqual(sorted(Path(h["saved"]).read_text() for h in work.held_policies()),
+                             ["[1", '{"redact": '])
+
 
 class WorkingTreeTests(unittest.TestCase):
     def test_a_pull_that_settles_a_conflict_never_takes_away_or_rewrites_this_macs_files(self):

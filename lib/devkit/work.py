@@ -924,13 +924,22 @@ def _write_why(saved: Path, rel: str, why: str) -> None:
             {"path": rel, "time": time.strftime("%Y-%m-%d %H:%M"), "why": why}).encode())
 
 
+def _hold_text(rel: str, data: bytes, why: str) -> None:
+    """Write `data`, a staged text of `rel` no Mac could load either, to a new private held copy and its reason."""
+    saved = _held_copy(rel)
+    _write_private(saved, data)
+    _write_why(saved, rel, why)
+
+
 def hold_broken_policies(root: Path, paths=None) -> list:
     """Move each changed team policy file at `root` that no Mac could load (audit.publishable_policy) out of the
     repository: this Mac's text to a private file under held_policy_dir(), its time and reason beside it (.why), and
     the repository's file back to its last commit (deleted when it has none), so a pull and a commit find nothing
-    to keep. Each hold is recorded (a critical, blocked handoff.push) and told to the live sessions. A file that
-    cannot be moved (the state folder cannot be written, the disk is full) stays as it is and is returned with no
-    held copy: the caller leaves it out of every commit, and a staged version of it no Mac could load is unstaged. `paths`: the changed files, when the caller listed them. Under _repo_lock.
+    to keep. A good version staged before the file broke stays staged, and the file goes back to it; a staged version
+    no Mac could load either is held too. Each hold is recorded (a critical, blocked handoff.push) and told to the
+    live sessions. A file that cannot be moved (the state folder cannot be written, the disk is full) stays as it is
+    and is returned with no held copy: the caller leaves it out of every commit, and a staged version of it no Mac
+    could load is unstaged. `paths`: the changed files, when the caller listed them. Under _repo_lock.
     -> [(path, reason, held copy, or None when it could not be moved)]."""
     from . import audit
     out = []
@@ -940,6 +949,9 @@ def hold_broken_policies(root: Path, paths=None) -> list:
         if not why:
             continue
         literal = f":(literal){rel}"
+        staged = core.git(root, "diff", "--cached", "--quiet", "--", literal)[0] == 1
+        staged_text = _blob(root, f":{rel}") if staged else None  # None too for a staged deletion
+        keep_index = staged_text is not None and not audit.publishable_text(Path(rel).name, staged_text)
         saved = problem = None
         try:
             saved = _held_copy(rel)
@@ -953,7 +965,13 @@ def hold_broken_policies(root: Path, paths=None) -> list:
                 with contextlib.suppress(OSError):
                     saved.unlink()
         if problem is None:
-            if core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
+            if staged_text is not None and not keep_index:  # staged and broken too: held as well, once
+                with contextlib.suppress(OSError):
+                    if saved.read_bytes() != staged_text:
+                        _hold_text(rel, staged_text, audit.publishable_text(Path(rel).name, staged_text))
+            if keep_index:
+                core.git(root, "checkout", "-q", "--", literal)  # the working copy back to the staged version
+            elif core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
                 core.git(root, "checkout", "-q", "HEAD", "--", literal)
             else:
                 core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)
@@ -977,7 +995,8 @@ def hold_broken_policies(root: Path, paths=None) -> list:
             continue
         _write_why(saved, rel, why)
         text = (f"held: it {why}, so no Mac could load it; this Mac's text was moved to {core.tilde(saved)} and the "
-                "handoff repository keeps the version it last pulled")
+                "handoff repository keeps " + ("the version staged before it" if keep_index else
+                                               "the version it last pulled"))
         audit.record("handoff.push", rel, text, "blocked", severity="critical")
         try:  # each live session hears of it once, with its next wake or hook
             from . import watch
