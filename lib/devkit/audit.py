@@ -1238,13 +1238,20 @@ def _config_value(s: str) -> str:
     if d is not None and "value_digest" in d:
         return _OLD_VALUE_TYPE.get(str(d.get("value_type")), "a value it does not quote")
     at = s.find(_CHANGE)
-    while at >= 0:  # an arrow inside a JSON string leaves the text before it no JSON value
+    for _ in range(_ARROW_TRIES):  # an arrow inside a JSON string leaves the text before it no JSON value
+        if at < 0:
+            break
         try:
             _json(s[:at])
             return core.say_value(_json(s[at + len(_CHANGE):]))
         except ValueError:
             at = s.find(_CHANGE, at + 1)
     return "a value it does not quote"
+
+
+# Each try parses the whole detail, and any teammate can write a line with thousands of arrows into a handoff copy:
+# a few tries keep one detail's cost linear; an old value with more arrows in it fails closed
+_ARROW_TRIES = 8
 
 
 def _job_list(s: str, sep: str, status: bool) -> str:

@@ -2182,6 +2182,26 @@ class ExportTests(AuditCase):
         self.assertIn("CEF:0|Firefly Software Solutions|devkit|", data)
 
 
+class LongConfigDetailTests(unittest.TestCase):
+    # Any teammate can write a dev.config.set line into a handoff copy, and trying every arrow in a long detail made
+    # one team query take seconds: each try parses the text before the arrow. The tries are few, whatever the length
+    def test_the_parses_of_a_detail_do_not_grow_with_its_arrows(self):
+        shapes = {"an open string": lambda n: '"' + "a → " * n, "a list of strings": lambda n: "[" + '"a → ", ' * n}
+        for name, shape in shapes.items():
+            counts = []
+            for n in (100, 32000):
+                with mock.patch.object(audit, "_json", wraps=audit._json) as parse:
+                    self.assertEqual(audit._config_value(shape(n)), "a value it does not quote")
+                counts.append(parse.call_count)
+            self.assertEqual(counts[0], counts[1], name)
+
+    def test_an_old_detail_still_says_its_new_value_however_long_its_old_value(self):
+        # devkit cut no detail before schema v2, so an old record can hold a long value whole
+        self.assertEqual(audit._config_value('null → "x"'), core.say_value("x"))
+        self.assertEqual(audit._config_value('"' + "b" * 5000 + '" → "x"'), core.say_value("x"))
+        self.assertEqual(audit._config_value('"a → b" → "x"'), core.say_value("x"))
+
+
 class OldJobRecordTests(AuditCase):
     # Records an older devkit wrote kept a typed configuration key or a job's name whole: a dev.config.set target, a
     # jobs.set target, the jobs.install list and a job.<name> action. A token pasted as a job's or profile's name must
