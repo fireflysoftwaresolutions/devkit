@@ -482,6 +482,33 @@ class MacNamesInAFindingsHistory(unittest.TestCase):
         self.assertNotRegex(detail.text(), r"taken on m-")
 
 
+class ReviewerWordsInAFindingsHistory(unittest.TestCase):
+    # A person's reason in a finding's history is their own text: a word shaped like a machine id ("the m-dropdown
+    # menu", "at m-1440wide") stays as they wrote it. Only the Mac a verification names where devkit writes one
+    # ("the picture before was taken on m-…") reads as the Mac's name
+    REOPENED = "VF-g33z2e8t5w"
+
+    def test_a_reviewers_word_shaped_like_a_machine_id_stays_as_written(self):
+        records_dir, store = fixture_copy(self)
+        path = records_dir / "findings" / f"{self.REOPENED}.json"
+        rec = json.loads(path.read_text())
+        rec["history"][-1]["why"] = ("still there on VC-g33z1e7q5r: truncation · nothing compared: the picture before "
+                                     "was taken on m-studio01 and is not on this Mac")
+        rec["history"].insert(-1, {"at": "2026-11-09T18:10:00Z", "by": "seraph", "change": "fixing",
+                                   "why": "the m-dropdown menu overlaps the header at m-1440wide"})
+        path.write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
+        presence(records_dir.parent / "presence", "ana@m-studio01", "studio")
+        with mock.patch.object(work, "PRESENCE", records_dir.parent / "presence"), \
+                mock.patch.object(identity, "machine", lambda now=None: identity.Machine("m-test0001", "laptop", {})):
+            audit = report.load(records_dir, store, PRODUCT)
+            root = Tree(report.render_html(audit)).root
+        history = [" ".join(li.text().split()) for li in root.one("article", id=self.REOPENED).one(
+            "ol", class_="history").find("li")]
+        self.assertTrue(history[-2].endswith(": the m-dropdown menu overlaps the header at m-1440wide"), history[-2])
+        self.assertIn("picture before was taken on studio (m-studio01) and is not on this Mac", history[-1])
+        self.assertEqual({"m-studio01", "m-dropdown", "m-1440wide"} & set(audit["macs"]), {"m-studio01"})
+
+
 class ScopeReports(unittest.TestCase):
     def test_vd_ac_13_a_screen_audit_without_passes_shows_twenty_open_cells(self):
         _, root = html_of(SCREEN)
