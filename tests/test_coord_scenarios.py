@@ -316,10 +316,15 @@ class ReviewIndependenceTests(Scenario):
         pg.assign("x", "Neo", why="test", now=self.m(0))
         pg.assign("z", "Neo", why="test", now=self.m(0))
         launch("a_neo", "devkit:neo", "Neo: x", at=self.m(1))
+        rc, out, err = self.cli("a_neo", "reviewed my own work", "--step", "review-x", "--check", "✓ approved")
+        self.assertEqual(rc, 2, out)  # while x runs, the review does not join the lane once x closes either
+        self.assertIn("so it never joins your lane", err)
         pg.step("x done", which="x", check="ok", from_agent="a_neo", now=self.m(10))
         self.assertEqual(self.held("z"), ("a_neo", "running"))  # joined by its member's queue
         rc, out, err = self.cli("a_neo", "reviewed my own work", "--step", "review-x", "--check", "✓ approved")
         self.assertEqual(rc, 2, out)
+        self.assertIn("“review-x” reviews “x”, Senior engineer (Neo)'s own work, so it never joins your lane", err)
+        self.assertNotIn("assign it to you", err)
         self.assertEqual((self.held("review-x"), self.held("z")), (("main", "pending"), ("a_neo", "running")))
         self.sound()
 

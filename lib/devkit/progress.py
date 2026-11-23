@@ -1987,12 +1987,17 @@ def _refuse_own_review(run: dict, s: dict, label: str):
     name = (mem or {}).get("name") or coord.member_of(label)
     if coord.independent(run, s, name):
         return
-    agents, steps = run.get("agents") or {}, _by_name(run.get("plan") or [])
-    did = [n for n in s.get("after") or [] if ((agents.get((steps.get(n) or {}).get("owner") or "") or {})
-                                                .get("persona") or "").lower() == name.lower()]
+    did = _own_work(run, s, name)
     raise StepError(f"“{s['name']}” reviews {_quoted_and(did)}, {crew.who(mem or label)}'s own work: a member never "
                     f"reviews its own work. Give it to another member (dev crew raci review names who reviews), "
                     f"or skip it (dev progress skip \"{s['name']}\" --why \"…\")")
+
+
+def _own_work(run: dict, s: dict, name: str) -> list:
+    """The names of the steps review `s` follows that a lane of member `name` ran (coord.independent's test)."""
+    agents, steps = run.get("agents") or {}, _by_name(run.get("plan") or [])
+    return [n for n in s.get("after") or [] if ((agents.get((steps.get(n) or {}).get("owner") or "") or {})
+                                                .get("persona") or "").lower() == (name or "").lower()]
 
 
 def _scope_top(run: dict, cwd: str | None) -> str:
@@ -2346,7 +2351,15 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
         deps = deps_open(run, st)
         return (f"“{name}” waits for {', '.join(deps)}, so it cannot close yet and devkit recorded nothing: it joins "
                 f"your lane once {'that is' if len(deps) == 1 else 'they are'} done; run this again then")
-    holder = "the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"
+    lane = (run.get("agents") or {}).get(aid) or {}
+    me = lane.get("persona") or ""
+    if st.get("state") == "pending" and is_review_step(st) and _label_matches(st.get("label") or "", lane) \
+            and not coord.independent(run, st, me):
+        from . import crew
+        return (f"“{name}” reviews {_quoted_and(_own_work(run, st, me))}, {crew.who(me)}'s own work, so it never "
+                f"joins your lane and devkit recorded nothing: a member never reviews its own work, and the tech lead "
+                f"gives the review to another member (dev crew raci review names who reviews)")
+    holder ="the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"
     return (f"“{name}” is not your step ({holder}), so devkit cannot close it and recorded nothing: ask the tech lead "
             f"to assign it to you (dev crew ask \"…\"), or record your work without --step")
 
