@@ -1,0 +1,105 @@
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
+# A verdict covers the work it saw. A crew member's `dev progress step --approves` waits in its lane until its stop,
+# so the step it names can be reopened, reworked and end unverified again meanwhile: that verdict then closes and
+# approves nothing, and a step an approval closes is never dated before it last ended unverified. Progress state in a
+# temporary folder (test_progress.TempState).
+# Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
+# Run: python3 -m unittest tests.test_approvals_rework -v
+import sys
+import time
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from devkit import progress as pg  # noqa: E402
+from test_progress import TempState, gates_passed, launch  # noqa: E402
+
+KEY_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** api · `main` · threat\n- **Done:** x\n"
+              "- **Check:** ✓ ran the 3 jobs\n- **Next:** the tech lead merges")
+LINK_REPORT = ("**[Firefly> DevKit · Release engineer (Link)]** api · `main` · pipeline\n- **Done:** x\n"
+               "- **Check:** ⚠ 2 of 3 jobs run\n- **Next:** the tech lead reviews it")
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 7200
+
+    def m(self, minutes):
+        return self.t0 + minutes * 60
+
+    def run_(self):
+        return pg.load_run("claude", "s1")
+
+    def st(self, name):
+        return next(s for s in self.run_()["plan"] if s["name"] == name)
+
+    def stop(self, aid, kind, report, at):
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": kind,
+                                  "last_assistant_message": report}, False, now=at)
+
+    def approved(self, name):
+        return [a for a in self.run_().get("approvals") or [] if name in (a.get("steps") or [])]
+
+
+class StaleVerdictTests(Base):
+    def setUp(self):
+        # the Release engineer's pipeline ends unverified at m10; the Security engineer, its approver, gives its ✓ at
+        # m20, held in its lane until its stop
+        super().setUp()
+        pg.start("Work", plan="pipeline=10m; threat=10m; wrap=5m", now=self.m(0))
+        pg.assign("pipeline", "Link", activity="cicd", now=self.m(0))
+        launch("a_link", "devkit:link", "Release engineer (Link): pipeline", self.m(1))
+        pg.step("pipeline built", which="pipeline", check="⚠ 2 of 3 jobs run", from_agent="a_link", now=self.m(10))
+        pg.assign("threat", "Keymaker", activity="security", now=self.m(11))
+        launch("a_key", "devkit:keymaker", "Security engineer (The Keymaker): threat", self.m(12))
+        pg.step("threat model done", which="threat", check="✓ ran the 3 jobs", from_agent="a_key",
+                approves="pipeline", now=self.m(20))
+
+    def test_a_verdict_given_before_a_reopen_does_not_close_the_reworked_step(self):
+        # the tech lead reopens the pipeline at m25, the Release engineer reworks it and ends unverified again at m40:
+        # the Security engineer's stop at m50 closed it done, dated m20, with the verdict on the old work
+        pg.reopen("pipeline", why="rework", now=self.m(25))
+        pg.step("pipeline rebuilt", which="pipeline", check="⚠ 0 of 3 jobs run, rewrote the deploy job",
+                from_agent="a_link", now=self.m(40))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual(self.st("pipeline")["state"], "unverified")
+        self.assertEqual(self.approved("pipeline"), [])
+
+    def test_a_reopen_drops_the_verdicts_lanes_hold_on_the_step_and_tells_their_members(self):
+        pg.reopen("pipeline", why="rework", now=self.m(25))
+        run = self.run_()
+        held = [v for v in run["agents"]["a_key"].get("verdicts") or [] if "pipeline" in v.get("steps") or []]
+        self.assertEqual(held, [])
+        told = [m["text"] for m in run.get("messages") or [] if m.get("to") == "a_key"]
+        self.assertTrue(any("“pipeline”" in t and "reopened" in t for t in told), told)
+
+    def test_a_verdict_older_than_the_steps_last_unverified_end_closes_nothing(self):
+        # no reopen: the Release engineer's lane ends, a new launch of it takes the unverified pipeline again and
+        # ends it unverified at m40, after the verdict
+        self.stop("a_link", "devkit:link", LINK_REPORT, self.m(30))
+        launch("a_link2", "devkit:link", "Release engineer (Link): pipeline", self.m(31))
+        self.assertEqual((self.st("pipeline")["owner"], self.st("pipeline")["state"]), ("a_link2", "running"))
+        pg.step("pipeline rebuilt", which="pipeline", check="⚠ 0 of 3 jobs run", from_agent="a_link2",
+                now=self.m(40))
+        gates_passed("a_key", at=self.m(49))
+        self.stop("a_key", "devkit:keymaker", KEY_REPORT, self.m(50))
+        self.assertEqual(self.st("pipeline")["state"], "unverified")
+        self.assertEqual(self.approved("pipeline"), [])
+
+    def test_a_closed_step_is_never_dated_before_it_last_ended_unverified(self):
+        run = self.run_()
+        s = next(x for x in run["plan"] if x["name"] == "pipeline")
+        entry = {"ts": self.m(5), "by": "keymaker", "steps": ["pipeline"], "verdict": "approved",
+                 "closes": ["pipeline"], "check": "✓ ran the 3 jobs"}
+        pg._close_approved(run, entry, "a_key", "Security engineer (The Keymaker)", self.m(20), "claude", "s1")
+        self.assertEqual(s["state"], "done")
+        self.assertGreaterEqual(s["finished"], self.m(10))
+
+
+if __name__ == "__main__":
+    unittest.main()

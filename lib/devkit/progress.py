@@ -4975,6 +4975,7 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                     s["owner"] = "main"
             s.pop("untimed", None)
             s["reopened"] = (s.get("reopened") or 0) + 1
+            _drop_held_verdicts(run, s, now)
         _log_change(run, s, old, s["state"], "main", why, now)
         run["step"] = sum(1 for x in run["plan"] if x.get("state") in ("done", "skipped"))
         run["updates"].append({"ts": round(now), "kind": "reopen" if not skip else "skip", "text": why,
@@ -4982,6 +4983,22 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _drop_held_verdicts(run: dict, s: dict, now: float):
+    """Step `s` is reopened: the `--approves` verdicts lanes hold on it (_approve_later) saw its old work, so each is
+    dropped, and each member still at work is told to give it again once the new work ends. Its other steps keep
+    theirs."""
+    for aid, lane in (run.get("agents") or {}).items():
+        held = lane.get("verdicts") if isinstance(lane, dict) else None
+        if not held or not any(s["name"] in (v.get("steps") or []) for v in held):
+            continue
+        kept = [dict(v, steps=[n for n in v.get("steps") or [] if n != s["name"]]) for v in held]
+        lane["verdicts"] = [v for v in kept if v["steps"]]
+        if lane.get("state") == "running":
+            _post(run, "devkit", aid, f"devkit: the tech lead reopened “{s['name']}”, so your verdict on it (dev "
+                  f"progress step --approves) no longer counts: give it again once its new work ends", now,
+                  from_name="devkit", kind="notice")
 
 
 def confirm(which, why: str, cwd: str | None = None, now: float | None = None, from_agent: str | None = None) -> dict:
@@ -5116,13 +5133,15 @@ def _approve(run: dict, by: str, approves: str, check: str, now: float, agent: s
 
 def _close_approved(run: dict, entry: dict, by: str, who: str, now: float, agent: str, sid: str):
     """The unverified steps an approval's ✓ closes (approvals.record's `closes`) end done, at the verdict's time, with
-    the verdict as their evidence, as a review step's ✓ closes the unverified work it follows (_verified_by_review)."""
+    the verdict as their evidence, as a review step's ✓ closes the unverified work it follows (_verified_by_review).
+    Never dated before the step last ended unverified (`unverified_at`): its finish is the time its approvals count
+    from (approvals.owed)."""
     steps = _by_name(run.get("plan") or [])
     for n in entry.get("closes") or []:
         x = steps.get(n)
         if not x or x.get("state") != "unverified":
             continue
-        _finish_step(run, x, entry["ts"], agent, sid)
+        _finish_step(run, x, max(entry["ts"], x.get("unverified_at") or 0), agent, sid)
         _log_change(run, x, "unverified", "done", by, f"approved by {who}: {entry.get('check') or ''}", now)
 
 
@@ -5174,6 +5193,12 @@ def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float, ag
             from . import crew
             _close_approved(run, entry, aid, crew.who(who), now, agent, sid)
         except (approvals.ApprovalError, KeyError, TypeError) as e:
+            for n in names:  # the step says why the verdict did not count, as one the gates did not pass does
+                run.setdefault("history", []).append({
+                    "ts": round(now), "step": n, "from": steps[n].get("state") or "-",
+                    "to": steps[n].get("state") or "-", "by": aid,
+                    "why": f"{who}'s verdict on it (dev progress step --approves) is not counted: {e}"[:300]})
+            run["history"] = (run.get("history") or [])[-200:]
             _audit("crew.approval-refused", ", ".join(names) or "?", str(e)[:300], "refused",
                    project=run.get("project") or "")
 
@@ -7523,7 +7548,7 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     if state_ != "done":
         if approvals.is_review(st) and _review_verdict(lane, st, report) == "changes":
             st["verdict"] = "changes"  # finished, changes requested: the fix after it may start (coord.deps_open)
-        st["state"] = "unverified"
+        approvals.mark_unverified(st, now)
         _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
                     f"{why}", now)
         return

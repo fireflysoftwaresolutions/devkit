@@ -234,13 +234,21 @@ def owed(run: dict, doer_of=None, roster=None) -> list:
     return sorted(out.items())
 
 
+def mark_unverified(s: dict, now: float):
+    """Step `s` ends unverified now, and keeps when (`unverified_at`, exact): an approval's ✓ closes it only when
+    given after that (record), so a verdict on earlier work never closes work redone since."""
+    s.update(state="unverified", unverified_at=now)
+
+
 def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step", check: str = "",
            doer_of=None, roster=None, unverified: bool = False) -> dict:
     """Record `by`'s verdict ("approved" or "changes") on the named steps, in the run -> the entry. Refused, whole,
     when a step is not done, has no kind of work (so no approver), when `by` did it (self-approval) or is not its
     approver. `unverified`: the caller closes the unverified steps an approval names, as a review step's ✓ closes the
     unverified work it follows, so its approver's ✓ takes them, listed in the entry's `closes`; a ✗ still leaves them
-    unverified, refused. The developer approves through a decision that names the steps (verdicts), never here."""
+    unverified, refused, and so is a verdict given (`now`) before the step last ended unverified (`unverified_at`,
+    mark_unverified): it saw older work. The developer approves through a decision that names the steps (verdicts),
+    never here."""
     from . import raci
     if verdict not in VERDICTS:
         raise ApprovalError(f"the verdict is one of {', '.join(VERDICTS)}")
@@ -257,6 +265,10 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
                             f"tech lead to reopen (dev progress reopen \"{s['name']}\" --why \"…\")")
             continue
         closing = s.get("state") == "unverified" and unverified  # the caller ends it done, at or before this verdict
+        if closing and now < (s.get("unverified_at") or 0):
+            problems.append(f"“{s['name']}” ended unverified at {_iso(s['unverified_at'])}, after this verdict "
+                            f"({_iso(now)}): a verdict covers only the work it saw, so give it again on the new work")
+            continue
         if closing:
             closes.append(s["name"])
         elif s.get("state") != "done":
@@ -534,6 +546,8 @@ def apply(run: dict, moves: list, now: float) -> list:
             if not s or s.get("state") != m["from"] or (s.get("owner") or "main") != m["owner_from"]:
                 continue
             s.update(state=m["to"], owner=m["owner"])
+            if m["to"] == "unverified":
+                mark_unverified(s, now)
             if m["to"] == "pending" and m["owner"] == "main":
                 s.update(lost_from=m["owner_from"], lost_at=now)  # taken back after new work only (_worked_since)
                 s.pop("waiting", None)  # back with Morpheus: no decision blocks it any more
