@@ -3069,6 +3069,38 @@ class PublishCleaningTests(AuditCase):
         res = audit.verify(team=False)
         self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("edited", n + 1))
 
+    def test_a_v1_number_or_boolean_a_reader_hides_is_not_published(self):
+        pin, phone = 48213579, 15551234567
+        self.old_v1(0, action="dev.task", target=phone, detail=True)  # a reader says both as text, one by length
+        self.old_v1(1, action="watch.wait", target="before", detail="", pin=pin)  # a key a reader drops
+        self.old_v1(2, action="watch.wait", target="after", detail="")  # clean: as stored
+        audit._append(audit.build("dev.task", "next day", "fine", now=self.noon + 86400))
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15)])
+        published = self.day(14).read_bytes().splitlines(keepends=True)
+        for n in (0, 1):
+            self.assertTrue(json.loads(published[n])["cleaned"])
+        self.assertNotIn(str(pin), published[1].decode())
+        self.assertNotIn(str(phone), published[0].decode())
+        self.assertEqual(json.loads(published[0])["detail"], "True")
+        self.assertEqual(published[2], self.month.read_bytes().splitlines(keepends=True)[2])
+        self.assertEqual(self.views(team=True), self.views(team=False))
+        self.assertTrue(audit.verify()["ok"])
+
+    def test_a_line_with_a_duplicate_key_is_published_as_its_record(self):
+        # json.loads keeps a duplicate key's last value, so the stored bytes hold more than any reader sees
+        gh = self.GITHUB
+        audit._append(audit.build("watch.wait", "before", "", now=self.noon))
+        self.old_v1(1, action="watch.wait", target="after", detail="")
+        self.month.write_text("".join('{"target": "' + gh + '", ' + ln[1:]
+                                      for ln in self.month.read_text().splitlines(keepends=True)))
+        self.assertTrue(audit.verify(team=False)["ok"])  # the record parsed and hashed is the one sealed
+        audit._append(audit.build("dev.task", "next day", "fine", now=self.noon + 86400))
+        audit.publish()
+        self.assertNotIn(gh, self.day(14).read_text())
+        self.assertEqual(self.views(team=True), self.views(team=False))
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
     def test_a_stand_in_matches_only_an_unreadable_local_line_and_holds_nothing_else(self):
         self.write_old_day()
         audit.publish()

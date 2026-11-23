@@ -3318,25 +3318,37 @@ def _dump(r) -> bytes:
     return json.dumps(r, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _strings(x):
-    """Every text a stored record holds, its keys too."""
+def _atoms(x):
+    """Every value a stored record holds, its keys too, each with its type: text as it is, a number, a boolean or null
+    as JSON says it (an integral float as the integer, as a v1 time reads), so a number a reader says as text or
+    drops is missing from its view."""
     if isinstance(x, str):
-        yield x
+        yield "s", x
     elif isinstance(x, dict):
         for k, v in x.items():
-            yield str(k)
-            yield from _strings(v)
+            yield "s", str(k)
+            yield from _atoms(v)
     elif isinstance(x, (list, tuple)):
         for v in x:
-            yield from _strings(v)
+            yield from _atoms(v)
+    else:
+        n = int(x) if isinstance(x, float) and x.is_integer() else x
+        yield "j", json.dumps(n)
+
+
+def _as_written(ln: bytes, r) -> bool:
+    """Do stored bytes `ln` hold exactly record `r`, as devkit writes a record (v2: _dump; v1: json.dumps)? A line
+    with a duplicate key holds more than its parsed record: json.loads keeps the last value."""
+    return ln in (_dump(r), json.dumps(r, ensure_ascii=False).encode("utf-8"), json.dumps(r).encode("utf-8"))
 
 
 def _published_line(ln: bytes, rx) -> bytes:
     """One line of a local month file (without its line end) as publish writes it to the handoff repository, whose
-    git history keeps it for good: what a reader sees of it. A line already clean goes out as it is stored. A v2
-    record that cleaning changes goes out cleaned (_reclean), with its id, prev and hash, marked `cleaned`; a v1
-    line that cleaning changes, as the record a reader sees (lift), marked `cleaned`; a line no reader can read (cut
-    short, not an object), as a stand-in that only names it. `rx`: the compiled redaction patterns readers use."""
+    git history keeps it for good: what a reader sees of it. A line already clean, written as devkit writes the record
+    it holds, goes out as it is stored. A v2 record that cleaning changes, or whose bytes hold more than the record
+    (a duplicate key), goes out cleaned (_reclean), with its id, prev and hash, marked `cleaned`; a v1 line that
+    cleaning changes, as the record a reader sees (lift), marked `cleaned`; a line no reader can read (cut short, not
+    an object), as a stand-in that only names it. `rx`: the compiled redaction patterns readers use."""
     if not ln.strip():
         return ln
     r = parse_line(ln)
@@ -3344,10 +3356,11 @@ def _published_line(ln: bytes, rx) -> bytes:
         return _dump({"v": 1, "id": _v1_id({}, ln), "cleaned": True, "unreadable": True})
     if r.get("v") == V or _stand_in(r):
         c = _reclean(r, rx)
-        return ln if c == r else _dump(c)
+        return ln if c == r and _as_written(ln, r) else _dump({**c, "cleaned": True})
     view = lift(r, ln, rx)
-    shown = set(_strings(view))
-    return ln if all(t in shown for t in _strings(r) if t) else _dump({**view, "cleaned": True})
+    shown = set(_atoms(view))
+    clean = all(a in shown for a in _atoms(r) if a != ("s", "")) and _as_written(ln, r)
+    return ln if clean else _dump({**view, "cleaned": True})
 
 
 def _publishable(data: bytes, rx) -> bytes:
