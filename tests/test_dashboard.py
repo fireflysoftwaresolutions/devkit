@@ -2308,6 +2308,21 @@ class RemoteRunCountLimitTests(unittest.TestCase):
         self.assertEqual(crew, "Crew No crew member working, at the last presence update.")
         self.assertNotIn("crew member", out["card"])
 
+    def test_a_step_count_past_what_a_run_can_hold_is_no_count(self):
+        # the Now server drops counts above dashnow.STEPS_MAX; the page drops the same ones
+        with tempfile.TemporaryDirectory() as tmp:
+            d = fixture_data(Path(tmp) / "handoff", NOW)
+            brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                     "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                     "plan": [{"name": "rows", "state": "running", "est": 10, "min": 4.0, "owner": "main"}], "agents": []}
+            summary = dict(work.run_summary(brief), steps_total=10 ** 9)
+            next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = summary
+            out = browse(dashboard.page(d), """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);""",
+                         1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertTrue(out["card"], "the run's card is drawn")
+        self.assertNotIn("1000000000", out["card"].replace(",", ""))
+
 
 @unittest.skipUnless(CHROME, NO_CHROME)
 class RemoteRunCardTests(unittest.TestCase):
