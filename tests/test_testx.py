@@ -2950,6 +2950,22 @@ class CalcTests(unittest.TestCase):
                              [("test_calc.CalcTests.test_mul", "proves the change")], out + err)
             self.assertEqual(rc, 0)
 
+    # `dev test --since REF prove`: the base named before the subcommand is the base of the proof, as after it
+    def test_since_before_the_subcommand_sets_the_base_of_the_proof(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "calc.py").write_text(MUL)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            git(r, "commit", "-qam", "feat: mul")
+            (r / "calc.py").write_text(MUL + "\n\ndef div(a, b):\n    return a / b\n")
+            (r / "tests" / "test_calc.py").write_text(with_tests(
+                TEST_MUL, "\n    def test_div(self):\n        self.assertEqual(calc.div(6, 3), 2)\n"))
+            rc, out, err = dev(r, "--since", "HEAD", "prove", "--json", "--runs", "1")
+            data = json.loads(out)
+            self.assertEqual((data["base"], [t["id"] for t in data["tests"]]),
+                             ("HEAD", ["test_calc.CalcTests.test_div"]), out + err)
+            self.assertEqual(rc, 0)
+
     def test_needs_a_production_change_and_a_changed_test(self):
         with Env() as e:
             r = e.repo(PROVE_BASE)
@@ -3517,6 +3533,21 @@ class WiringTests(unittest.TestCase):
         from devkit import cli
         a = cli.build_parser().parse_args(["test", "prove", "--runs", "3"])
         self.assertEqual((a.fn, a.test_cmd, a.runs), (testx.cmd_test, "prove", 3))
+
+    # an option of `dev test` written before the subcommand is kept, not reset by the subcommand's own default; the
+    # same option written after the subcommand still wins
+    def test_options_before_the_subcommand_are_kept(self):
+        from devkit import cli
+        parse = cli.build_parser().parse_args
+        for sub in ("prove", "plan", "run"):
+            with self.subTest(sub=sub):
+                a = parse(["test", "--since", "v1", "--runner", "pytest", "--json", sub])
+                self.assertEqual((a.test_cmd, a.since, a.runner, a.json), (sub, "v1", "pytest", True))
+                self.assertEqual(parse(["test", "--since", "v1", sub, "--since", "v2"]).since, "v2")
+        a = parse(["test", "--failed", "-v", "run"])
+        self.assertEqual((a.failed, a.verbose), (True, True))
+        a = parse(["test", "prove"])
+        self.assertEqual((a.since, a.runner, a.json, a.runs), (None, None, False, testx.RUNS))
 
     def test_dev_test_is_not_audited_as_a_change(self):
         from devkit import audit

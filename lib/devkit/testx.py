@@ -32,6 +32,7 @@ full-run duration, the tree and the time. Python 3.9 compatible, stdlib only.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import contextlib
 import fcntl
@@ -3738,18 +3739,24 @@ def _audit(a) -> int:
 # --------------------------------------------------------------------------- CLI
 
 
-def _options(p, paths=False):
+# A subcommand's copy of an option of `dev test` sets it only when written after the subcommand: with a default of its
+# own, argparse would reset what `dev test --since REF prove` set before it.
+_KEEP = {"default": argparse.SUPPRESS}
+
+
+def _options(p, paths=False, sub=False):
+    keep = _KEEP if sub else {}
     if paths:
         p.add_argument("paths", nargs="*", help="test files, directories or runner ids of this repository (default: "
                                                 "failed, then affected)")
-    p.add_argument("--failed", action="store_true", help="only the tests that failed last time")
-    p.add_argument("--affected", action="store_true", help="only the tests your changes can affect")
-    p.add_argument("--all", action="store_true", help="the full suite (once, before the push)")
+    p.add_argument("--failed", action="store_true", help="only the tests that failed last time", **keep)
+    p.add_argument("--affected", action="store_true", help="only the tests your changes can affect", **keep)
+    p.add_argument("--all", action="store_true", help="the full suite (once, before the push)", **keep)
     p.add_argument("--since", metavar="REF", help="compare with REF instead of the merge-base with origin/<default> "
-                   "(or with the release or integration branch this one was cut from)")
-    p.add_argument("--runner", metavar="NAME", help="only this runner: " + ", ".join(RUNNER_LANG))
-    p.add_argument("--json", action="store_true")
-    p.add_argument("-v", "--verbose", action="store_true", help="stream the runner's full output")
+                   "(or with the release or integration branch this one was cut from)", **keep)
+    p.add_argument("--runner", metavar="NAME", help="only this runner: " + ", ".join(RUNNER_LANG), **keep)
+    p.add_argument("--json", action="store_true", **keep)
+    p.add_argument("-v", "--verbose", action="store_true", help="stream the runner's full output", **keep)
 
 
 def register(add):
@@ -3760,23 +3767,24 @@ def register(add):
                                            "subcommand: dev test -p acme/api plan")
     sp = p.add_subparsers(dest="test_cmd", metavar="run|plan|prove|audit")
     q = sp.add_parser("run", help="run tests: paths, --failed, --affected or --all")
-    _options(q, paths=True)
+    _options(q, paths=True, sub=True)
     q = sp.add_parser("plan", help="what would run and why (changed file → tests), with the estimate; runs nothing")
-    q.add_argument("--all", action="store_true", help="the whole suite: test files, full-run time, slowest files")
-    q.add_argument("--since", metavar="REF")
-    q.add_argument("--runner", metavar="NAME")
-    q.add_argument("--json", action="store_true")
+    q.add_argument("--all", action="store_true", help="the whole suite: test files, full-run time, slowest files",
+                   **_KEEP)
+    q.add_argument("--since", metavar="REF", **_KEEP)
+    q.add_argument("--runner", metavar="NAME", **_KEEP)
+    q.add_argument("--json", action="store_true", **_KEEP)
     q = sp.add_parser("prove", help="each new or changed test passes N times with the change and fails without it")
     q.add_argument("tests", nargs="*", help="test files (default: the new or changed ones)")
     q.add_argument("--since", metavar="REF", help="the base without your change (default: merge-base with origin, or "
-                   "with the release or integration branch this one was cut from)")
+                   "with the release or integration branch this one was cut from)", **_KEEP)
     q.add_argument("--runs", type=int, default=RUNS, metavar="N", help=f"green runs required with the change "
                                                                      f"(default {RUNS})")
     q.add_argument("--isolated-imports", action="store_true",
                    help="unittest only: disable site and inherited Python paths; attest checkout/stdlib imports "
                         "for lesson prevention receipts (checkout root, src and test folders)")
-    q.add_argument("--runner", metavar="NAME")
-    q.add_argument("--json", action="store_true")
+    q.add_argument("--runner", metavar="NAME", **_KEEP)
+    q.add_argument("--json", action="store_true", **_KEEP)
     try:
         mod = _audit_module()
         q = sp.add_parser("audit", help="tests that cannot fail: no or trivial assertions, skips, sleeps")
