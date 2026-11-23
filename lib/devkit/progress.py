@@ -2432,14 +2432,19 @@ def _open_step_of(run: dict, aid: str, s: dict | None = None):
     return next((x for x in coord.held(run, aid) if x is not s and not (review and is_review_step(x))), None)
 
 
-def _take_step(run: dict, aid: str, s: dict, now: float):
+def _take_step(run: dict, aid: str, s: dict, now: float) -> bool:
     """Lane `aid` takes step `s`: it owns it and runs it, its scope is the step's while it runs (lane_scope), and its
-    member's step closes reach the plan."""
+    member's step closes reach the plan. Never a review of its member's own work, nor a review for a lane devkit
+    cannot name as a crew member (coord.independent), whichever caller asks: then nothing changes. -> whether it
+    took it"""
+    lane = run["agents"][aid]
+    if is_review_step(s) and not coord.independent(run, s, lane, who=member_id):
+        return False
     s.update(owner=aid, state="running", started=s.get("started") or now)
     coord.drop_intent(s)
-    lane = run["agents"][aid]
     _remember_step(lane, s)
     lane.pop("handed_over", None)
+    return True
 
 
 def _remember_step(lane: dict, step: dict):
@@ -6248,9 +6253,19 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     if st is not None and st.get("state") == "unverified":
         if deps_open(run, st) or coord.busy(run, aid, st, review=is_review_step):
             return  # a dependency was reopened since: dev progress reopen gives it back once that is done
+        if is_review_step(st) and not coord.independent(run, st, lane, who=member_id):
+            did = _own_work(run, st, lane)
+            _post(run, "devkit", "main", f"{who} started as “{label}”, which names the review “{st['name']}”"
+                  + (f" of {_quoted_and(did)}, its own work" if did else ", and devkit cannot tell which crew member "
+                     "it is") + f": the review stays unverified and this lane does not take it. Give it to another "
+                  f"member: dev progress reopen \"{st['name']}\" --why \"…\", then dev progress assign "
+                  f"\"{st['name']}\" --to <member>", now, from_name="devkit")
+            _claim_lane(run, aid, now)
+            return
+        if not _take_step(run, aid, st, now):
+            return
         st.pop("recheck", None)  # it is redone now
         st["reopened"] = (st.get("reopened") or 0) + 1
-        _take_step(run, aid, st, now)
         _log_change(run, st, "unverified", "running", aid, f"a new launch of {who}, “{label}”, names it: the new "
                     f"lane works on it again", now)
         return

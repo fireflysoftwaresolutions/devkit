@@ -71,3 +71,37 @@ class ReviewerIdentityTests(Base):
         self.assertEqual((self.st("review-x").get("owner"), self.st("review-x")["state"]), ("main", "pending"))
 
 
+class RelaunchTests(Base):
+    def test_a_new_launch_of_the_author_leaves_its_unverified_review_to_another_member(self):
+        # Neo's review of Tank's x ends unverified; x is reopened and Neo redoes it; a new launch "Neo: review-x"
+        # took the review back, a review of its own work
+        pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", why="test", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: x", at=self.m(1))
+        pg.step("x done", which="x", check="✓ 3 tests pass", from_agent="a_tank", now=self.m(10))
+        pg.assign("review-x", "Neo", why="review", now=self.m(11))
+        launch("a_neo", "devkit:neo", "Neo: review-x", at=self.m(12))
+        self.stop("a_neo", "devkit:neo", NEO_REPORT, self.m(20))  # no gates' pass: the review ends unverified
+        pg.reopen("x", why="rework by Neo", now=self.m(21))
+        pg.assign("x", "Neo", why="rework", now=self.m(22))
+        launch("a_neo2", "devkit:neo", "Neo: x", at=self.m(23))
+        pg.step("x redone", which="x", check="✓ 4 tests pass", from_agent="a_neo2", now=self.m(30))
+        launch("a_neo3", "devkit:neo", "Neo: review-x", at=self.m(31))
+        run = self.run_()
+        rx = next(s for s in run["plan"] if s["name"] == "review-x")
+        self.assertEqual((rx.get("owner"), rx["state"]), ("a_neo", "unverified"))
+        told = [m["text"] for m in run.get("messages") or [] if m.get("to") == "main" and m["ts"] >= round(self.m(31))]
+        self.assertTrue(any("“review-x”" in t and "own work" in t for t in told), told)
+
+    def test_a_lane_never_takes_a_review_of_its_own_work_directly(self):
+        # the last line of defense under every caller: _take_step gives a lane no review of work its member did
+        pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Neo", why="test", now=self.m(0))
+        launch("a_neo", "devkit:neo", "Neo: x", at=self.m(1))
+        pg.step("x done", which="x", check="✓ 3 tests pass", from_agent="a_neo", now=self.m(10))
+        run = self.run_()
+        rx = next(s for s in run["plan"] if s["name"] == "review-x")
+        self.assertFalse(pg._take_step(run, "a_neo", rx, self.m(11)))
+        self.assertEqual((rx.get("owner") or "main", rx["state"]), ("main", "pending"))
+
+
