@@ -754,6 +754,21 @@ class CopyToastPlaceholderTests(unittest.TestCase):
 
 
 @unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class DollarQuoteCopyToastTests(unittest.TestCase):
+    # bash and zsh read $'…' as one quoted value in which a backslash escapes the next character: $'it\'s <x>' is one
+    # value of data, so its <x> is no placeholder, and the quote after an escaped backslash ($'a\\') ends the value. Inside
+    # double quotes, $' is two letters
+    setUpClass = CopyToastPlaceholderTests.__dict__["setUpClass"]
+    tearDownClass = CopyToastPlaceholderTests.__dict__["tearDownClass"]
+    said = CopyToastPlaceholderTests.said
+
+    def test_a_dollar_quoted_value_is_one_value_in_which_a_backslash_escapes(self):
+        self.assertEqual(self.said("dev x $'it\\'s <x>'"), "Copied. Run it in your terminal.")
+        self.assertEqual(self.said("dev x $'a\\\\' <b>"), "Copied. Replace <b>, then run it.")
+        self.assertEqual(self.said('dev x "$\'<a>\'" <b>'), "Copied. Replace <a> and <b>, then run it.")
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
 class CopyToastTests(unittest.TestCase):
     """The copy toast says what was copied when it is no command to run as it is: a path says it is a path, and a command
     with a placeholder says what to put in its place first."""
