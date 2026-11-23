@@ -3896,17 +3896,31 @@ def prune(now: float = None) -> dict:
     """Remove this Mac's units (month files and segments) of months older than audit.retention.local_months and its
     handoff copies older than team_months (never under floor_months; nothing under audit.hold), and record what was
     removed (audit.prune). Each manifest drops their entries and keeps, as `start`, the link of the last segment
-    removed, so the first one kept still verifies. The handoff copies leave the working copy only: git history keeps
-    them (GIT_HISTORY). -> {removed: [months], team: [paths, for the handoff commit], records, held}"""
+    removed, so the first one kept still verifies. A reseal map goes with the audit.reseal record that backs it, here
+    and in the handoff copy (verify refuses a map that no record backs); the maps go first, so a prune that stops
+    halfway leaves none behind. The handoff copies leave the working copy only: git history keeps them
+    (GIT_HISTORY). -> {removed: [months], team: [paths, for the handoff commit], records, held, maps: [reseal ids]}"""
     now = now or time.time()
     cfg = settings()
     r = cfg["retention"]
-    out = {"removed": [], "team": [], "records": 0, "held": cfg["hold"]}
+    out = {"removed": [], "team": [], "records": 0, "held": cfg["hold"], "maps": []}
     if cfg["hold"]:
         record("audit.prune", "local and team copies", "audit.hold is on (a legal hold): nothing pruned", "ok")
         return out
     with _lock(".job.lock"):
         plan = _plan_prune(now, cfg)
+        retired, team_maps = set(), []
+        for where, files in ((AUDIT, [u["path"] for u in plan["local"]]), (team_dir(), plan["team"])):
+            for rid in _reseal_ids(files):
+                f = where / "reseal" / f"{rid}.json"
+                try:
+                    f.unlink()
+                except OSError:
+                    continue
+                retired.add(rid)
+                if where != AUDIT:
+                    team_maps.append(f)
+        out["maps"] = sorted(retired)
         gone = []
         for u in plan["local"]:
             e = u["entry"] or {}
@@ -3923,33 +3937,63 @@ def prune(now: float = None) -> dict:
             out["records"] += n
         out["removed"] = sorted({u["name"][:7] for u, _ in gone})
         _forget(_manifest_file(), [(u["name"], link) for u, link in gone], private=True)
+        pruned = []
         for f in plan["team"]:
             try:
                 f.unlink()
             except OSError:
                 continue
-            out["team"].append(f)
-        names = {f.name[:-6] for f in out["team"] if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
+            pruned.append(f)
+        out["team"] = pruned + team_maps
+        names = {f.name[:-6] for f in pruned if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
         if names and _manifest_file(team_dir()).is_file():
             mf = _manifest_file(team_dir())
             tm = _read_manifest(mf)
             _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names], private=False)
             out["team"].append(mf)
-        for d in sorted({f.parent for f in out["team"] if _MONTH.fullmatch(f.parent.name)}
+        for d in sorted({f.parent for f in pruned if _MONTH.fullmatch(f.parent.name)}
                         | {u["path"].parent for u, _ in gone if _MONTH.fullmatch(u["path"].parent.name)}):
             with contextlib.suppress(OSError):
                 d.rmdir()  # a month's folder, once its days are gone
-    if out["removed"] or out["team"]:
+    if out["removed"] or out["team"] or out["maps"]:
         parts = []
         if out["removed"]:
             parts.append(f"removed {len(gone)} file(s), {out['records']} record(s) here: "
                          f"{', '.join(out['removed'])}; kept {r['local_months']} month(s) (from {plan['keeps_from']})")
-        if out["team"]:
-            months = sorted({f.name[:7] for f in out["team"]})
-            parts.append(f"removed {len(out['team'])} handoff file(s) of {', '.join(months)}; "
+        if pruned:
+            months = sorted({f.name[:7] for f in pruned})
+            parts.append(f"removed {len(pruned)} handoff file(s) of {', '.join(months)}; "
                          f"kept {r['team_months']} month(s) (from {plan['team_keeps_from']})")
+        if out["maps"]:
+            parts.append(f"retired reseal map(s) {', '.join(out['maps'])}: the audit.reseal record that backs each one "
+                         "was pruned")
         record("audit.prune", "local and team copies", "; ".join(parts), "ok", count=out["records"])
     return out
+
+
+_RESEAL_ID = re.compile(r"[0-9A-Z]{26}")  # a reseal's id, which names its map: a ULID
+
+
+def _reseal_ids(files) -> list:
+    """The ids of the reseal maps that the audit.reseal records in these files back, in order."""
+    ids = []
+    for f in files:
+        try:
+            data = read_trail(f)
+        except _READ_ERRORS:
+            continue
+        for ln in data.splitlines() if b'"audit.reseal"' in data else ():
+            try:
+                rec = json.loads(ln) if b'"audit.reseal"' in ln else None
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("action") != "audit.reseal" or rec.get("outcome") != "ok":
+                continue
+            ref = rec.get("ref") if isinstance(rec.get("ref"), dict) else {}
+            rid = str(ref.get("id") or "")
+            if _RESEAL_ID.fullmatch(rid) and rid not in ids:
+                ids.append(rid)
+    return ids
 
 
 def _forget(mf: Path, gone: list, private: bool):

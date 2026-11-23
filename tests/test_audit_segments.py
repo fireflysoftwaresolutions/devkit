@@ -665,5 +665,29 @@ class InterruptedCloseTests(SegmentCase):
         self.assertEqual(res["records"], 3)
 
 
+class ResealPruneTests(SegmentCase):
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def test_prune_retires_a_reseal_map_with_the_record_that_backs_it(self):
+        self.scene()
+        with self.as_developer():
+            rid = audit.reseal(apply=True)["id"]
+        maps = [audit.AUDIT / "reseal" / f"{rid}.json", audit.team_dir() / "reseal" / f"{rid}.json"]
+        self.assertTrue(all(f.is_file() for f in maps))
+        later = noon(0) + 14 * 31 * DAY
+        self.write(later, 1)
+        audit.close(now=later + DAY)
+        out = audit.prune(now=later + DAY)
+        self.assertEqual([f.is_file() for f in maps], [False, False])
+        self.assertIn(maps[1], out["team"])
+        rec = audit.query(action="audit.prune")[-1]
+        self.assertIn(rid, rec["detail"])
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        with self.as_developer():
+            self.assertTrue(audit.reseal(apply=False)["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

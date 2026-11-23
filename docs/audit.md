@@ -66,8 +66,10 @@ values for every machine, never lower them. A team that must keep records longer
 or an external audit, raises `team_months` there and says why in the commit.
 
 Every prune is itself recorded as `audit.prune`, with the months and the number of records it removed. The manifest
-keeps the link of the last segment it removed as `start`, so the first segment kept still verifies.
-`dev audit config` shows the effective values, where the records are, their size, and what the next prune removes.
+keeps the link of the last segment it removed as `start`, so the first segment kept still verifies. A reseal map
+goes with the `audit.reseal` record that backs it: when prune removes the segment that holds that record, here or in
+the handoff copy, it removes the map there too and names it in `audit.prune`. The segments the map bridged are older,
+so they are gone by then. `dev audit config` shows the effective values, where the records are, their size, and what the next prune removes.
 
 ### What git keeps
 
