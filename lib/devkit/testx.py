@@ -697,6 +697,71 @@ def detect(top, repo=None) -> list:
             found.append({"name": "pest", "root": rel(d), "lang": "php", "exec": ["vendor/bin/pest"]})
         elif "phpunit/phpunit" in deps or has(d, "phpunit.xml", "phpunit.xml.dist", "phpunit.dist.xml"):
             found.append({"name": "phpunit", "root": rel(d), "lang": "php", "exec": ["vendor/bin/phpunit"]})
+    return _declare(top, found, by_dir)
+
+
+def declared(top, by_dir=None) -> list:
+    """The test commands the project declares, in the order they decide: [{command, cwd, source}] from the test_gate
+    of its delivery policy (dev delivery), then the run steps of its CI workflows (as dev ci reads them), then each
+    package.json's test script."""
+    top = str(top)
+    out = []
+    try:
+        from . import delivery
+        policy = delivery.load(delivery.scope_for(top)) or {}
+    except Exception:  # noqa: BLE001 - a project outside the registry or a broken policy declares nothing
+        policy = {}
+    for cmd in policy.get("test_gate") or []:
+        if isinstance(cmd, str):
+            out.append({"command": cmd, "cwd": top, "source": "delivery policy test_gate"})
+    try:
+        from . import gitx
+        jobs = gitx.plan(top) if os.path.isdir(os.path.join(top, ".github", "workflows")) else []
+    except Exception:  # noqa: BLE001 - a workflow dev ci cannot read declares nothing
+        jobs = []
+    for j in jobs:
+        for st in j.get("steps") or []:
+            if st.get("run"):
+                cwd = st.get("cwd") or "."
+                out.append({"command": st["run"], "cwd": cwd if os.path.isabs(cwd) else os.path.join(top, cwd),
+                            "source": f"CI .github/workflows/{j.get('file')} › {j.get('id') or j.get('job')} › "
+                                      f"{st.get('name') or st['run'].splitlines()[0][:40]}"})
+    for d in sorted(d for d, names in (by_dir or {}).items() if "package.json" in names):
+        pkg = core.read_json(os.path.join(top, d, "package.json"), {}) or {}
+        if str((pkg.get("scripts") or {}).get("test") or "").strip():
+            out.append({"command": "npm test", "cwd": os.path.join(top, d) if d else top,
+                        "source": f"{d + '/' if d else ''}package.json test script"})
+    return out
+
+
+_BARE_PYTHON = re.compile(r"python[\d.]*|py")
+
+
+def _declare(top, found, by_dir=None) -> list:
+    """Each runner found takes the command the project declares for it (declared: the first that is a plain call of
+    the same runner at the same root, testx.recognize), and says where it came from: source "declared" with
+    declared_by, or "inferred". A bare `python` of a CI step is the interpreter devkit found here, as the CI's
+    setup-python is there."""
+    decls = []
+    for decl in declared(top, by_dir):
+        r = recognize(decl["command"], decl["cwd"], top)
+        if r:
+            decls.append((r, decl))
+    for x in found:
+        x["source"], x["declared_by"] = "inferred", ""
+        for r, decl in decls:
+            if r["name"] != x["name"] or r["root"] != x["root"]:
+                continue
+            ex = list(r["exec"])
+            if ex and _BARE_PYTHON.fullmatch(os.path.basename(ex[0])) and x.get("python"):
+                ex[0] = x["python"]
+            if x["lang"] == "py" or r["name"] in ("go", "maven", "gradle"):
+                x["exec"] = ex
+            for k in ("start", "package", "scope", "env", "argv"):
+                if r.get(k) not in (None, [], {}):
+                    x[k] = r[k]
+            x.update(source="declared", declared_by=decl["source"], declared=decl["command"])
+            break
     return found
 
 
@@ -2474,6 +2539,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     complete = complete and not crash
     return {**({"imports_attested": imports_attested} if isolated_imports else {}),
             "runner": runner["name"], "root": runner["root"], "files": files, "ids": [_id(i) for i in ids],
+            "source": runner.get("source") or "inferred", "declared_by": runner.get("declared_by") or "",
             "related": related, "all": bool(all_), "argv": [str(x) for x in cmd["argv"]], "cwd": cmd["cwd"],
             "rc": rc, "secs": round(secs, 2), "cases": cases, "count": count,
             "passed": sum(c["status"] == "passed" for c in cases), "failed": len(failures),
@@ -2707,6 +2773,7 @@ def _show(res, top):
 def _summary(res) -> dict:
     out = {k: res[k] for k in ("runner", "root", "files", "ids", "related", "all", "argv", "rc", "secs", "count",
                                "passed", "failed", "skipped", "zero", "crash", "log")}
+    out["source"], out["declared_by"] = res.get("source") or "inferred", res.get("declared_by") or ""
     out["not_found"] = list(res.get("not_found") or [])
     out["complete"] = res.get("complete") is True
     out["expected_failure"] = res.get("expected_failure", 0)
@@ -3203,7 +3270,8 @@ def _plan(a, top, runners) -> int:
         cmd = build_command(top, r, files=sel["files"], related=sel["related"], report="<report>",
                             all_=sel.get("all", False))
         runs.append({"runner": r["name"], "root": r["root"], "files": sel["files"], "related": sel["related"],
-                     "all": sel.get("all", False), "argv": cmd["argv"],
+                     "all": sel.get("all", False), "argv": cmd["argv"], "source": r.get("source") or "inferred",
+                     "declared_by": r.get("declared_by") or "",
                      "estimate": estimate(st, r, all_=True) if sel.get("all") else
                      estimate(st, r, sel["files"], n_files=n_files)})
     ests = [x["estimate"] for x in runs]
@@ -3238,6 +3306,9 @@ def _plan(a, top, runners) -> int:
             f"related to {len(x['related'])} file(s)" if x["related"] else f"{len(x['files'])} file(s)"
         print(f"  would run: {x['runner']} · {what} · ~{_fmt(x['estimate'])}")
         print(ui.dim(f"    $ {core.tilde(' '.join(shlex.quote(y) for y in x['argv']))}"))
+        print(ui.dim(f"    command: declared by {x['declared_by']}" if x["source"] == "declared" else
+                     "    command: inferred from the project's files (no test entry in its delivery policy, CI "
+                     "workflow or package.json declares one)"))
     if orphans:
         print(f"  {ui.WARN} no runner for: {', '.join(orphans[:5])}")
     reach = [t for t in radius["tests"] if t not in set(orphans)]
