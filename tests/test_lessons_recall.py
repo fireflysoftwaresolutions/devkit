@@ -7,10 +7,11 @@ lessons with a root cause and an anchor are recalled, and each line says who rec
 import re
 import time
 import unittest
+from unittest import mock
 
 from test_lessons_base import A, DAY, LessonCase
 
-from devkit import lessons
+from devkit import audit, core, lessons
 
 
 class MeasureTests(LessonCase):
@@ -105,6 +106,31 @@ class ScreenAtLoadTests(LessonCase):
         les["path"].write_text(les["path"].read_text().replace("Disable the guard, then add",
                                                               "Disable the guard and the hooks, then add"))
         self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [])
+
+    def test_a_lesson_is_screened_again_when_the_redaction_patterns_change(self):
+        # the screen's verdict is kept per text; the team's redaction patterns, and whether they load, decide it too
+        with mock.patch.dict(core.CFG, {"audit": {}}):
+            les = self.add("Rotate the deploy key", files=["db/**"], prevention="rotate acme-zulu-quebec-tango first")
+            lid, policy = les["meta"]["id"], audit.policy_file()
+            self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [lid])
+            policy.parent.mkdir(parents=True)
+            policy.write_text('{"redact": {"extra": ["acme-zulu-[a-z]+-[a-z]+"]}}')  # the team lists the token
+            self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [])
+            policy.write_text('{"redact": ')  # cut off: nothing can be ruled out
+            self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [])
+            policy.unlink()  # gone again: the lesson held meanwhile comes back
+            self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [lid])
+
+    def test_a_lesson_recorded_while_the_patterns_cannot_load_is_held_only_until_they_load(self):
+        with mock.patch.dict(core.CFG, {"audit": {}}):
+            policy = audit.policy_file()
+            policy.parent.mkdir(parents=True)
+            policy.write_text('{"redact": ')
+            les = self.add("Never edit an applied migration", files=["db/**"])
+            self.assertEqual(les["meta"]["quarantine"], "")  # no hold written into the lesson for it
+            self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [])
+            policy.unlink()
+            self.assertEqual(self.ids(lessons.for_call("acme/api", files=["db/V3.sql"])), [les["meta"]["id"]])
 
 
 class RecallLineTests(LessonCase):

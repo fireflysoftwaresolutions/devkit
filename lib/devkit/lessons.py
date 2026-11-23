@@ -419,6 +419,14 @@ def _screen(fields: dict) -> str:
     return _lint().screen({k: v for k, v in fields.items() if v}) if fields else ""
 
 
+def _hold(fields: dict) -> str:
+    """The hold a lesson's front matter keeps for this text: the screen's reason, except that the text could not be
+    checked while the redaction patterns did not load (lessonlint.UNCHECKED). That one passes when they load again,
+    so recall holds the lesson meanwhile (held_reasons) without writing it into the lesson for good."""
+    why = _screen(fields)
+    return "" if why.endswith(_lint().UNCHECKED) else why
+
+
 NO_ANCHOR = ("a lesson with no anchor is never recalled: say where it applies with --file \"<glob>\", --command "
              "\"<command words>\", --error \"<text the output shows>\" or --activity <a kind of work from dev crew "
              "raci> (each repeatable)")
@@ -466,7 +474,7 @@ def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium",
     les = {"meta": {"id": lid, "title": title.strip(), "scope": scope, "kind": kind, "severity": severity,
                     "status": "open", "occurrences": 1, "prevention": "rule", "prevention_ref": "",
                     "retire_when": retire_when.strip(), "task_ref": "", "bug_ref": "",
-                    "quarantine": _screen({"title": title, **sections}), "superseded_by": "",
+                    "quarantine": _hold({"title": title, **sections}), "superseded_by": "",
                     "tags": list(tags or []), **anchored, "first_seen": day, "last_seen": day, "version": 1,
                     "author": author_of(a, author.strip()), "created_by": f"{a['user']}@{a['host']}", "updated": now,
                     "updated_by": f"{a['user']}@{a['host']}"},
@@ -523,7 +531,7 @@ def update(les: dict, op, why: str = "", a=None, apply=None, paths=(), **changes
                     edited.append(f"# {m.get('title')}")
                     changed[k] = v
                 m[k] = v
-        held = _screen(changed)
+        held = _hold(changed)
         if held:
             m["quarantine"] = held
         m["version"] = int(m.get("version") or 1) + 1
@@ -1085,7 +1093,8 @@ def text_hash(les: dict) -> str:
 
 def _screen_salt() -> str:
     """What a verdict depends on besides the text: the screen's code and what it reads (the audit's secret
-    patterns)."""
+    patterns, with audit.redact.extra of this Mac and the team, and whether they load: a verdict reached while they
+    could not load holds every lesson, and one reached before the team listed a token passes it)."""
     parts = []
     for name in ("lessonlint.py", "audit.py"):
         try:
@@ -1093,6 +1102,10 @@ def _screen_salt() -> str:
             parts.append(f"{st.st_size}:{st.st_mtime_ns}")
         except OSError:
             parts.append("-")
+    from . import audit
+    extra = audit.settings()["redact"]["extra"]
+    seen = json.dumps([list(extra), audit.redaction_unavailable({"redact": {"extra": extra}})], ensure_ascii=False)
+    parts.append(hashlib.sha256(seen.encode("utf-8")).hexdigest()[:16])
     return "|".join(parts)
 
 
