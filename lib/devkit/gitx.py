@@ -3416,6 +3416,10 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
     if not jobs:
         return fail("no GitHub Actions workflows to run here",
                     'run your local suite, then: dev ci --mark-passed --note "<command>: <result>"')
+    from . import changes  # a repository with change fragments: CHANGELOG.md is written on release branches only
+    bad = changes.ci_problem(c.top, c.branch)
+    if bad and not dry_run:
+        return fail(*bad)
     runnable = [s for j in jobs if not j["skip"] for s in j["steps"] if not s["skip"]]
     skipped = [(j["job"], j["workflow"], j["skip"], j["blocking"]) for j in jobs if j["skip"]] + \
               [(s["job"], s["name"], s["skip"], s["blocking"]) for j in jobs if not j["skip"] for s in j["steps"]
@@ -5267,6 +5271,7 @@ def _give_back(held):
 
 
 def _release(a, c) -> int:
+    from . import changes
     if not c.has_origin:
         return refuse("no `origin` remote to release to")
     fetched, err = _fetch(c, "--tags")
@@ -5278,6 +5283,8 @@ def _release(a, c) -> int:
         return refuse(f"this project releases with {tool} (its delivery policy)",
                       f"merge the {tool} release PR; it tags and publishes (dev delivery shows the policy)")
     if c.branch != c.default:
+        if changes.release_branch(c.branch) and changes.fragments(c.top):  # write them into its CHANGELOG section
+            return changes.prepare_release(c, a)
         return refuse(f"releases are cut from `{c.default}` (you are on `{c.branch or 'a detached HEAD'}`)",
                       f"merge the release PR (dev pr merge), then: git switch {c.default} && dev rebase")
     n = _dirty(c.top, untracked=False)
@@ -5308,6 +5315,9 @@ def _release(a, c) -> int:
         f, v = next(iter(wrong.items()))
         return refuse(f"{f} says {v}, not {version}",
                       "bump the version (and the CHANGELOG) on the release branch, merge it, then release")
+    left = changes.release_refusal(c.top, version)  # change fragments that are not in the CHANGELOG yet
+    if left:
+        return refuse(*left)
     why = (getattr(a, "why", None) or "").strip()
     pending = release_open_items(c, current)
     listing = "".join(f"\n    {it['meta']['id']} “{it['meta']['title']}” · {b} ({_merge_ref(m)})" for it, b, m in pending)
