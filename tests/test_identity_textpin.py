@@ -954,7 +954,9 @@ class TextPinHookFailureTests(TextPinCase):
         data, shell = self.call("dev crew inbox")  # a read under its name: nothing to explain
         self.in_shell(shell, "crew", "inbox")
         self.closed(data, event="PostToolUseFailure")
-        self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
+        found = self.records("calls.text-use-without-result")
+        self.assertEqual(len(found), 1)
+        self.assertIn("its caller: main", found[0]["detail"])  # whose call it was, kept in the record
 
     # a call the developer denied gets no PostToolUse at all: it expires, and its marks go with it
     def test_a_text_call_that_expires_after_a_state_change_is_audited(self):

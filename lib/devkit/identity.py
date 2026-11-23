@@ -628,10 +628,11 @@ def note_closed(agent: str, sid: str, tid: str, entry: dict | None = None, ended
         if changed:
             try:
                 from . import audit
+                # the caller goes in the detail: the record keeps no keyword audit.EXTRAS does not declare
                 audit.record("calls.text-use-without-result", tid[:80] or "-",
                              f"{len(changed)} state change(s) ran under this call's name, and the call ended with no "
-                             f"result ({ended[:40]})", "flagged", tool_use_id=tid[:80], session=str(sid)[:80],
-                             host_agent=agent, caller=str(entry.get("caller") or "main")[:80],
+                             f"result ({ended[:40]}); its caller: {str(entry.get('caller') or 'main')[:80]}",
+                             "flagged", tool_use_id=tid[:80], session=str(sid)[:80], host_agent=agent,
                              command=str(entry.get("cmd") or "")[:300])
             except Exception:
                 pass
