@@ -16,6 +16,12 @@ listed in config/skills.json, it downloads the following agent skills, which rem
                                                                                                 file at the pinned commit)
   angular/skills                    angular-developer, angular-new-app                          MIT (per SKILL.md, Google LLC)
   github/awesome-copilot            java-springboot, spring-boot-testing, java-junit            MIT
+  vuejs-ai/skills                   vue-best-practices                                          MIT
+  sveltejs/ai-tools                 svelte-core-bestpractices                                   MIT
+  dotnet/skills                     dotnet-webapi                                               MIT
+  twostraws/SwiftUI-Agent-Skill     swiftui-pro                                                 MIT
+  android/skills                    android-permissions-security,                               Apache-2.0 (Google LLC)
+                                    jetpack-compose-performance
 
 It also installs, through their official marketplaces and package managers, plugins and tools listed in
 config/claude/plugins.json, config/codex/plugins.json, Brewfile and config/npm-globals.txt, each under its own
@@ -61,3 +67,5 @@ Third-party skills installed by devkit are fetched from their upstream repositor
   declares MIT in its README.md and in each SKILL.md, but has no licence file at the pinned commit.
 - impeccable (https://github.com/pbakaus/impeccable), Apache-2.0, for Claude Code; Codex gets it from its plugin.
 - frontend-design (https://github.com/anthropics/claude-plugins-official), Apache-2.0, for Codex; Claude Code gets it from its plugin.
+- Android skills (https://github.com/android/skills), © Google LLC, Apache-2.0: android-permissions-security,
+  jetpack-compose-performance. They are used unmodified.

@@ -36,7 +36,8 @@ agent's copy when it differs from the checkout.
 | `root-cause` | Find and prove the root cause before any fix: reproduce, check the known lessons and devkit bugs, prove one cause with an experiment, fix it, verify, and record it (`dev commit --cause`); the 5-whys check, when to escalate, and when to bring in the Performance analyst or the Incident commander (see [The crew › How work flows](crew.md#how-work-flows)) |
 | `research` | Research a technology from version-matched sources: pin the version from the lockfile, primary sources first, a version, link, and date on every claim, and a spike note the next session finds; re-checked after 90 days or a new major version |
 | `functional-analysis` | The Business analyst's analysis: actors and goals, use cases, numbered business rules, the edge-case checklist, non-functional needs with numbers, Given/When/Then acceptance criteria with ids, and a test for each id |
-| `backend` | API contracts, layering, migrations, testing, resilience, security, operability |
+| `backend` | API contracts, layering, migrations, testing, resilience, security, operability; notes for Spring, Python, PHP, Node, .NET, Go, Rust, and Ruby |
+| `mobile` | iOS and Android apps: platform conventions, offline behavior, permissions and privacy declarations, security, device tests, signing, and store-ready builds |
 | `devsecops` | Threat modeling, secrets, dependencies and supply chain, SAST, CI hardening, containers and infrastructure, and `dev sec scan` |
 | `docs` | Documentation to the devkit standard: Diátaxis, Google style, American English, `dev docs check` |
 | `diagrams` | Branded, validated SVG diagrams with `dev diagram` |
@@ -75,16 +76,27 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | Rule | Claude Code | Codex | Matches (files; commands; kinds of work) |
 | --- | --- | --- | --- |
 | `ui` | `frontend-design`, `impeccable`, `modern-web-guidance` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files; code in other languages, outside tests, that renders HTML or styles or declares an Angular component; `ux`, `frontend`, `design-system`, `accessibility`, and `i18n` work |
-| `testing` | `testing` | `testing` | Test files of every stack, `conftest.py`, test runner configs; `pytest`, `jest`, `vitest`, `dev test`, `python3 -m unittest`; `testing` work |
+| `testing` | `testing` | `testing` | Test files of every stack (C#, Ruby, and Swift test files and Ruby files under `spec/` included), `conftest.py`, test runner configs; `pytest`, `jest`, `vitest`, `dev test`, `python3 -m unittest`; `testing` work |
 | `e2e` | `playwright-cli`, `testing` | the same | `playwright.config.*`; spec and test files that import `@playwright/test`; `playwright test`, `playwright-cli` |
 | `visual` | `visual-diagnosis` | the same | `ux`, `frontend`, `accessibility`, `design-system` and `mobile` work; `dev visual`, `playwright-cli screenshot` |
 | `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; `ng build`, `ng generate`, `ng serve`, `ng test`, `ng update` |
-| `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files; `next build`, `next dev` |
+| `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files |
+| `nextjs` | `react-best-practices` | the same | `next.config.*`; TypeScript and JavaScript modules that import `next`; `next build`, `next dev`, `next start`, `next upgrade`. Its reason tells the agent to read the docs Next.js bundles in `node_modules/next/dist/docs/` |
+| `vue` | `vue-best-practices` | the same | Vue files, `nuxt.config.*`; TypeScript and JavaScript modules that import Vue, Pinia, Vue Router, or Nuxt, or Nuxt's own composables from `#app` or `#imports` (a Node project's `#app` subpath import does not count) |
+| `svelte` | `svelte-core-bestpractices` | the same | Svelte files, `.svelte.ts` and `.svelte.js` modules, `svelte.config.*`; modules that import Svelte or SvelteKit (nested entries such as `svelte/reactivity/window` too) or `$app/` |
 | `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework` |
 | `java-tests` | `java-junit`, `spring-boot-testing` | the same | `*Test.java`, `*Tests.java`, `*IT.java` |
-| `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files; Java, PHP, and TypeScript controllers; Python, PHP, Node, and Go code, outside tests, that declares HTTP routes (FastAPI, Flask, Django, Laravel, Symfony, Express, NestJS, Fastify, Hono, `net/http`, Gin, Echo, chi, Fiber); `backend` and `sso` work |
-| `database` | `backend` | `backend` | SQL files and migration folders; `alembic`, `flyway`, `liquibase`, `prisma migrate`; `database` work |
-| `postgres` | `supabase-postgres-best-practices` | the same | SQL files and migration folders in a repository whose project files name Postgres; `psql`, `pg_dump`, `pg_restore` |
+| `mobile` | `mobile` | the same | `AndroidManifest.xml`, `Info.plist`, privacy manifests, entitlements; Swift, Kotlin, and Java code that imports an Apple UI framework or Android, and Android app or library build files in Kotlin or Groovy; `mobile` work |
+| `swiftui` | `swiftui-pro` | the same | Swift files that import SwiftUI |
+| `android-manifest` | `android-permissions-security` | the same | `AndroidManifest.xml` |
+| `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files; Java, PHP, TypeScript, and Ruby controllers and Rails' `config/routes.rb`; Python, PHP, Node, Go, C#, Rust, and Ruby code, outside tests, that declares HTTP routes or controllers (FastAPI, Flask, Django, Laravel, Symfony, Express, NestJS, Fastify, Hono, `net/http` with Go 1.22 patterns, Gin, Echo, chi, Fiber, ASP.NET Core, axum, actix-web, Rocket, Rails, Sinatra, Grape, Hanami); `backend` and `sso` work |
+| `aspnetcore` | `dotnet-webapi` | the same | C# code, outside tests, that maps minimal API endpoints or declares an MVC or API controller (a class that derives from `Controller` or `ControllerBase`, or `[ApiController]`); a class is not a controller by its name alone, so a Unity script or an iOS view controller does not count |
+| `dotnet` | `backend` | the same | `*.csproj` and `Directory.Packages.props` of a web or database project (the Web SDK, ASP.NET Core, EF Core, Npgsql, Dapper, gRPC) |
+| `rust` | `backend` | the same | `Cargo.toml` that depends on a web, gRPC, or database crate (axum, actix-web, Rocket, Poem, warp, Salvo, tonic, sqlx, Diesel, SeaORM, tokio-postgres), as a key or as a `[dependencies.<crate>]` table |
+| `ruby` | `backend` | the same | `Gemfile` and gemspecs that depend on Rails, Sinatra, Hanami, Grape, Roda, Sequel, Active Record, or a database driver |
+| `go` | `backend` | the same | `go.mod` that requires a web, gRPC, or database module (Gin, Echo, chi, Fiber, gorilla/mux, Huma, pgx, `lib/pq`, the MySQL driver, sqlx, Bun, GORM, ent, goose, golang-migrate, gRPC, Connect) directly; a requirement marked `// indirect` does not count |
+| `database` | `backend` | `backend` | SQL files and migration folders, Rails' `db/migrate/`, EF Core's `Migrations/`; `alembic`, `flyway`, `liquibase`, `prisma migrate`, `dotnet ef`, `rails db:migrate`, `rake db:migrate`, `sqlx migrate`, `diesel migration`, and goose's commands (`goose up`, `down`, `status`, `version`, `create`, `redo`, `reset`, `fix`, or `validate`, or a database driver or one of goose's options right after `goose`, as in `goose postgres …` or `goose -dir=db/migrations up`; never the goose agent's `session` or `run`); `database` work |
+| `postgres` | `supabase-postgres-best-practices` | the same | SQL files and migration folders, Rails' `db/migrate/` and EF Core's `Migrations/` included, in a repository whose project files name Postgres (Rails' `pg` gem and a .NET project file or `Directory.Packages.props` that names Npgsql included); `psql`, `pg_dump`, `pg_restore` |
 | `workflows` | `cicd`, `github-actions-hardening`, `delivery` | the same | GitHub, GitLab, Bitbucket and Azure pipeline files; `gh workflow`; `cicd` work |
 | `security` | `devsecops` | `devsecops` | Dockerfiles, security folders, Terraform; `dev sec scan`; `security`, `sso`, `redteam`, and `dependencies` work |
 | `terraform` | `terraform-style-guide` | the same | `*.tf` and `*.tfvars` files, only when the `iac` skill group is installed |
@@ -210,6 +222,11 @@ JUnit follows Java. Filtering applies per skill, so documentation and security s
 available. An absent framework setting preserves legacy framework skills.
 
 NestJS, Laravel, and Symfony use shared backend/testing guidance; no dedicated skill sources are added for them.
+Go, Rust, and Ruby have no official agent skill, so the `backend` skill carries their notes; .NET adds the .NET team's
+`dotnet-webapi` for ASP.NET Core endpoints. Next.js gets no skill of its own: Next.js 16.2 and later bundle their
+version's docs in `node_modules/next/dist/docs/`, which the Next.js team recommends over skills for framework
+knowledge, and the `nextjs` rule says so. The Vue, Svelte, .NET, SwiftUI, and Android skills have no framework or
+stack setting yet, so every Mac installs them.
 Optional `skills.groups` are independent: `all` selects every optional group, not every framework. Matching work
 rules still require the skills needed for the task.
 
@@ -220,6 +237,21 @@ Both design skills reach both agents. Each agent's plugin brings one of them, so
 the plugin does not: `impeccable` (pbakaus/impeccable, tag `skill-v4.8.0`, Apache-2.0) for Claude Code, and
 `frontend-design` (anthropics/claude-plugins-official, Apache-2.0) for Codex. The `ui` rule requires both: frontend-design
 for the direction, impeccable for hierarchy, layout, typography, color, and the audit.
+
+The framework, backend, and mobile skills reach both agents, each required by its rule:
+
+| Skill | Source · license | Rule |
+| --- | --- | --- |
+| `vue-best-practices` | vuejs-ai/skills (a community project that plans to move to the Vue organization) · MIT | `vue` |
+| `svelte-core-bestpractices` | sveltejs/ai-tools, from the Svelte team · MIT | `svelte` |
+| `dotnet-webapi` | dotnet/skills, from the .NET team · MIT | `aspnetcore` |
+| `swiftui-pro` | twostraws/SwiftUI-Agent-Skill, tag `2.0.0` and later fixes · MIT | `swiftui` |
+| `android-permissions-security`, `jetpack-compose-performance` | android/skills, from Google, tag `v1.0.23` · Apache-2.0 | `android-manifest`; the Mobile engineer's skills |
+
+Five of them are Markdown only. `swiftui-pro` also ships `agents/openai.yaml`, the display name, short description,
+icons, brand color, and default prompt that Codex shows for the skill, and those two icons
+(`assets/swiftui-pro-icon.svg`, with no script in it, and `assets/swiftui-pro-icon.png`). None of the six runs code:
+not at install, not at session start, and not when the agent follows it.
 
 `modern-web-guidance` (GoogleChrome/modern-web-guidance, tag `v1.0.1`, Apache-2.0) reaches both agents too, and the
 `ui` rule requires it: the Chrome team's guides to current HTML, CSS, and client-side JavaScript, Core Web Vitals,
@@ -517,6 +549,12 @@ The pins have rules of their own:
 | Kitchen-sink bundles (`wshobson/agents`, knowledge-work `engineering` and `design` plugins, the full `addyosmani/agent-skills`) | Many overlapping skills and remote connectors |
 | `openai/skills` as a primary source | Deprecated in favor of `openai/plugins` |
 | Sources without a license (`ast-grep/agent-skill`, `JetBrains/junie-guidelines`, others) | Unclear rights for company work |
+| `svelte-code-writer` (sveltejs/ai-tools) | Runs `npx @sveltejs/mcp` with no version, so each call runs whatever npm publishes; waits for a Security engineer's review |
+| The Next.js skills (`vercel/next.js/skills`) | Migration workflows for Next.js 16.3 and later that run `npx @next/codemod@latest` or `@canary` and install `agent-browser@latest` globally; the bundled docs cover framework knowledge |
+| `csharp-expert` (dotnet/skills) | A router that tells the agent to install more marketplace plugins, outside devkit's pins |
+| `samber/cc-skills-golang` | One author's collection that steers to the author's own libraries and pre-approves shell tools in `allowed-tools`; the `backend` skill's Go notes cover the basics |
+| `swiftui-expert-skill` (AvdLee/SwiftUI-Agent-Skill) | Ships Python scripts that record and parse Instruments traces; waits for a Security engineer's review |
+| android/skills' `adaptive`, `testing-setup`, `edge-to-edge`, and the skills with scripts or binaries | Large migrations or dependency installs rather than everyday guidance; `r8-analyzer`, `play-policy-insights`, and `android-profiler` ship scripts or a prebuilt binary |
 
 ### Removed
 
