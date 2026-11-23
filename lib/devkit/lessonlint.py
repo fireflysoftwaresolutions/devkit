@@ -546,7 +546,7 @@ _CONFIG = re.compile(r"(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root
 # (what the reason says, the test), in the order a reason is chosen
 SCREENS = (
     ("has invisible or direction-changing characters", _HIDDEN.search),
-    ("has a secret-like value", None),  # the audit redactor's patterns, loaded when first used
+    ("has a secret-like value", None),  # audit.find_secret, with the patterns read once per screen
     ("tells agents to override the developer or the guard", _override),
     ("tells agents to override the developer or the guard", _skips_checks),
     ("downloads and runs code", _DOWNLOAD_RUN.search),
@@ -567,9 +567,14 @@ _ACTING_ONLY = frozenset((_dangerous_subst, _dangerous_backtick, _runs_substitut
                           _skips_checks, _CONFIG.search))
 
 
-def _secret(text: str):
-    from .audit import SECRET
-    return SECRET.search(text)
+def _secret(text: str, rules=None):
+    """audit.find_secret: the built-in rules and audit.redact.extra (this Mac's and the team's)."""
+    from . import audit
+    return audit.find_secret(text, rules)
+
+
+# why a lesson is held while the redaction patterns cannot load: no secret was found, none could be ruled out
+UNCHECKED = "cannot be checked for secrets while devkit's redaction patterns do not load (dev audit config)"
 
 
 def _strings(value) -> list:
@@ -598,13 +603,19 @@ def screen(fields: dict) -> str:
     explain what ran; download-and-run and a pipe into a shell hold in every field on their own. Text is compared as
     _normal reads it (NFKC, combining marks dropped, Unicode dashes read as "-", Cyrillic and Greek look-alikes read as
     Latin), and override phrasing casefolded. The reason never quotes the text it found, so a secret is never copied
-    into the lesson's front matter."""
+    into the lesson's front matter. While the redaction patterns cannot load, the secret screen holds every text, and
+    the reason says so (UNCHECKED) instead of claiming a secret."""
     texts = [(key, s, _normal(s)) for key, value in (fields or {}).items() for s in _strings(value) if s]
+    from . import audit
+    rules = audit.screen_rules() if texts else []
+    unloaded = any(rx is audit.WITHHOLD for rx in rules)
     for what, test in SCREENS:
         for key, raw, normal in texts:
             if test in _ACTING_ONLY and _explains(key):
                 continue
-            if (test or _secret)(raw if test is _HIDDEN.search else normal):
+            if test(raw if test is _HIDDEN.search else normal) if test else _secret(normal, rules):
+                if test is None and unloaded and not audit.SECRET.search(normal):
+                    return f"{_field(key)} {UNCHECKED}"
                 return f"{_field(key)} {what}"
     return ""
 

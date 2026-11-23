@@ -225,7 +225,7 @@ class RedactionTests(AuditCase):
 
     def test_extra_patterns_from_the_team_policy_and_the_config(self):
         self.policy({"redact": {"extra": [r"ACME-[0-9]{6}"]}})
-        core.CFG["audit"]["redact"] = {"extra": [r"client-[a-z]{5}", "("]}  # "(" is not a pattern: skipped
+        core.CFG["audit"]["redact"] = {"extra": [r"client-[a-z]{5}"]}  # one that does not compile withholds instead
         out = audit.redact("ticket ACME-123456 for client-zorro")
         self.assertNotIn("ACME-123456", out)
         self.assertNotIn("client-zorro", out)
@@ -455,6 +455,50 @@ class TeamPatternsFailClosedTests(AuditCase):
         self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}, "retention": "x"}))
         self.assertEqual(audit.redaction_unavailable(), "")
         self.assertEqual(audit.redact(self.TEXT), "the deploy key " + audit.MARK + " was refused")
+
+    def screens(self, text: str) -> dict:
+        # every place devkit screens text for secrets with a verdict of its own -> what it said about `text`
+        from devkit import bugs, hooks, lessonlint
+        return {"bug report": bugs._secret_like(text), "lesson": lessonlint.screen({"Prevention": text}),
+                "payload capture": hooks._scrub({"prompt": text}, False)["prompt"]}
+
+    def test_every_secret_screen_uses_the_team_and_machine_patterns(self):
+        # letters only, so no built-in rule and no heuristic of the bug screen (hex, long mixed runs) knows the shape
+        token, pattern = "acme-zulu-quebec-tango", r"acme-zulu-[a-z]+-[a-z]+"
+        text = "deploy with " + token
+        self.assertEqual(self.screens(text), {"bug report": False, "lesson": "", "payload capture": text})
+        for where in ("team", "machine"):
+            with self.subTest(patterns=where):
+                if where == "team":
+                    self.write_policy(json.dumps({"redact": {"extra": [pattern]}}))
+                else:
+                    audit.policy_file().unlink()
+                    core.CFG["audit"]["redact"] = {"extra": [pattern]}
+                got = self.screens(text)
+                self.assertIs(got["bug report"], True)
+                self.assertIn("secret", got["lesson"])
+                self.assertNotIn(token, got["payload capture"])
+                self.assertEqual(self.screens("plain words"),
+                                 {"bug report": False, "lesson": "", "payload capture": "plain words"})
+
+    def test_every_secret_screen_fails_closed_while_patterns_cannot_load(self):
+        cases = {"team policy cut off": ('{"redact": ', None),
+                 "machine extra written as a string": (None, {"extra": r"acme-zulu-[a-z]+-[a-z]+"}),
+                 "machine pattern that does not compile": (None, {"extra": ["(", r"acme-zulu-[a-z]+-[a-z]+"]})}
+        for name, (policy, own) in cases.items():
+            with self.subTest(case=name):
+                if policy is not None:
+                    self.write_policy(policy)
+                elif audit.policy_file().exists():
+                    audit.policy_file().unlink()
+                core.CFG["audit"]["redact"] = own or {"extra": []}
+                reason = audit.redaction_unavailable()
+                self.assertIn(core.tilde(audit.policy_file() if policy else core.CONFIG_FILE), reason)
+                got = self.screens("plain words")
+                self.assertIs(got["bug report"], True)
+                self.assertIn("cannot be checked for secrets", got["lesson"])
+                self.assertEqual(got["payload capture"], "[text not recorded: 11 characters]")
+                self.assertEqual(audit.redact("plain words"), "[text not recorded: 11 characters]")
 
 
 class SchemaTests(AuditCase):

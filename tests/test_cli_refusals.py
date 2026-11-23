@@ -268,8 +268,19 @@ class TheSeam(SeamCase):
                                                          fix="dev config set deploy.key acmetok-7f3k9x2m4q8zr1"))
         self.assertRefused((rc, out, err), 2, "refused; the reason is not shown because devkit could not redact it")
         self.assertNotIn("acmetok-7f3k9x2m4q8zr1", err)
-        self.assertIn("\n  fix: repair the team policy (", err)
+        self.assertIn("\n  fix: repair the file it names (the team's redaction patterns did not load: ", err)
         self.assertIn(f"{core.tilde(policy)} is not valid JSON); dev audit config lists its errors", err)
+
+    def test_a_reason_is_withheld_while_this_macs_patterns_are_rejected(self):
+        # this Mac's own audit.redact.extra written as one string: rejected, so it fails closed like the team policy
+        with mock.patch.object(core, "HANDOFF", self.root / "handoff"), \
+                mock.patch.dict(core.CFG, {"audit": {"redact": {"extra": "acmetok-[a-z0-9]{14}"}}}), \
+                mock.patch.object(audit, "audited", lambda argv: False):
+            rc, out, err = self.run_raising(core.Refusal("the deploy key acmetok-7f3k9x2m4q8zr1 was refused"))
+        self.assertRefused((rc, out, err), 2, "refused; the reason is not shown because devkit could not redact it")
+        self.assertNotIn("acmetok-7f3k9x2m4q8zr1", err)
+        self.assertIn(f"fix: repair the file it names (this Mac's redaction patterns did not load: "
+                      f"{core.tilde(core.CONFIG_FILE)} has an audit.redact section that was rejected)", err)
 
     def test_the_audit_trail_records_the_refusal_exit(self):
         with mock.patch.object(audit, "audited", lambda argv: True):

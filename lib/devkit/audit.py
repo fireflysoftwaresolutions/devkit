@@ -190,6 +190,42 @@ def _extra_rules(patterns) -> list:
     return _EXTRA_CACHE[key]
 
 
+def extra_rules(cfg: dict = None) -> list:
+    """audit.redact.extra compiled: this Mac's patterns and the team policy's, or [WITHHOLD] while they cannot load."""
+    return _extra_rules((cfg or settings())["redact"]["extra"])
+
+
+def screen_rules(cfg: dict = None) -> list:
+    """Every pattern a secret screen asks: the built-in rules (SECRET), then extra_rules(). A caller that screens many
+    texts at once gets them here once and hands them to find_secret and hide_secrets."""
+    return [SECRET, *extra_rules(cfg)]
+
+
+def find_secret(text, rules=None):
+    """The one secret screen: the first secret in `text` that the built-in rules or audit.redact.extra (this Mac's
+    and the team's) find, as a match, else None. While those patterns cannot load, any text that is not empty
+    matches as a whole: a screen that cannot ask every pattern holds the text instead of passing it. Bug reports, the
+    lesson screen and hook payload captures ask it; redact uses the same rules to replace what it finds."""
+    s = text if isinstance(text, str) else ""
+    for rx in screen_rules() if rules is None else rules:
+        m = rx.search(s)
+        if m:
+            return m
+    return None
+
+
+def hide_secrets(text, mark: str, rules=None) -> str:
+    """`text` with each secret find_secret finds replaced as a whole by `mark`; the whole text as its length
+    (TEXT_MARK) while the patterns cannot load."""
+    s = text if isinstance(text, str) else ""
+    rules = screen_rules() if rules is None else rules
+    if any(rx is WITHHOLD for rx in rules):
+        return WITHHOLD.sub(mark, s)
+    for rx in rules:
+        s = rx.sub(lambda m: mark, s)
+    return s
+
+
 def redact(text, extra=None) -> str:
     """Secrets in `text` replaced by …[redacted]: the _RULES above, then audit.redact.extra (this machine's and the
     team policy's). `extra`: compiled patterns, when the caller already has them. While the team policy's patterns
@@ -1760,10 +1796,15 @@ def _team_policy(path: Path):
         return None, "is not valid JSON"
 
 
-def _unknown_sections(errors) -> list:
-    """The unknown top-level keys of an audit section, from core.audit_config's errors (`unknown key audit.redcat`)."""
+def _rejected(errors) -> str:
+    """What makes an audit section's redaction patterns unusable, from core.audit_config's errors, or "": a rejected
+    audit.redact section (an extra that is not a list, a pattern that does not compile, an unknown key in it), or an
+    unknown top-level key, where a misspelled or misplaced section ({"Redact": …}, {"audit": …}) may hold them."""
+    if any(e.startswith(("audit.redact", "unknown key audit.redact")) for e in errors):
+        return "has an audit.redact section that was rejected"
     head = "unknown key "
-    return [e[len(head):] for e in errors if e.startswith(head + "audit.") and "." not in e[len(head + "audit."):]]
+    unknown = [e[len(head):] for e in errors if e.startswith(head + "audit.") and "." not in e[len(head + "audit."):]]
+    return "has an unknown key " + ", ".join(unknown) if unknown else ""
 
 
 def settings() -> dict:
@@ -1771,8 +1812,10 @@ def settings() -> dict:
     Every field of the policy only records more or keeps longer: a policy asking for less changes nothing.
     A policy file that is there but cannot be read or parsed, whose audit.redact section was rejected, or that has an
     unknown top-level key, is an error, and redact.extra is then Unloaded: redaction withholds whole texts until the
-    file is repaired, because the patterns it lost may be the only ones that know the team's secrets."""
+    file is repaired, because the patterns it lost may be the only ones that know the team's secrets. This Mac's own
+    audit section fails the same way when its redact section was rejected or it has an unknown key."""
     own, errors = core.audit_config(core.CFG.get("audit") or {})
+    mine = _rejected(errors)
     where = core.tilde(policy_file())
     raw, broken = _team_policy(policy_file())
     team, terrs = core.audit_config(raw, fill=False) if raw is not None else ({}, [])
@@ -1781,10 +1824,8 @@ def settings() -> dict:
         errors.append(f"{where}: {broken}")
     elif raw is not None and not isinstance(raw, dict):
         broken = "is not a JSON object"
-    elif any(e.startswith(("audit.redact", "unknown key audit.redact")) for e in terrs):
-        broken = "has an audit.redact section that was rejected"
-    elif _unknown_sections(terrs):  # a misspelled or misplaced section ({"Redact": …}, {"audit": …}) may hold them
-        broken = "has an unknown key " + ", ".join(_unknown_sections(terrs))
+    else:
+        broken = _rejected(terrs)
     r, tr = own["retention"], team.get("retention") or {}
     floor = max(r["floor_months"], tr.get("floor_months", 0))
     r.update(floor_months=floor, local_months=max(r["local_months"], tr.get("local_months", 0), floor),
@@ -1796,8 +1837,9 @@ def settings() -> dict:
     own["forward"] = own["forward"] or team.get("forward") or ""
     extra = list(own["redact"]["extra"])
     extra += [p for p in (team.get("redact") or {}).get("extra") or [] if p not in extra]
-    own["redact"] = {"extra": Unloaded(extra, f"the team's redaction patterns did not load: {where} {broken}")
-                     if broken else extra}
+    why = ([f"this Mac's redaction patterns did not load: {core.tilde(core.CONFIG_FILE)} {mine}"] if mine else []) + \
+        ([f"the team's redaction patterns did not load: {where} {broken}"] if broken else [])
+    own["redact"] = {"extra": Unloaded(extra, "; ".join(why)) if why else extra}
     own["errors"] = errors
     own["policy"] = str(policy_file()) if raw is not None or broken else ""
     return own

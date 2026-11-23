@@ -4542,19 +4542,22 @@ def capture_enabled() -> bool:
     return os.environ.get("DEVKIT_HOOK_CAPTURE", "").strip() == "1"
 
 
-def _scrub(value, cut: bool, key: str = ""):
-    """A payload value with tokens removed; strings under a secret-looking key dropped whole; strings under the
-    CAPTURE_CUT_KEYS cut to CAPTURE_CUT characters."""
+def _scrub(value, cut: bool, key: str = "", rules=None):
+    """A payload value with tokens removed (audit.hide_secrets: the built-in rules and audit.redact.extra, this Mac's
+    and the team's; each string as its length while those cannot load); strings under a secret-looking key dropped
+    whole; strings under the CAPTURE_CUT_KEYS cut to CAPTURE_CUT characters. `rules`: audit.screen_rules(), read once
+    per payload."""
+    from . import audit
+    rules = audit.screen_rules() if rules is None else rules
     if isinstance(value, str):
         if _CAPTURE_SECRET_KEY.search(key):
             return "[redacted]"
-        from .audit import SECRET
-        s = _CAPTURE_TOKEN.sub("[redacted]", SECRET.sub("[redacted]", value))
+        s = _CAPTURE_TOKEN.sub("[redacted]", audit.hide_secrets(value, "[redacted]", rules))
         return s[:CAPTURE_CUT] + "…" if cut and len(s) > CAPTURE_CUT else s
     if isinstance(value, dict):
-        return {k: _scrub(v, cut or k in CAPTURE_CUT_KEYS, str(k)) for k, v in value.items()}
+        return {k: _scrub(v, cut or k in CAPTURE_CUT_KEYS, str(k), rules) for k, v in value.items()}
     if isinstance(value, list):
-        return [_scrub(v, cut, key) for v in value]
+        return [_scrub(v, cut, key, rules) for v in value]
     return value
 
 

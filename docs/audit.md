@@ -522,16 +522,19 @@ To send every new record to another system as it is written, set `audit.forward`
 | `syslog://host:port` | A syslog server over UDP, as a CEF line |
 
 `audit.redact.extra` adds your own regular expressions to the redactor, for secrets that only your team uses. A team
-policy can add patterns, never remove them.
+policy can add patterns, never remove them. Every place devkit screens text for secrets uses the same patterns, the
+built-in rules plus `audit.redact.extra` of this Mac and of the team: the redactor, bug reports before they leave this
+Mac, the lesson screen before recall, the hook payloads that `DEVKIT_HOOK_CAPTURE=1` keeps, and the check on messages
+that agents type.
 
-When the team policy's patterns cannot load, devkit withholds text instead of redacting it with fewer patterns: the
-built-in rules cannot tell that a token only the team's patterns know is a secret. This happens when
-`policy/audit.json` exists but cannot be read, is not valid JSON, or is not a JSON object, or when its `redact`
-section was rejected (an `extra` that is not a list, a pattern that is not a regular expression, or an unknown key),
-or when it has a top-level key devkit does not know, such as a misspelled `redcat`, a capitalized `Redact`, or the
-whole policy wrapped in `audit` (`policy/audit.json` holds the audit section itself, so the patterns go under
-`redact.extra`).
-Until you repair the file:
+When those patterns cannot load, devkit withholds text instead of redacting it with fewer patterns: the built-in rules
+cannot tell that a token only your patterns know is a secret. This happens when `policy/audit.json` exists but cannot
+be read, is not valid JSON, or is not a JSON object, or when its `redact` section was rejected (an `extra` that is not
+a list, a pattern that is not a regular expression, or an unknown key), or when it has a top-level key devkit does not
+know, such as a misspelled `redcat`, a capitalized `Redact`, or the whole policy wrapped in `audit`
+(`policy/audit.json` holds the audit section itself, so the patterns go under `redact.extra`). The `audit` section of
+this Mac's `~/.config/devkit/config.json` fails the same way: an `extra` written as one string instead of a list, a
+pattern that does not compile, or an unknown key. Until you repair the file:
 
 - Every text devkit would redact becomes `[text not recorded: N characters]`: hook and CI notices, checkpoints, the
   crew messages it shows, and the text fields of new audit records. Queries and exports show older records the same
@@ -550,10 +553,13 @@ Until you repair the file:
   crew and session messages, `dev crew decide` answers (a bare `A` too), and the short fields of a session message.
   The refusal names the file to repair. devkit's own notices (a delegated task, a declined or withdrawn launch, hook
   and CI results) are still delivered and stored, with their text withheld.
+- A bug report is held for you instead of sent, the lesson screen holds every lesson out of recall (its reason says
+  that it cannot be checked for secrets, and nothing is written into the lesson), and a captured hook payload keeps
+  each text as its length.
 - `dev audit config` lists the file's errors and says that text is withheld.
 
-Audit records go on being written, with lengths instead of text. Fix the file in the handoff repository, and
-redaction with the team's patterns starts again at the next command.
+Audit records go on being written, with lengths instead of text. Fix the file the `fix:` line or `dev audit config`
+names, and redaction with every pattern starts again at the next command.
 
 See also [Teams and machines](teams.md), [Configuration › Jobs and audit](configuration.md#jobs-and-audit), and
 [Scheduled jobs and the audit trail](jobs-and-audit.md).
