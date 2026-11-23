@@ -1178,6 +1178,7 @@ first three, and says that `dev test run <test files>` runs them (`outside_lane`
 | Option | Effect |
 | --- | --- |
 | `--since REF` | Compare with `REF` instead of the merge-base with `origin/<default>` (`run`, `plan`, `prove`, `audit`) |
+| `--listed` | The files that hold tests are those the runner's own listing names (pytest `--collect-only`, unittest discovery, `vitest list`, `playwright --list`), cached; config `test.listing` turns it on for every run |
 | `--runner NAME` | Only this runner: `pytest`, `unittest`, `jest`, `vitest`, `node`, `maven`, `gradle`, `go`, `phpunit`, `pest` |
 | `-v`, `--verbose` | Stream the runner's full output (it streams to a terminal anyway) |
 | `--json` | The result as JSON |
