@@ -558,6 +558,39 @@ class NowRemoteRunTests(unittest.TestCase):
         self.assertIsNone(out["current"])
 
 
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowHighlightTests(unittest.TestCase):
+    """The first row of Needs you carries the screen's only amber bar (UX spec, Now): with two decisions waiting, the
+    second keeps its waiting glyph and word but no bar."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_only_the_first_of_two_waiting_decisions_has_the_amber_bar(self):
+        d = with_doc(self.base, "example")
+        items = d["attention"]["items"]
+        second = dict(json.loads(json.dumps(items[0])), id="decision:claude-7f3a:D3", title="D3@7f3a · Ship the CSV with a header row?",
+                      type_to_answer=["dev crew decide D3@7f3a A", "dev crew decide D3@7f3a B"])
+        items.insert(1, second)
+        d["attention"]["total"] = len(items)
+        d["attention"]["headline"].update(count=3, text="3 things need you")
+        self.assertEqual(now_contract.check(areas(d)), [])
+        with utc():
+            out = T.browse(frozen(dashboard.page(d)), """out.rows = $$(".now-item").map(r => [r.getAttribute("data-key"), r.classList.contains("you"),
+                getComputedStyle(r, "::before").content !== "none" && getComputedStyle(r, "::before").width !== "auto",
+                $(".now-glyph", r) ? $(".now-glyph", r).getAttribute("aria-label") : null]);""", 1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual([r[:3] for r in out["rows"][:3]], [["decision:claude-7f3a:D1", True, True], ["decision:claude-7f3a:D3", True, False],
+                                                           [out["rows"][2][0], False, False]])
+        self.assertEqual([r[3] for r in out["rows"][:2]], ["Waits for you", "Waits for you"])   # the word stays on both
+
+
 class NowJobRowTests(unittest.TestCase):
     # a run skipped after the failure is the job's last run; the queue row still names the failure: its time and its summary
     def test_a_job_row_names_the_failure_that_stands_not_the_skipped_run_after_it(self):
