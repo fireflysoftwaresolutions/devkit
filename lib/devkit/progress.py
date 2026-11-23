@@ -1939,13 +1939,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                 if not _label_matches(label, lane) and _same_checkout(checkout, _lane_checkout(run, aid)):
                     clash = list(dict.fromkeys(g for g in globs for h in held if _globs_overlap(g, h, top)))
                     if clash:
-                        from . import crew
-                        raise StepError(f"{', '.join(clash)} overlaps the files "
-                                        f"{crew.who(lane.get('persona') or lane.get('label'))} owns while working "
-                                        f"({', '.join(held)}). Give each member different files, or "
-                                        f"wait until they finish; for members in different worktrees, give each "
-                                        f"scope as paths in its worktree (<worktree>/lib/**): scopes of two "
-                                        f"checkouts do not clash.")
+                        raise StepError(_scope_clash(run, aid, lane, clash, globs, checkout, top))
             s["scope"] = globs
             if checkout:
                 s["checkout"] = checkout
@@ -1975,6 +1969,39 @@ def _scope_top(run: dict, cwd: str | None) -> str:
 def _lane_checkout(run: dict, aid: str) -> str:
     """The checkout the scope of lane `aid` counts in: that of the steps it runs (_scope_checkout), '' for none."""
     return next((x.get("checkout") for x in coord.held(run, aid) if x.get("checkout")), "")
+
+
+def _scope_clash(run: dict, aid: str, lane: dict, clash: list, globs: list, checkout: str, top: str) -> str:
+    """Why assign refuses `globs` (counted in `checkout`, '' for every checkout) as overlapping working lane `aid`,
+    and what to do: where each scope counts, and when the two members can work in two worktrees, the assign commands
+    that bind each scope to its own (_scope_checkout), including the working lane's step."""
+    from . import crew
+    held, theirs = coord.scope(run, aid), _lane_checkout(run, aid)
+    who = crew.who(lane.get("persona") or lane.get("label"))
+    head = f"{', '.join(clash)} overlaps the files {who} owns while working ({', '.join(held)})"
+    if checkout or theirs:  # one is bound, or both are and to the same checkout (_same_checkout)
+        if checkout and theirs:
+            return f"{head}: both scopes count in {core.tilde(checkout)}. Give each member different files, or " \
+                   "wait until they finish."
+        if not checkout:
+            return (f"{head} in {core.tilde(theirs)}. This scope names no checkout, so it counts in every one: if "
+                    f"this member works in another worktree, give its paths there (--scope "
+                    f"\"<worktree>/{','.join(globs)}\"); else give each member different files, or wait until "
+                    "they finish.")
+    step = next((x for x in coord.held(run, aid) if any(_globs_overlap(g, h, top) for g in clash
+                                                        for h in x.get("scope") or [])), None)
+    bind = ",".join(g if g.startswith(("/", "~")) else f"<their worktree>/{g}" for g in (step or {}).get("scope") or [])
+    if checkout:
+        where = f"{who}'s scope names no checkout, so it holds {', '.join(held)} in every checkout, " \
+                f"{core.tilde(checkout)} too"
+    else:
+        where = "neither scope names a checkout, so each holds its files in every checkout"
+    fix = (f"dev progress assign {shlex.quote(step['name'])} --to {shlex.quote(step.get('label') or who)} --scope "
+           f"\"{bind}\", then this "
+           "assign again" + ("" if checkout else " with --scope \"<worktree>/" + ",".join(globs) + "\"")) if step else \
+        "give each scope as paths in its worktree (--scope \"<worktree>/<glob>\")"
+    return f"{head}: {where}. Give each member different files, or wait until they finish; if they work in " \
+           f"different worktrees, bind each scope to its own: {fix}."
 
 
 def _tell_unqueued(run: dict, s: dict, lanes: list, label: str, now: float):

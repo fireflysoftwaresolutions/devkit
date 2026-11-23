@@ -123,7 +123,10 @@ short version:
    A scope that `assign` gets as paths in one checkout (`<worktree>/lib/**`) counts in that checkout only: the
    overlap check of `assign`, the edit check, the edit advice, and `dev crew owner` hold it to that checkout's files.
    Members in two worktrees can then own the same files without a clash; bringing their changes together is merge
-   work.
+   work. Both scopes need their worktree's paths: a scope relative to the repository counts in every checkout, so it
+   still clashes. To bind a working member's scope, assign its step again to the same member with the paths of its
+   worktree (`dev progress assign api --to Tank --scope "<worktree>/services/invoices/**"`); the step stays in its
+   lane. When `assign` refuses an overlap, it says where each scope counts and gives these commands.
 
 3. **Brief and launch** them, all parallel members in one message:
 

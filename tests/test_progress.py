@@ -845,6 +845,30 @@ class AbsoluteScopeTests(unittest.TestCase):
                 pg.assign("more", "Kid", scope=f"{wt}/lib/devkit/x.py", cwd=str(main), why="test", now=self.m(3))
             self.assertIn("overlaps the files Release engineer (Link) owns", str(e.exception))
 
+    def test_a_clash_with_a_scope_of_no_checkout_says_so_and_its_commands_bind_both(self):
+        # the tech lead gave the working member a repository-relative scope and the next one a worktree's paths: the
+        # refusal said scopes of two checkouts do not clash and showed lib/** on both sides, so it read as if every
+        # scope were stored for every checkout. It names where each scope counts, and the commands it gives work
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = self.repo_with_worktree(d)
+            pg.start("Feature", plan=["release notes", "ext", "more"], now=self.m(0))
+            pg.assign("release notes", "Link", scope="lib/**", cwd=str(main), why="test", now=self.m(0))
+            launch("l1", "devkit:link", "Link: release notes", self.m(1))
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("ext", "Kid", scope=f"{wt}/lib/**", cwd=str(main), why="test", now=self.m(2))
+            told = str(e.exception)
+            self.assertIn("names no checkout", told)
+            self.assertIn(f"in every checkout, {core.tilde(os.path.realpath(wt))} too", told)  # the new one's
+            self.assertIn('''dev progress assign 'release notes' --to Link --scope "<their worktree>/lib/**"''',
+                          told)  # a command the shell runs as it reads
+            pg.assign("release notes", "Link", scope=f"{main}/lib/**", cwd=str(main), why="test", now=self.m(3))
+            self.assertEqual(pg.assign("ext", "Kid", scope=f"{wt}/lib/**", cwd=str(main), why="test",
+                                       now=self.m(4))["plan"][1]["scope"], ["lib/**"])
+            with self.assertRaises(pg.StepError) as e:  # one checkout: no worktree can help
+                pg.assign("more", "Kid", scope=f"{main}/lib/x.py", cwd=str(main), why="test", now=self.m(5))
+            self.assertIn(f"count in {core.tilde(os.path.realpath(main))}", str(e.exception))
+            self.assertNotIn("worktree", str(e.exception))
+
     def test_a_scope_given_in_one_worktree_holds_the_files_of_that_worktree_only(self):
         # the edit advice and `dev crew owner` read the scope in the checkout it was given in, as assign does: the
         # Release engineer's <wt>/lib/** holds <wt>/lib/x.py, and the main checkout's lib/x.py is the tech lead's
