@@ -371,6 +371,56 @@ class ImportEvidenceTests(unittest.TestCase):
 
 
 
+class RecorderTests(unittest.TestCase):
+    # the recorder's sitecustomize (testx._IMPORT_RECORDER) on its own: a Python that runs `code` with the recorder on
+    # its path, and what the records say
+    def record(self, e, code, dest=None):
+        top, dest = e.root / "co", Path(dest or e.root / "copy")
+        top.mkdir(exist_ok=True)
+        dest.mkdir(parents=True, exist_ok=True)
+        folder, records, env = testx._import_recorder(dest, top)
+        p = subprocess.run([sys.executable, "-c", code], env=dict(os.environ, PYTHONPATH=folder, **env),
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, p.returncode, p.stderr[-2000:])
+        items = [json.loads(x) for f in Path(records).glob("*.jsonl") for x in f.read_text().splitlines()]
+        return items, records
+
+    # each way a test starts a Python that skips the recorder is written down as unrecorded; the same commands
+    # without the switch that skips it are not
+    def unrecorded(self, e, call):
+        code = f"import os, shlex, subprocess, sys\nexe = sys.executable\n{call}\n"
+        return [x["unrecorded"] for x in self.record(e, code)[0] if isinstance(x, dict)]
+
+    def test_a_python_child_that_skips_the_recorder_is_found_behind_each_wrapper(self):
+        true = shutil.which("true")
+        skipping = {
+            "-W value": "subprocess.run([exe, '-W', 'ignore', '-I', '-c', 'pass'])",
+            "-X value": "subprocess.run([exe, '-X', 'utf8', '-I', '-c', 'pass'])",
+            "executable=": "subprocess.run(['tool', '-I', '-c', 'pass'], executable=exe)",
+            "env": "subprocess.run(['/usr/bin/env', exe, '-I', '-c', 'pass'])",
+            "env NAME=value": "subprocess.run(['/usr/bin/env', 'A=1', exe, '-I', '-c', 'pass'])",
+            "env -i": "subprocess.run(['/usr/bin/env', '-i', exe, '-c', 'pass'])",
+            "shell PYTHONPATH=": "subprocess.run('PYTHONPATH= ' + shlex.quote(exe) + ' -c pass', shell=True)",
+            "bash -lc": f"subprocess.run(['bash', '-lc', exe + ' -I -c pass'], executable={true!r})",
+            "sh -ec": f"subprocess.run(['sh', '-ec', exe + ' -I -c pass'], executable={true!r})",
+        }
+        for name, call in skipping.items():
+            with self.subTest(name), Env() as e:
+                self.assertEqual(1, len(self.unrecorded(e, call)), call)
+
+    def test_a_python_child_that_keeps_the_recorder_is_not_flagged(self):
+        true = shutil.which("true")
+        keeping = {
+            "-W value": "subprocess.run([exe, '-W', 'ignore', '-c', 'pass'])",
+            "env NAME=value": "subprocess.run(['/usr/bin/env', 'A=1', exe, '-c', 'pass'])",
+            "shell NAME=value": "subprocess.run('A=1 ' + shlex.quote(exe) + ' -c pass', shell=True)",
+            "sh -ec": f"subprocess.run(['sh', '-ec', exe + ' -c pass'], executable={true!r})",
+        }
+        for name, call in keeping.items():
+            with self.subTest(name), Env() as e:
+                self.assertEqual([], self.unrecorded(e, call), call)
+
+
 # an npm workspace: node_modules links the package @acme/util to packages/util, as npm, pnpm and yarn link a
 # workspace package; the root's tests import it by its name
 WORKSPACE = {

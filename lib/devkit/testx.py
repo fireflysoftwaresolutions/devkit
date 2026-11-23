@@ -4303,6 +4303,8 @@ _ROOTS = [r.lower() for r in %(roots)r]
 _HERE = %(here)r
 _seen, _busy = set(), []
 _PY = ("python", "python3", "pythonw")
+_SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
+_SEPARATORS = (";", "&", "|")
 
 
 def _write(item):
@@ -4317,15 +4319,108 @@ def _python(word):
 
 def _skips(argv, env):
     \"\"\"Whether the Python command argv (with env, None: this process's) runs without the recorder.\"\"\"
-    for i, w in enumerate(argv[1:], 1):
+    i = 1
+    while i < len(argv):
+        w = argv[i]
         if not w.startswith("-") or w in ("-", "--") or w.startswith(("-c", "-m", "--")):
             break
         if w.startswith(("-W", "-X")):
+            i += 2 if w in ("-W", "-X") else 1  # a separate value is the next word
             continue
         if set(w[1:]) & set("IES"):
             return True
+        i += 1
     path = (os.environ if env is None else env).get("PYTHONPATH", "")
     return _HERE not in [os.path.realpath(p) for p in os.fsdecode(path).split(os.pathsep) if p]
+
+
+def _assignment(w):
+    name, eq, _ = w.partition("=")
+    return bool(eq) and name.isidentifier()
+
+
+def _unwrap(argv, env):
+    \"\"\"argv without its leading NAME=value words and env wrappers (/usr/bin/env -i A=1 …) -> (argv, the environment
+    the rest runs with).\"\"\"
+    argv, env = list(argv), dict(os.environ if env is None else env)
+    while argv:
+        if _assignment(argv[0]):
+            k, _, v = argv.pop(0).partition("=")
+            env[k] = v
+        elif os.path.basename(argv[0]) == "env":
+            argv.pop(0)
+            while argv and (argv[0].startswith("-") or _assignment(argv[0])):
+                w = argv.pop(0)
+                if w == "--":
+                    break
+                if w in ("-", "-i", "--ignore-environment"):
+                    env = {}
+                elif _assignment(w):
+                    k, _, v = w.partition("=")
+                    env[k] = v
+                elif w.startswith("--unset="):
+                    env.pop(w[8:], None)
+                elif w in ("-u", "--unset", "-C", "--chdir", "-P") and argv:
+                    v = argv.pop(0)
+                    if w in ("-u", "--unset"):
+                        env.pop(v, None)
+                elif w in ("-S", "--split-string") and argv:
+                    argv = shlex.split(argv.pop(0)) + argv
+        else:
+            break
+    return argv, env
+
+
+def _shell_line(argv):
+    \"\"\"The command line a shell's argv runs (sh -c, bash -lc, sh -ec), or None.\"\"\"
+    i, command = 1, False
+    while i < len(argv) and argv[i][:1] in "-+" and argv[i] not in ("-", "--"):
+        w = argv[i]
+        if w in ("-o", "+o", "-O", "+O"):
+            i += 2
+            continue
+        command = command or (not w.startswith("--") and "c" in w[1:])
+        i += 1
+    return argv[i] if command and i < len(argv) else None
+
+
+def _pythons(argv, env, depth=0):
+    \"\"\"The Python commands argv starts -> [(argv, environment)].\"\"\"
+    argv, env = _unwrap(argv, env)
+    if not argv or depth > 4:
+        return []
+    if _python(argv[0]):
+        return [(argv, env)]
+    if os.path.basename(argv[0]) in _SHELLS:
+        line = _shell_line(argv)
+        return _in_line(line, env, depth + 1) if line is not None else []
+    return []
+
+
+def _in_line(line, env, depth=0):
+    \"\"\"The Python commands a shell line starts: each command of it, or the first Python word in it (time python, nohup
+    python …).\"\"\"
+    spaced = line
+    for sep in _SEPARATORS:
+        spaced = spaced.replace(sep, " %%s " %% sep)
+    try:
+        words = shlex.split(spaced)
+    except ValueError:
+        words = spaced.split()
+    commands, here = [], []
+    for w in words + [";"]:
+        if w in _SEPARATORS:
+            commands, here = commands + [here], []
+        else:
+            here.append(w)
+    found = []
+    for c in commands:
+        mine = _pythons(c, env, depth)
+        if not mine:
+            c, e = _unwrap(c, env)
+            mine = [(c[i:], e) for i, w in enumerate(c) if _python(w)][:1]
+        found += mine
+    return found
 
 
 def _words(x):
@@ -4340,16 +4435,8 @@ def _env(e):
     return {os.fsdecode(k): os.fsdecode(v) for k, v in e.items() if isinstance(v, (str, bytes))}
 
 
-def _started(argv, env, shell):
-    if shell:  # a shell line: each Python word in it starts a Python
-        try:
-            words = shlex.split(" ".join(argv).replace(";", " ; ").replace("&", " & ").replace("|", " | "))
-        except ValueError:
-            words = " ".join(argv).split()
-        argvs = [words[i:] for i, w in enumerate(words) if _python(w)]
-    else:
-        argvs = [argv] if argv and _python(argv[0]) else []
-    if any(_skips(a, env) for a in argvs):
+def _started(argv, found):
+    if any(_skips(a, e) for a, e in found):
         _write({"unrecorded": " ".join(argv)[:300]})
 
 
@@ -4368,15 +4455,22 @@ def _hook(event, args):
                     _write(real)
         elif event == "subprocess.Popen":
             exe, argv, env = args[0], _words(args[1]), _env(args[3])
-            shell = isinstance(args[1], (str, bytes)) or (argv and os.path.basename(argv[0]) in ("sh", "bash", "zsh")
-                                                          and "-c" in argv[1:3])
-            _started(argv[2:] if shell and len(argv) > 2 and argv[1] == "-c" else argv, env, shell)
+            if isinstance(args[1], (str, bytes)):
+                _started(argv, _in_line(argv[0], env))
+            else:
+                exe = _words(exe)[0] if exe is not None and _words(exe) else None
+                # executable= runs that program with argv[0] as its name only
+                run = [exe] + argv[1:] if exe and argv and _python(exe) and not _python(argv[0]) else argv
+                _started(argv, _pythons(run, env))
         elif event in ("os.exec", "os.posix_spawn"):
-            _started(_words(args[1]), _env(args[2]), False)
+            argv = _words(args[1])
+            _started(argv, _pythons(argv, _env(args[2])))
         elif event == "os.spawn":
-            _started(_words(args[2]), _env(args[3]), False)
+            argv = _words(args[2])
+            _started(argv, _pythons(argv, _env(args[3])))
         elif event == "os.system":
-            _started(_words(args[0]), None, True)
+            argv = _words(args[0])
+            _started(argv, _in_line(argv[0], None) if argv else [])
     except Exception:
         pass
     finally:
