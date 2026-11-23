@@ -4628,7 +4628,8 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
     """Mark a step as started now (parallel work the main agent does itself). The run remembers it (`begun`), so the
     tech lead's next `dev progress step` without --step closes that step or nothing (_refuse_other_than_begun).
     Refused for a step already done or skipped: there is nothing to begin, and the refusal says how to add evidence
-    to it or reopen it."""
+    to it or reopen it. A member's blocked step goes back as an answer returns it (coord.unblock): to its lane when
+    that lane is free, else first in that lane's or its member's queue, so a lane never runs it beside another."""
     _main_only(from_agent, "starts the plan's steps", cwd)
     now = now or time.time()
     agent, sid = current_session(cwd)
@@ -4646,7 +4647,15 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
             raise StepError(f"step “{s['name']}” waits for {', '.join(waiting)}, not done yet: it starts when "
                             f"{'that is' if len(waiting) == 1 else 'they are'} done. If the order really changed, "
                             f"skip what it waits for: dev progress skip \"{waiting[0]}\" --why \"…\"")
-        old = s.get("state")
+        old, owner = s.get("state"), s.get("owner") or "main"
+        if old == "blocked" and owner != "main":
+            lane = (run.get("agents") or {}).get(owner)
+            live = isinstance(lane, dict) and lane.get("state") == "running"
+            gone = lane_gone(owner, lane, lane_states(run, now, own=True) if live else {})
+            coord.unblock(run, s, not gone, now, "the tech lead began it (dev progress begin)", review=is_review_step)
+            _claim_free_lanes(run, now)
+            _save(run)
+            return run
         s.update(state="running", started=s.get("started") or now)
         if old != "running":
             _log_change(run, s, old, "running", "main", "the tech lead began it (dev progress begin)", now)

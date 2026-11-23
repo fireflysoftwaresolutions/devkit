@@ -184,6 +184,19 @@ class BlockTests(Scenario):
         self.assertEqual(self.held("api"), ("a_tank", "running"))
         self.sound()
 
+    def test_the_tech_lead_beginning_a_blocked_step_whose_lane_moved_on_queues_it_first_for_that_lane(self):
+        # the tech lead blocked api; Tank's lane took export; his dev progress begin api, while Tank asked whether to
+        # go on, put api back running in that lane beside export
+        pg.step("waits for the developer", kind="blocked", which="api", now=self.m(2))
+        pg.assign("export", "Tank", scope="export/**", why="test", now=self.m(3))
+        self.assertEqual(self.held("export"), ("a_tank", "running"))
+        pg.begin("api", now=self.m(4))
+        self.assertEqual((self.held("api"), pg._queued_lanes(self.run_()["plan"][0])), (("main", "pending"),
+                                                                                       ["a_tank"]))
+        self.sound()
+        pg.step("export", which="export", check="✓ 3", from_agent="a_tank", now=self.m(10))
+        self.assertEqual(self.held("api"), ("a_tank", "running"))
+
     def test_an_answer_after_the_lane_ended_goes_to_the_members_next_lane(self):
         d = pg.crew_decision("CSV or JSON?", options="A: csv | B: json", recommend="A", from_agent="a_tank",
                              now=self.m(5))
