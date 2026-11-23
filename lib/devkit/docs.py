@@ -51,6 +51,29 @@ def markdown_files(root: Path, paths=None) -> list:
     return sorted(out)
 
 
+def _vale_stops(stderr: str):
+    """-> ([the JSON objects Vale writes for a file it stopped on: Path, Line, Code, Text], the rest of stderr)."""
+    stops, rest, i, dec = [], [], 0, json.JSONDecoder()
+    while i < len(stderr):
+        j = stderr.find("{", i)
+        if j == -1:
+            rest.append(stderr[i:])
+            break
+        try:
+            obj, end = dec.raw_decode(stderr, j)
+        except ValueError:
+            rest.append(stderr[i:j + 1])
+            i = j + 1
+            continue
+        rest.append(stderr[i:j])
+        if isinstance(obj, dict) and obj.get("Code"):
+            stops.append(obj)
+        else:
+            rest.append(stderr[j:end])
+        i = end
+    return stops, "".join(rest)
+
+
 def _run(args, cwd):
     p = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
     return p.returncode, (p.stdout + p.stderr).strip()
@@ -106,7 +129,10 @@ def check(root: Path, paths=None, online=False, fix=False, prose=True) -> int:
             except ValueError:
                 data = {}
                 errors.append(("", "vale output could not be read: " + (p.stdout or p.stderr).strip()[:200]))
-            for ln in (p.stderr or "").splitlines():  # e.g. E201 invalid front matter: Vale skipped that file
+            stops, rest = _vale_stops(p.stderr or "")  # e.g. E201 front matter that is not YAML: Vale skipped the file
+            errors += [(s.get("Path") or "", f"{s.get('Path') or '?'}:{s.get('Line') or 1}: vale {s.get('Code')}: "
+                        f"{str(s.get('Text') or '').strip()[:200]}") for s in stops]
+            for ln in rest.splitlines():
                 if ln.strip() and ("E1" in ln or "E2" in ln or "Error" in ln):
                     errors.append(("", "vale: " + ln.strip()[:200]))
             for f, alerts in sorted(data.items()) if isinstance(data, dict) else []:

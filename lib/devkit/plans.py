@@ -9,6 +9,7 @@ adopted into this format on their first revision.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -21,12 +22,37 @@ FIELDS = ("id", "title", "kind", "scope", "status", "version", "body_sha", "crea
           "supersedes")
 
 
+# A value YAML reads bare (a plain scalar): no indicator character first, no ": " or " #" inside, no ":" or blank at
+# the end. Vale and GitHub read a plan's front matter as YAML, and stop on a title such as "Release 26.11: the bugs".
+_PLAIN = re.compile(r"""(?![-?:,\[\]{}#&*!|>'"%@`\s])(?!.*(?:: | #|:$|\s$)).+""")
+
+
+def _yaml(value) -> str:
+    """A front-matter value as YAML reads it: bare when it can be, else a JSON string (a YAML double-quoted scalar)."""
+    v = str(value)
+    return v if not v or _PLAIN.fullmatch(v) else json.dumps(v, ensure_ascii=False)
+
+
+def _unquote(value: str) -> str:
+    """A front-matter value as written: a double- or single-quoted YAML scalar is read back to its text."""
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            out = json.loads(value)
+            return out if isinstance(out, str) else value
+        except ValueError:
+            return value
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    return value
+
+
 def _read(text: str):
     """-> (frontmatter fields, the frontmatter's other lines as they are, body, changelog entries). Only the record's
     own changelog at the end is taken out of the body (work.split_changelog), so a `## Changelog` in a code example or
     a section stays in the body."""
     front, body = work.split_frontmatter(text)
     meta, extra = work.read_frontmatter(front, FIELDS, ())
+    meta = {k: _unquote(v) if isinstance(v, str) else v for k, v in meta.items()}
     body, changelog = work.split_changelog(body)
     return meta, extra, body.strip("\n"), changelog
 
@@ -49,7 +75,7 @@ def _sha(body: str) -> str:
 
 
 def _render(meta: dict, body: str, changelog: list, extra=()) -> str:
-    head = "---\n" + "\n".join([f"{k}: {meta.get(k, '')}".rstrip() for k in FIELDS] + list(extra)) + "\n---\n"
+    head = "---\n" + "\n".join([f"{k}: {_yaml(meta.get(k, ''))}".rstrip() for k in FIELDS] + list(extra)) + "\n---\n"
     # an entry's later lines are indented, as a Markdown list item's, so work.split_changelog reads it back whole
     return head + body.rstrip() + "\n\n## Changelog\n\n" + "".join("- " + str(c).replace("\n", "\n  ") + "\n"
                                                                     for c in changelog)

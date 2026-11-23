@@ -3,6 +3,7 @@
 """Plan records keep their whole body: only the record's own changelog, at the end, is read as the changelog."""
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -220,6 +221,33 @@ class NewPlanMarkdownTests(unittest.TestCase):
             log = plans._split(path.read_text())[2]
         self.assertRegex(log[0], r"^v2 · .* · revised\S*—why: customer asked for XLSX too$")
         self.assertNotRegex(log[0], r"\s—|—\s")
+
+
+class FrontMatterYamlTests(unittest.TestCase):
+    # Vale and GitHub read a plan's front matter as YAML. A title written bare with ": " in it ("Bug sweep 26.11.28:
+    # the bugs") is not YAML (mapping values are not allowed there), so Vale stopped on the file (E201) and checked none
+    # of its prose. A value YAML cannot read bare is written quoted, and devkit reads the title back whole.
+    TITLES = ("Bug sweep 26.11.28: the bugs", "#1 priority", "C# notes # and signs", '"Quoted" at the start',
+              "[draft] export", "Ends with a colon:", "- a dash first", "Plain title")
+    UNSAFE_BARE = r"""^[-?:,\[\]{}#&*!|>'"%@`]|: | #|:$"""  # what a YAML plain scalar cannot hold
+
+    def test_a_title_is_written_as_a_yaml_scalar_and_read_back_whole(self):
+        for title in self.TITLES:
+            with self.subTest(title=title), TempPlans():
+                path = plans.new("acme/api", title, a=A)
+                text = path.read_text()
+                line = next(ln for ln in work.split_frontmatter(text)[0].splitlines() if ln.startswith("title:"))
+                value = line[len("title:"):].strip()
+                if value.startswith('"'):
+                    self.assertEqual(json.loads(value), title)
+                else:
+                    self.assertEqual(value, title)
+                    self.assertNotRegex(value, self.UNSAFE_BARE)
+                self.assertEqual(plans.title_of(text, "fallback"), title)
+                self.assertEqual([p["title"] for p in plans.list_plans()], [title])
+                plans.revise(path, "a revision", a=A)
+                self.assertEqual(plans.title_of(path.read_text(), "fallback"), title)
+                self.assertFalse(plans.needs_revision(path))
 
 
 class ChangelogEntryTests(unittest.TestCase):
