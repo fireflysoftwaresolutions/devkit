@@ -506,9 +506,14 @@ def _merge_lesson(base: str, remote: str, mine: str, contested: list = None):
             contested.append(s)
     out["meta"]["occurrences"] = r["meta"]["occurrences"] + m["meta"]["occurrences"] - b["meta"]["occurrences"]
     out["meta"]["last_seen"] = max(r["meta"].get("last_seen") or "", m["meta"].get("last_seen") or "")
-    added = _merge_history(b, r, m, out)
+    added = _merge_history(b, r, m, out, same=_without_repeat)
     if added is None:
         return None
+    shift = r["meta"]["occurrences"] - b["meta"]["occurrences"]
+    if shift > 0:  # this Mac's repeats come after the remote's: each entry names its repeat by the merged count
+        out["changelog"][:len(added)] = [
+            _REPEAT.sub(lambda x: f"{x.group(1)}(#{int(x.group(2)) + shift})", e, count=1)
+            for e in out["changelog"][:len(added)]]
     text = lessons.render(out)
     if contested:  # this Mac's contested lines are dropped on purpose: only the remote's must all be there
         return None if lost_lines(remote, text, base.splitlines()) else text
@@ -537,18 +542,27 @@ def _merge_fields(b, r, m, out, fields, lists, by_rule, contested: list = None) 
     return True
 
 
-def _merge_history(b, r, m, out):
+def _without_repeat(entry: str) -> str:
+    """A lesson's changelog entry without its version and repeat numbers, which a merge numbers again (_merge_lesson)."""
+    return _REPEAT.sub(lambda x: x.group(1), _VERSION.sub("", entry, count=1), count=1)
+
+
+_REPEAT = re.compile(r"(\b(?:happened again|opened to automate it) )\(#(\d+)\)")  # lessons.recur and lessons.automate
+
+
+def _merge_history(b, r, m, out, same=None):
     """A record's changelog in `out`: this Mac's entries on top of the remote's, numbered after them, and a version
     that counts both; `updated` and `updated_by` from the side changed last. Entries are compared without their
-    version number: a pull replays this Mac's commits one at a time, and the first one settled numbers this Mac's
-    entry again, on top of the remote's, before the next one is settled. -> this Mac's added entries as it wrote
-    them, or None when this Mac's changelog does not start from the base's, or the remote's lacks one of the base's
-    entries or has them in another order."""
+    version number (and as `same` reads them, when given): a pull replays this Mac's commits one at a time, and the
+    first one settled numbers this Mac's entry again, on top of the remote's, before the next one is settled. -> this
+    Mac's added entries as it wrote them, or None when this Mac's changelog does not start from the base's, or the
+    remote's lacks one of the base's entries or has them in another order."""
+    same = same or (lambda e: _VERSION.sub("", e, count=1))
     n = len(b["changelog"])
-    base = [_VERSION.sub("", e, count=1) for e in b["changelog"]]
-    if n and [_VERSION.sub("", e, count=1) for e in m["changelog"][len(m["changelog"]) - n:]] != base:
+    base = [same(e) for e in b["changelog"]]
+    if n and [same(e) for e in m["changelog"][len(m["changelog"]) - n:]] != base:
         return None
-    theirs = iter(_VERSION.sub("", e, count=1) for e in r["changelog"])
+    theirs = iter(same(e) for e in r["changelog"])
     if not all(e in theirs for e in base):  # the base's entries in the remote's, in order (`in` consumes the iterator)
         return None
     added = m["changelog"][:len(m["changelog"]) - n]

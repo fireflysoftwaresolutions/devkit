@@ -332,6 +332,12 @@ def shared_lesson(m, title: str = "Migration ran twice", scope: str = "global") 
     return lid
 
 
+def repeat_number(entry: str):
+    # the repeat a lesson's changelog entry names: "happened again (#3)", "work item T-… opened to automate it (#3)"
+    found = re.search(r"(?:happened again|opened to automate it) \(#(\d+)\)", entry)
+    return int(found.group(1)) if found else None
+
+
 def unpushed(m) -> str:
     return _git(m.here, "rev-list", "--count", "@{u}..HEAD")
 
@@ -364,6 +370,8 @@ class LessonConflictTests(unittest.TestCase):
         self.assertEqual([(e.split(" · ")[0], e.split("why: ")[-1]) for e in pushed["changelog"]][:2],
                          [("v3", "CI run 7 on this Mac"), ("v2", "CI run 8 on the other Mac")])
         self.assertEqual(len(pushed["changelog"]), 3)
+        # each Mac wrote its repeat as the second; this Mac's, on top, is the third the lesson counts
+        self.assertEqual([repeat_number(e) for e in pushed["changelog"][:2]], [3, 2])
 
     def test_two_macs_that_change_a_lessons_status_differently_still_push_and_keep_this_macs_version_aside(self):
         # The Weave Mac's failure: since the last pull this Mac retired a lesson and the other Mac prevented it, and
@@ -434,6 +442,8 @@ class LessonConflictTests(unittest.TestCase):
         self.assertEqual((pushed["meta"]["occurrences"], pushed["meta"]["task_ref"]), (4, theirs))
         self.assertEqual(status, {theirs: "todo", mine: "cancelled"})
         self.assertNotIn(f"lessons/{PID}/{lid}.md", warned)
+        # both Macs wrote their repeat, and the item it opened, as the third; this Mac's, on top, are the fourth
+        self.assertEqual([repeat_number(e) for e in pushed["changelog"]][:5], [4, 4, 3, 3, 2])
 
     def test_the_duplicate_item_this_mac_already_started_stays_open_and_the_sync_names_both(self):
         # As above, but this Mac started its own automation item (dev task start) before the sync: it is work in
