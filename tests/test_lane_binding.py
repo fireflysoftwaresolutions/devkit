@@ -701,6 +701,23 @@ class ReviewLaneTests(unittest.TestCase):
         self.stop(self.m(25))
         self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
 
+    def test_one_launch_that_names_two_reviews_binds_both_as_named_whatever_its_report_says(self):
+        # the launch names both reviews fully, so both are its own: neither joins, and its report closes both
+        # without spelling their names
+        pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
+        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(12))
+        launch("a_ser", "devkit:seraph", "Seraph: review-api and review-ui", at=self.m(13))
+        run = pg.load_run("claude", "s1")
+        self.assertEqual([(s["owner"], s.get("joined")) for s in run["plan"] if s["name"].startswith("review-")],
+                         [("a_ser", None), ("a_ser", None)])
+        told = [m["text"] for m in run.get("messages") or [] if m.get("to") == "a_ser"]
+        self.assertEqual([t for t in told if "is your step now" in t], [])
+        self.REPORT = ("**[Firefly> DevKit · Code reviewer (Seraph)]** devkit · `hotfix` · two reviews\n"
+                       "- **Done:** read both diffs\n- **Check:** ✓ approve: 21 tests read and run\n"
+                       "- **Next:** the tech lead merges")
+        self.stop(self.m(25))
+        self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
+
 
 class BackgroundCloseTests(unittest.TestCase):
     # kit-consulting: members closed review-suite-fixes and client-editor-build with ✓ while their own dev test prove

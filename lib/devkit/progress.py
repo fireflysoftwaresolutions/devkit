@@ -2166,19 +2166,22 @@ def launch_step(run: dict, aid: str):
 
 
 def _launch_named(run: dict, aid: str, lane: dict):
-    """The step of its member that lane `aid`'s launch description names best, alone (as _bind_step scores it),
-    among the pending steps that may go to it; None when it names none of them, or two equally. The steps the lane
-    runs already count too: a launch that names one of them as well or better names no step still waiting (one
-    word left in common, such as "review" once "review-ui" is taken, names no "review-api")."""
+    """The step of its member that lane `aid`'s launch description names best (as _bind_step scores it), among the
+    pending steps that may go to it; None when it names none of them, or two equally but not fully. Steps it names
+    fully (every word of the name, or the whole name) are each named, first in the order the lane takes them, so one
+    launch for `review-api and review-ui` takes both as its own. The steps the lane took as named count too: a launch
+    that names one of them better names no step still waiting (one word left in common, such as "review" once
+    "review-ui" is taken, names no "review-api"); a step that only joined the lane never counts."""
     task = _task_text(lane.get("label") or "")
     scored = [(_name_score(task, x["name"]), x["name"]) for x in _queued_for(run, aid)]
     if not scored:
         return None
     best = max(sc for sc, _ in scored)
     top = [n for sc, n in scored if sc == best]
-    if any(_name_score(task, x["name"]) >= best for x in coord.held(run, aid)):
+    if any(_name_score(task, x["name"]) > best for x in coord.held(run, aid) if x.get("joined") != aid):
         return None
-    return top[0] if best[1] and len(top) == 1 else None
+    fully = best[0] or (best[1] and best[2] == 1.0)
+    return top[0] if best[1] and (len(top) == 1 or fully) else None
 
 
 def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True, told=()) -> list:
