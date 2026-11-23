@@ -265,10 +265,11 @@ def owed(run: dict, doer_of=None, roster=None) -> list:
 
 
 def mark_unverified(s: dict, now: float, why: str = ""):
-    """Step `s` ends unverified now, and keeps when (`unverified_at`, exact) and why (`unverified_why`): an
-    approval's ✓ closes it only when given after that (record), so a verdict on earlier work never closes work redone
-    since, and its approver hears why it is unverified (unverified_reason) before its ✓ counts."""
-    s.update(state="unverified", unverified_at=now, unverified_why=str(why or "")[:300])
+    """Step `s` ends unverified now, and keeps when (`unverified_at`, exact; `ended`, when its work last ended, which
+    saw reads) and why (`unverified_why`): an approval's ✓ closes it only when given after that (record), so a verdict
+    on earlier work never closes work redone since, and its approver hears why it is unverified (unverified_reason)
+    before its ✓ counts."""
+    s.update(state="unverified", unverified_at=now, ended=now, unverified_why=str(why or "")[:300])
 
 
 def unverified_reason(s: dict) -> str:
@@ -365,15 +366,20 @@ def began(run: dict, s: dict):
 
 
 def saw(run: dict, review: dict, x: dict, closed=()) -> bool:
-    """Did review step `review` see the work of step `x` it follows? Only when that work ended before the review
-    began (began): an unverified step when it last ended unverified (mark_unverified), and a step the review's ✓ has
-    just closed (`closed`) too; a done step when it finished. Work reopened or taken again by a new launch since
-    ends later, so a verdict on the old work neither closes nor approves it. True when the review cannot be dated."""
+    """Did review step `review` see the work of step `x` it follows? Only when that work last ended (`ended`) before
+    the review began (began). A close of unverified work (the tech lead's evidence, an approval's ✓, a review's ✓)
+    does not move when that work ended, so it never hides work from a review that saw it; work reopened or taken again
+    by a new launch since ends later, so a verdict on the old work neither closes nor approves it. A step saved
+    before steps kept `ended`: when it last ended unverified (mark_unverified), for one the review's ✓ has just closed
+    (`closed`) too, else when it finished. True when the review cannot be dated."""
     since = began(run, review)
     if since is None:
         return True
-    old = x.get("state") == "unverified" or x.get("name") in closed
-    return ((x.get("unverified_at") if old else x.get("finished")) or 0) <= since
+    end = x.get("ended")
+    if end is None:
+        old = x.get("state") == "unverified" or x.get("name") in closed
+        end = x.get("unverified_at") if old else x.get("finished")
+    return (end or 0) <= since
 
 
 def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster=None, closed=()):

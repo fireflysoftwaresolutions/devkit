@@ -213,9 +213,11 @@ command's line says why the step is unverified, such as a read-only member's she
 verdict covers only the work it saw: one given before the step last ended unverified closes and approves nothing, and a
 reopen drops the verdicts members still hold on the step and tells them to give it again once the new work ends. A
 review covers the work that ended before its lane took it: work reopened, or taken again by a new launch, that ends
-after that is neither closed nor approved by the review's ✓, and the tech lead is told to have the new work reviewed. As
-soon as that work starts again, from done or from unverified, the review and any other step running on it are flagged
-for recheck, so the run does not end before they are checked again. An author's lane that stops with no work recorded on
+after that is neither closed nor approved by the review's ✓, and the tech lead is told to have the new work reviewed. A
+close of unverified work while its review runs, with the tech lead's evidence or another approval, does not move when
+that work ended, so the review's ✓ still approves it. As soon as that work starts again, from done or from unverified,
+the review and any other step running on it are flagged for recheck, so the run does not end before they are checked
+again. An author's lane that stops with no work recorded on
 its unverified step since that step ended keeps the time it ended, so a verdict given in between still counts. Nobody
 approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves code and
 configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer and

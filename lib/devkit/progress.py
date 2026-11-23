@@ -1798,8 +1798,14 @@ def _rechecked(run, s) -> bool:
 
 
 def _finish_step(run, s, now, agent, sid):
+    """Step `s` ends done now. Its work ends now too (`ended`, approvals.saw), unless it ended unverified before:
+    then this is a close of that work, which keeps when the work ended."""
     if s.get("state") == "done":
         return
+    if s.get("state") == "unverified":
+        s.setdefault("ended", s.get("unverified_at") or now)
+    else:
+        s["ended"] = now
     s.update(state="done", finished=now)
     _rechecked(run, s)
     s["started"] = s.get("started") or now

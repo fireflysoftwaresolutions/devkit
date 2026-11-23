@@ -170,6 +170,17 @@ class ReviewOfReworkedWorkTests(Base):
         self.assertEqual(self.approved("x"), [])
         self.assertIn(("seraph", ["x"]), pg.approvals_owed(self.run_()))
 
+    def test_the_tech_leads_close_of_unverified_work_while_its_review_runs_leaves_the_review_its_approval(self):
+        # the tech lead closes x with his own evidence at m20, while the review begun at m12 runs: x's work still
+        # ended at m10, so the review's ✓ at m30 approves it, and nobody hears the review began before x ended
+        # (--force: no text describes a step named x)
+        pg.step("x", which="x", check="✓ ran the 3 tests myself", now=self.m(20), force=True)
+        self.end_review()
+        self.assertEqual([a["by"] for a in self.approved("x")], ["seraph"])
+        self.assertEqual(pg.approvals_owed(self.run_()), [])
+        told = [m["text"] for m in self.run_().get("messages") or [] if "began before" in m.get("text", "")]
+        self.assertEqual(told, [])
+
 
 class ReviewTakenLaterTests(Base):
     def test_a_reviewer_lane_that_takes_the_review_after_the_work_ended_still_closes_and_approves_it(self):
