@@ -204,16 +204,17 @@ def _plans_folder(project: str) -> str:
     return os.path.join(core.real(core.HANDOFF / "plans"), project)
 
 
-def _outside_folders(project: str, member: str, session: tuple) -> list:
+def _outside_folders(project: str, member: str, session: tuple, step: str = "") -> list:
     """The only folders outside the repository a step's scope may name: this project's plans folder (_plans_folder),
-    where the Software architect and the Technical writer write specs, and the scratch folder of the member the step
-    goes to, scratchpad/<member id>/ in the session scratchpad (_session_scratchpad). Each is the real path of its
-    parent joined with its own name, unresolved: a link in place of the folder leads out of it, so the real path of
-    no entry is under it."""
+    where the Software architect and the Technical writer write specs, and the scratch folders of the member the
+    step goes to in the session scratchpad (_session_scratchpad): the lane folder of step `step`,
+    scratchpad/<member id>-<step>/, and the member's plain scratchpad/<member id>/ (progress.scratch_names, the
+    folders its lane writes in). Each is the real path of its parent joined with its own name, unresolved: a link in
+    place of the folder leads out of it, so the real path of no entry is under it."""
     out = [_plans_folder(project)]
-    if member and re.fullmatch(r"[a-z0-9][a-z0-9-]*", member):
-        pad = _session_scratchpad(*session)
-        out.append(os.path.join(core.real(pad), member) if pad else "")
+    names = progress.scratch_names(member, step)
+    pad = _session_scratchpad(*session) if names else ""
+    out += [os.path.join(core.real(pad), name) for name in names] if pad else []
     return [f for f in out if f]
 
 
@@ -232,17 +233,17 @@ def _in_outside_folder(glob: str, folders: list) -> str:
 
 
 def _repository_globs(entries: list, project: str, cwd: str | None, member: str = "",
-                      session: tuple = ("", "")) -> tuple:
+                      session: tuple = ("", ""), step: str = "") -> tuple:
     """The globs a step keeps for the checked entries of its --scope (_scope_entries): an absolute or ~ path inside
     one checkout of the run's repository in its repository-relative form (progress._scope_globs), and one in this
-    project's plans folder or in the scratch folder of `member` (the id of the member the step goes to) in the
-    scratchpad of `session` ((agent, session id)) by its real path (_outside_folders) -> (globs, rewrites). Raises
-    StepError, quoting none of the text, for an entry that names any other files outside every checkout of the
-    repository; delegate and dev progress assign refuse a scope by this one rule."""
+    project's plans folder or in a scratch folder of `member` (the id of the member the step goes to) for step `step`
+    (its name) in the scratchpad of `session` ((agent, session id)) by its real path (_outside_folders) -> (globs,
+    rewrites). Raises StepError, quoting none of the text, for an entry that names any other files outside every
+    checkout of the repository; delegate and dev progress assign refuse a scope by this one rule."""
     globs, rewrites = progress._scope_globs(entries, project, cwd)
     if not any(g.startswith(("/", "~")) for g in globs):
         return globs, rewrites
-    folders, kept = _outside_folders(project, member, session), []
+    folders, kept = _outside_folders(project, member, session, step), []
     for g in globs:
         if g.startswith(("/", "~")):
             g = _in_outside_folder(g, folders)
@@ -250,8 +251,9 @@ def _repository_globs(entries: list, project: str, cwd: str | None, member: str 
                 plans = _plans_folder(project)
                 where = f"{core.tilde(plans)}/ (this project's plans)" if plans else "this project's plans folder"
                 raise StepError(f"{SCOPE_HELP}; one entry names files outside the repository, where a scope may name "
-                                f"only {where} or the scratch folder of the member the step goes to "
-                                f"(scratchpad/<member id>/ in the session scratchpad), so devkit saved nothing")
+                                f"only {where} or a scratch folder of the member the step goes to "
+                                f"(scratchpad/<member id>-<step>/ or scratchpad/<member id>/ in the session "
+                                f"scratchpad), so devkit saved nothing")
         kept.append(g)
     return list(dict.fromkeys(kept)), rewrites
 
@@ -261,7 +263,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     """Add a step for another crew member, and tell the lane that takes it, or the tech lead, in the same save: a
     notice that cannot be sent (progress._ask_in) refuses the whole command, nothing saved. Its scope is
     repository-relative paths or globs (_scope_entries), or paths in this project's plans folder or the member's own
-    scratch folder (_repository_globs). -> {"step", "member", "routed", "lane"} (lane: the
+    scratch folders for the step (_repository_globs). -> {"step", "member", "routed", "lane"} (lane: the
     working lane it joined, or None when Morpheus has to launch the member)."""
     now = now or time.time()
     if not (task or "").strip():
@@ -293,9 +295,9 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
         s = _new_step(name, progress.parse_minutes(est) or None)
         s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500], added=round(now, 1))
         if entries:  # as dev progress assign keeps it: repository-relative, the form the edit advice matches, or the
-            # real path in this project's plans folder or the member's own scratch folder
+            # real path in this project's plans folder or the member's own scratch folders for this step
             globs, rewrites = _repository_globs(entries, run.get("project") or "", cwd, member=m["id"],
-                                                session=(agent, sid))
+                                                session=(agent, sid), step=name)
             s["scope"] = globs
             progress._tell_rewrites(run, name, rewrites, now)
         if after:

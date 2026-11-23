@@ -187,5 +187,28 @@ class OutsideFolderScopeTests(unittest.TestCase):
                     pg.assign("parser", "Neo", scope=f"{pad}/tank/**", cwd=str(self.main), now=T0 + 60, why="x")
 
 
+class LaneFolderScopeTests(unittest.TestCase):
+    # A crew lane that runs a step writes in scratchpad/<member id>-<step>/, so each lane of one member has a folder of
+    # its own. A step's scope may name that folder of the step's own member, besides the member's plain
+    # scratchpad/<member id>/; another step's folder and another member's lane folder stay refused. The fixture and
+    # helpers are OutsideFolderScopeTests', without its tests.
+    setUp = OutsideFolderScopeTests.setUp
+    scopes = OutsideFolderScopeTests.scopes
+    refuses = OutsideFolderScopeTests.refuses
+
+    def test_assign_keeps_the_lane_folder_of_its_step_and_refuses_every_other_lane_folder(self):
+        pg.assign("parser", "Neo", scope=f"{self.pad}/neo-parser/**", cwd=str(self.main), now=T0 + 60,
+                  why="the scope rule under test")
+        self.assertEqual(self.scopes()["parser"], [f"{os.path.realpath(self.pad)}/neo-parser/**"])
+        for scope in (f"{self.pad}/neo-spec/**", f"{self.pad}/tank-parser/**", f"{self.pad}/neo-parser-2/**"):
+            with self.subTest(scope=scope):  # another step's, another member's, a longer name
+                self.refuses("parser", "Neo", scope)
+
+    def test_delegate_keeps_the_lane_folder_of_the_step_it_adds(self):
+        made = dispatch.delegate("probe the parser", to="Neo", scope=f"{self.pad}/neo-probe-the-parser/probe.log",
+                                 cwd=str(self.main), now=T0 + 60)
+        self.assertEqual(made["step"].get("scope"), [f"{os.path.realpath(self.pad)}/neo-probe-the-parser/probe.log"])
+
+
 if __name__ == "__main__":
     unittest.main()

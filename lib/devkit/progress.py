@@ -1939,7 +1939,8 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
     (_route_to_lane; never a lane busy with another step, nor one whose member ended or went stale, working_agents,
     which takes it when it works again); its time is that subagent's time. `scope`: the files it owns (comma-separated globs); the pre-tool hook advises that subagent when
     it edits outside them, and `dev crew owner` names it as their holder. A scope is paths in the repository, or in
-    this project's plans folder or the member's own scratch folder, by the rule `dev crew delegate` refuses one by
+    this project's plans folder or the member's own scratch folders for this step (scratchpad/<member id>-<step>/
+    and scratchpad/<member id>/), by the rule `dev crew delegate` refuses one by
     (dispatch._scope_entries, dispatch._repository_globs). The crew's RACI
     must make the member Responsible for the step's kind of work; `why` overrides it, recorded. `activity`: the
     step's kind of work, an id from dev crew raci, which then decides whatever language the step is written in."""
@@ -1961,7 +1962,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         except Exception:
             member = ""  # a broken roster names no member, so the scope may name no scratch folder
         globs, rewrites = dispatch._repository_globs(globs, run.get("project") or "", cwd, member=member,
-                                                     session=(agent, sid))
+                                                     session=(agent, sid), step=s["name"])
         _tell_rewrites(run, s["name"], rewrites, now, checkout)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
         _refuse_own_review(run, s, label)
@@ -2507,7 +2508,7 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
     the checkout that holds it (hooks._scope_advice), so an absolute or ~ glob inside a checkout never matched.
     -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the tech lead; absolute
     globs outside the repository as given, which its callers keep only in this project's plans folder or the
-    member's own scratch folder (dispatch._repository_globs); a glob that names
+    member's own scratch folders for the step (dispatch._repository_globs); a glob that names
     a whole checkout (`<worktree>/**`, `<worktree>/`) as that checkout's top-level entries (_checkout_entries), never
     a bare `**`. A glob is rewritten only when that is exact: its fixed folder (the part before the first wildcard)
     lies in one checkout.
