@@ -2285,7 +2285,8 @@ class PageBehaviorTests(unittest.TestCase):
 
 @unittest.skipUnless(CHROME, NO_CHROME)
 class NamesAndUnknownFiguresTests(unittest.TestCase):
-    """A control is named first by the text it shows."""
+    """A control is named first by the text it shows, and a pull request count the page could not read shows the dash
+    and never 0."""
 
     setUpClass = PageBehaviorTests.__dict__["setUpClass"]
     tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
@@ -2313,6 +2314,21 @@ class NamesAndUnknownFiguresTests(unittest.TestCase):
             self.assertTrue(name.startswith(shown + ","), (shown, name))
         self.assertIn(["widget 1/3", "widget 1/3, Reconcile ledgers on feat/z, codex, 1 of 3 steps, about 25m left"], out["bars"])
         self.assertEqual(out["pal"], ["⌘K", "⌘K, Command palette", "Meta+K Control+K"])   # ⌘K or Ctrl+K opens it
+
+    # The pull request list could not be read (prs_known false): the Open PRs tile and the Pull requests tab show the dash
+    # and say "not known", never 0, at every width, and the tab's panel does not claim there are none
+    def test_an_unknown_pull_request_count_shows_the_dash_never_0_at_every_width(self):
+        steps = """const tile = $$("main .tiles > a.stile").find(t => /^Open PRs/.test(said(t))), tab = $("#tab-prs");
+            out.tile = [seen($(".s-v", tile)), said(tile)]; out.tab = [seen(tab), said(tab)];
+            tab.click(); await tick(50); out.panel = seen($("#tabpanel"));
+            await go("#/projects/acme/api?modal=project%3Aacme%2Fapi"); await tick(50); out.modal = said($("#modal .mfigs"));"""
+        for width in (390, 1440):
+            out = self.probe(steps, width, "#/projects/acme/api")
+            self.assertEqual(out["tile"], ["—", "Open PRs not known Pull requests not known"], width)
+            self.assertEqual(out["tab"], ["Pull requests —", "Pull requests not known"], width)
+            self.assertIn("Pull requests not known", out["panel"], width)
+            self.assertNotIn("No open pull requests", out["panel"], width)
+            self.assertTrue(out["modal"].startswith("Open PRs: not known Pull requests not known"), (width, out["modal"]))
 
 
 @unittest.skipUnless(CHROME, NO_CHROME)
