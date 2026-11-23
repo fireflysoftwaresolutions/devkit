@@ -675,7 +675,7 @@ must establish that the command checked the same checkout as the reviewed change
 
 A proof piped into a read-only filter (`dev test | tail -40`) shows it ran, but its receipt holds the filter's exit
 code, so a positive report needs the proof run alone. `dev progress step` is the exception: when the member's lane
-holds the update that very command recorded (its text and Check), the gate takes that record as the proof, and the
+holds the update that same command recorded (its text and Check), the gate takes that record as the proof, and the
 audit trail keeps the warning that the pipe hid the command's exit code.
 
 **When the brief or the project forbids `dev ci --run`.** In a shared checkout, other members' uncommitted work fails
