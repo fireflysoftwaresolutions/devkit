@@ -623,6 +623,59 @@ class TextPinOrderTests(TextPinCase):
         self.assertEqual(rc, 0, out)
         self.assertTrue(self.added())
 
+    # two later calls of one text, a background one that closed and an open one: one shell running that text cannot
+    # be both calls' own, so the call is contested
+    def test_one_shell_never_stands_for_two_later_calls_of_the_same_text(self):
+        self.plan_with_link()
+        now = time.time()
+        lead, lead_shell = self.call("dev progress add extra")
+        retime(lead, now - 10)
+        del self.argvs[lead_shell]
+        bg, forger = self.call("npm run watch", aid="a_link", run_in_background=True)
+        retime(bg, now - 9)
+        self.closed(bg)
+        self.starts[forger], self.argvs[forger] = now - 8.87, claude_argv("dev progress add extra")
+        twin, twin_shell = self.call("npm run watch", aid="a_link")
+        retime(twin, now - 8.5)
+        self.starts[twin_shell] = now - 8.37
+        rc, out = self.in_shell(forger, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
+    # the same beside a later call that is still open and runs in a shell of its own
+    def test_a_finished_foreground_call_beside_an_open_one_with_its_own_shell_leaves_the_call_its_own(self):
+        self.plan_with_link()
+        now = time.time()
+        lead, lead_shell = self.call("dev progress add extra")
+        retime(lead, now - 10)
+        member, member_shell = self.call("ls", aid="a_link")
+        retime(member, now - 9.99)
+        del self.argvs[member_shell]
+        self.closed(member)
+        other, other_shell = self.call("dev crew inbox", aid="a_link")
+        retime(other, now - 9.98)
+        self.starts[other_shell] = now - 9.85
+        self.starts[lead_shell] = now - 9.9
+        rc, out = self.in_shell(lead_shell, "progress", "add", "extra")
+        self.assertEqual(rc, 0, out)
+
+    # a process that runs a later call's command but started before that call opened (a member's earlier background
+    # shell of the same text) is not that call's shell, so it vouches for nothing
+    def test_a_process_older_than_a_later_call_never_vouches_for_it(self):
+        self.plan_with_link()
+        now = time.time()
+        lead, lead_shell = self.call("dev progress add extra")
+        retime(lead, now - 10)
+        del self.argvs[lead_shell]
+        old_shell = 72990
+        self.argvs[old_shell], self.starts[old_shell] = claude_argv("npm run watch"), now - 30
+        member, forger = self.call("npm run watch", aid="a_link")
+        retime(member, now - 9)
+        self.starts[forger], self.argvs[forger] = now - 8.87, claude_argv("dev progress add extra")
+        rc, out = self.in_shell(forger, "progress", "add", "extra")
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+
     # a background call closes as soon as it starts and its shell runs on: the tech lead's own background call
     # beside its dev call leaves that call its own while its shell runs its own command, and contests it once that
     # shell is gone
@@ -1039,6 +1092,22 @@ class CodexTextPinRefusalTests(CodexTextPinTests):
         self.assertFalse(self.added())
         self.assertEqual(len(self.records("caller.text-no-thread")), 2)
 
+
+    # a Codex command may run on after its result (an exec session that outlives its yield time), so a later Codex
+    # call that closed with its result still counts until its own shell shows its own command
+    def test_a_later_codex_call_that_closed_with_its_result_still_contests_the_call(self):
+        from test_codex_identity_token import SUB
+        now = time.time()
+        data, shell = self.call("dev progress add extra")
+        retime(data, now - 10)
+        mdata, _, _ = self.exec("npm test", aid=SUB, workdir=str(self.root), yield_time_ms=10_000)
+        retime(mdata, now - 9.9)
+        self.closed(mdata)
+        self.starts[shell] = now - 9.8
+        self.chain, self.own_pid = [(shell, "zsh"), (CODEX, "codex")], 71999
+        rc, out = self.lead()
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
 
     # the red team's decoy on Codex: a member's exec replaced its shell with the tech lead's dev command while that
     # call waited on its prompt, and a call opened later replaced its shell with the member call's form
