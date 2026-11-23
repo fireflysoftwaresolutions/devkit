@@ -4062,10 +4062,11 @@ def _rebuild_helpers(f, old_text, text) -> dict | None:
         edits.append((nb[before[-1]][1] if before else nb[after[0]][0] - 1, 0, old[s - 1:e]))
         undone.append(k)
     # entries of one class and name, tests too, are matched by their place among them. A test of that name that takes
-    # the place of the one helper of that name pairs the helper with the test's base text: the helper reads as added
-    # or as gone, and its edit would not be undone. And where a side has more than one helper of that name, one the
-    # change adds, removes, moves or edits before others pairs them with their neighbors' base text. Neither can be
-    # rebuilt; more than one helper of a name only matters when some helper is rebuilt
+    # the place of the one helper of that name pairs the helper with the test's base text: when the change edits or
+    # removes that helper, it reads as added or as gone, and its edit would not be undone. And where a side has more
+    # than one helper of that name, one the change adds, removes or moves before others, or helpers that trade texts,
+    # pair them with their neighbors' base text. Neither can be rebuilt; a group that keeps its shape (_same_shape)
+    # comes back place by place, and more than one helper of a name only matters when some helper is rebuilt
     groups, crowded, displaced = [{}, {}], False, False
     for g, entries, lines, t in ((groups[0], ou, old, old_text), (groups[1], nu, cur, text)):
         blocks = _js_describes(t) if _lang(f) == "js" else []  # a JS entry's place: the describes around it too
