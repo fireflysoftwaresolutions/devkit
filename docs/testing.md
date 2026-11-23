@@ -27,12 +27,15 @@ its test scripts with `node`, and `node` is on the `PATH`. A path you name must 
 Some test files belong to a more specific runner than their package's Jest or Vitest:
 
 - **Browser specs.** The specs in the `testDir` folders of a `playwright.config.*` run with Playwright
-  (`npx playwright test <files>`); Vitest and Jest leave them out. A config without `testDir` gives Playwright the
-  specs of its folder that import `@playwright/test`, and the unit tests beside them keep their runner.
+  (`npx playwright test <files>`); Vitest and Jest leave them out. A config without `testDir`, or whose `testDir` is
+  its own folder (`'.'`), gives Playwright the specs of its folder that import `@playwright/test`, directly or
+  through a local fixtures file, and the unit tests beside them keep their runner. A commented-out `testDir` counts
+  as none.
 - **Angular unit tests.** A project in `angular.json` whose `test` target uses the unit-test builder
   (`@angular/build:unit-test`) with its Vitest runner runs its specs through `ng test <project> --include <file>`, so
   they build with the workspace's TypeScript paths, setup files, and providers, which a bare Vitest run lacks. Its specs
-  are those under its source root and those its `include` option names elsewhere.
+  are the files its `include` patterns match (by default `**/*.spec.ts` and `**/*.test.ts` under its source root); a
+  test file under the same folder that no pattern matches keeps the package's runner.
 
 pytest's own configuration decides which Python files are tests. A file named like a test (`test_*.py`, `*_test.py`)
 is one only inside the `testpaths` of the nearest pytest configuration (`pytest.ini`, `pyproject.toml`, `tox.ini`,
