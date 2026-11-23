@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import crew, dashboard, progress  # noqa: E402
+from devkit import crew, dashboard, progress, work  # noqa: E402
 
 try:  # `dev test prove` runs the tests on the code before dashnow.py existed: there they must fail, not vanish
     from devkit import dashnow  # noqa: E402
@@ -135,8 +135,10 @@ def docs_run() -> dict:
                    updates=[{"ts": at(13, 0), "kind": "done", "text": "docs refreshed", "next": ""}])
 
 
-def remote_presence(updated: int = None) -> dict:
-    """bob@studio's presence: one Codex session runs Rules engine migration (2 of 4 steps, 42-55 minutes left)."""
+def remote_presence(updated: int = None, summary: bool = True) -> dict:
+    """bob@studio's presence: one Codex session runs Rules engine migration (2 of 4 steps, 42-55 minutes left), with
+    two crew members at work. Its run is the summary presence publishes (work.run_summary): the step counts, the steps
+    running now and the crew count, no whole plan; `summary=False` gives the whole brief an older devkit published."""
     updated = at(15, 13) if updated is None else updated
     brief = {"goal": "Rules engine migration", "state": "running", "step": 2, "steps": 4, "estimate": 90,
              "started": at(14, 25), "eta_min": 48, "eta_lo": 42, "eta_hi": 55, "active_min": 48.0, "wall_min": 48.0,
@@ -151,7 +153,8 @@ def remote_presence(updated: int = None) -> dict:
              "last": "migration done", "next": "rate tables", "updated": at(15, 13)}
     return {"user": "bob", "host": "studio", "updated": iso(updated), "locks": [],
             "sessions": [{"agent": "codex", "project": "acme/lending-rules", "branch": "feat/rules-engine",
-                          "started": at(14, 25), "status": "", "last_seen": updated, "progress": brief,
+                          "started": at(14, 25), "status": "", "last_seen": updated,
+                          "progress": work.run_summary(brief) if summary else brief,
                           "subagents": 2, "turn_started": at(15, 10)}]}
 
 

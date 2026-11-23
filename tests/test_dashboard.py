@@ -2283,6 +2283,48 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertIn("Pull request #41 draft", out["row"])
 
 
+@unittest.skipUnless(CHROME, NO_CHROME)
+class RemoteRunCardTests(unittest.TestCase):
+    """Background work and the run drawer draw a run on another Mac from the summary its presence publishes
+    (work.run_summary): the step counts, the steps running now and the crew count. Its plan holds only the current
+    steps, so counting that plan said "0 of 1 steps" for a run 3 steps along."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = fixture_data(Path(cls.tmp.name) / "handoff", NOW)
+        step = lambda name, state: {"name": name, "state": state, "est": 10, "min": 4.0, "owner": "main"}  # noqa: E731
+        brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                 "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                 "plan": [step("load", "done"), step("match", "done"), step("spike", "skipped"), step("report", "done"),
+                          step("rows", "running"), step("totals", "pending")],
+                 "agents": [{"label": "Tank: rows", "state": "running", "min": 4.0}]}
+        next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = work.run_summary(brief)
+        cls.page = dashboard.page(d)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_card_and_the_drawer_count_the_steps_and_the_crew_from_the_summary(self):
+        out = browse(self.page, """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);
+            out.bar = $(".rbar", c).getAttribute("aria-valuetext"); out.steps = $$(".rsteps li", c).map(text);
+            $(".rh a", c).click(); await tick(200); out.figs = text($("#modal .mfigs"));
+            out.sec = $$("#modal .msec").map(s => [s.getAttribute("aria-label"), text(s)]).filter(s => s[0] === "Steps" || s[0] === "Crew");""",
+                     1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertTrue(out["bar"].startswith("3 of 5 steps"), out["bar"])               # skipped steps count in neither number
+        self.assertIn("○ 1 more to do · ✓ 3 done · – 1 skipped", out["card"])
+        self.assertEqual([s.split(" · ")[0] for s in out["steps"]], ["▸ Running: rows"])
+        self.assertIn("1 crew member working", out["card"])
+        self.assertIn("Progress 3 of 5 steps", out["figs"])
+        steps, crew = dict(out["sec"])["Steps"], dict(out["sec"])["Crew"]
+        self.assertIn("rows", steps)
+        self.assertIn("studio shares only the steps running now", steps)
+        self.assertNotIn("Only the main session worked on this run.", crew)
+        self.assertIn("1 crew member working", crew)
+
+
 class LivePageTests(unittest.TestCase):
     """The live page against a small stand-in server: the session-ended state, and an update that arrives while a drawer is open."""
 

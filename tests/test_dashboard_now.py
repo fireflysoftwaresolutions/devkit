@@ -233,7 +233,8 @@ class NowScreenTests(unittest.TestCase):
         def long(d):
             step = lambda name, state, mins: {"name": name, "state": state, "est": 10, "min": mins, "owner": "main"}  # noqa: E731  (a remote run's plan step)
             plan = [step(f"step {i}", "done", 10) for i in range(90)] + [step("wire", "running", 2)] + [step(f"open {i}", "pending", 0) for i in range(30)]
-            d["runs"] = [dict(d["runs"][1], plan=plan, step=90, steps=121)]
+            # an older devkit's whole plan: the server counts it as it counts a summary (dashnow._remote_steps)
+            d["runs"] = [dict(d["runs"][1], plan=plan, step=90, steps=121, steps_done=90, steps_total=121, current=["wire"], current_more=0)]
         out = self.probe("""const s = $(".now-run .now-strip"); out.glyphs = $$(".now-step", s).map(g => g.getAttribute("data-state")); out.rest = text($(".now-rest", s));""", change=long)
         self.assertEqual(out["glyphs"], ["done", "running", "pending", "pending", "pending", "pending", "pending", "pending"])
         self.assertEqual(out["rest"], "+89 done")
@@ -504,6 +505,57 @@ class NowSnapshotTests(unittest.TestCase):
         self.assertFalse(out["d1"])
         self.assertEqual((out["open"], out["title"], out["hash"]), (True, "Invoice export", "#/now?modal=run%3Aclaude-s1"))
         self.assertEqual(out["focus"], [True, "All3"])                   # the same control, though controls above it left
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowRemoteRunTests(unittest.TestCase):
+    """A run on another Mac reaches Now as the summary its presence publishes: the step counts, the steps running now
+    (its plan holds only those) and how many crew members work. Its block says how far it is from those counts."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def remote(self, change=None) -> dict:
+        d = with_doc(self.base, "example")
+        if change:
+            change(next(r for r in d["runs"] if r["machine"]))
+        self.assertEqual(now_contract.check(areas(d)), [])
+        with utc():
+            out = T.browse(frozen(dashboard.page(d)), """const r = $$(".now-run")[1]; out.row = text(r); out.status = text($(".now-status", r));
+                out.current = $(".now-current", r) ? text($(".now-current", r)) : null; out.label = $(".now-strip", r).getAttribute("aria-label");
+                out.glyphs = $$(".now-step", r).map(g => g.getAttribute("data-state")); out.rest = $(".now-rest", r) ? text($(".now-rest", r)) : null;""",
+                           1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        return out
+
+    def test_the_block_counts_the_steps_and_names_the_current_ones_and_the_crew(self):
+        out = self.remote()
+        self.assertEqual(out["status"], "2 of 4 steps · 48 min of about 1 h 30 · 2 crew members working")
+        self.assertEqual(out["current"], "Current steps: rate tables, parity tests")
+        self.assertEqual(out["glyphs"], ["done", "done", "running", "running"])   # its done steps, then the ones running now
+        self.assertEqual(out["label"], "2 of 4 steps done. Lands 15:55–16:10")
+
+    def test_a_long_run_counts_its_done_steps_and_more_current_steps(self):
+        out = self.remote(lambda r: r.update(steps_done=40, steps_total=60, steps_skipped=2, current_more=2, crew=1,
+                                             current=["rate tables", "parity tests", "fees"],
+                                             plan=r["plan"] + [dict(r["plan"][0], name="fees", state="blocked")]))
+        self.assertTrue(out["status"].startswith("40 of 60 steps · "), out["status"])
+        self.assertTrue(out["status"].endswith(" · 1 crew member working"), out["status"])
+        self.assertEqual(out["current"], "Current steps: rate tables, parity tests, fees and 2 more")
+        self.assertEqual((out["glyphs"][0], out["rest"]), ("done", "+39 done"))
+        self.assertEqual(out["glyphs"][1:4], ["running", "running", "blocked"])
+
+    def test_an_unknown_count_shows_a_dash_and_no_crew_says_nothing(self):
+        out = self.remote(lambda r: r.update(steps_done=None, crew=0, current=[], plan=[]))
+        self.assertTrue(out["status"].startswith("— of 4 steps · "), out["status"])
+        self.assertNotIn("crew", out["status"])
+        self.assertIsNone(out["current"])
 
 
 class NowJobRowTests(unittest.TestCase):

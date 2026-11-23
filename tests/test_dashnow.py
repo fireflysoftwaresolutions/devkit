@@ -777,6 +777,49 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(get({})[0], 401)
 
 
+class RemoteRunSummaryTests(unittest.TestCase):
+    """Another Mac's presence carries a summary of each run (work.run_summary): the step counts, the steps running now
+    and how many crew members work, never the whole plan. Its run on Now reads them, from an older devkit's whole plan
+    too, and keeps them to sane types and sizes (another Mac's presence is untrusted)."""
+    SHOWN = ("steps_done", "steps_total", "steps_skipped", "current", "current_more", "crew")
+
+    def remote(self, presence):
+        kw = fx.empty()
+        kw["team"] = [presence]
+        return next(r for r in areas(kw)["runs"] if r["machine"])
+
+    def test_a_remote_run_has_its_step_counts_current_steps_and_crew_from_the_summary(self):
+        run = self.remote(fx.remote_presence())
+        self.assertEqual({k: run.get(k) for k in self.SHOWN},
+                         {"steps_done": 2, "steps_total": 4, "steps_skipped": 0,
+                          "current": ["rate tables", "parity tests"], "current_more": 0, "crew": 2})
+
+    def test_an_older_devkits_whole_plan_gives_the_same_counts(self):
+        p = fx.remote_presence(summary=False)
+        p["sessions"][0]["progress"]["plan"].insert(0, {"name": "spike", "state": "skipped", "est": 10, "min": 0.0,
+                                                        "owner": "main"})
+        run = self.remote(p)
+        self.assertEqual({k: run.get(k) for k in self.SHOWN},
+                         {"steps_done": 2, "steps_total": 4, "steps_skipped": 1,
+                          "current": ["rate tables", "parity tests"], "current_more": 0, "crew": 2})
+
+    def test_counts_and_names_from_another_mac_keep_their_types_and_sizes(self):
+        p = fx.remote_presence()
+        p["sessions"][0]["progress"].update(steps_done="2", steps_total=7.5, steps_skipped=-1, crew=1e9,
+                                            current=["x" * 500, 3, None, " ", "rate\ntables", "b", "c"],
+                                            current_more=True)
+        run = self.remote(p)
+        self.assertEqual({k: run.get(k) for k in self.SHOWN},
+                         {"steps_done": None, "steps_total": None, "steps_skipped": None,
+                          "current": ["x" * 119 + "…", "rate tables", "b"], "current_more": 0, "crew": None})
+
+    def test_more_steps_done_than_the_total_is_no_count(self):
+        p = fx.remote_presence()
+        p["sessions"][0]["progress"].update(steps_done=9, steps_total=4)
+        run = self.remote(p)
+        self.assertEqual((run["steps_done"], run["steps_total"]), (None, 4))
+
+
 class ContractTests(unittest.TestCase):
     def test_each_state_keeps_the_contract_and_matches_its_golden(self):
         if os.environ.get("NOW_GOLDENS") == "write":

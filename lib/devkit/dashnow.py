@@ -378,8 +378,40 @@ def _remote_brief(b: dict, now: float) -> dict:
     out["agents"] = [dashboard.page_lane({"label": _line(a.get("label"), 120), "state": _line(a.get("state"), 20),
                                           "min": _num(a.get("min"))})
                      for a in (b.get("agents") if isinstance(b.get("agents"), list) else [])[:50] if isinstance(a, dict)]
+    out.update(_remote_steps(b, out["plan"]))
     out.update(decisions=[], questions=[], updates=[], moot=[])
     return out
+
+
+STEPS_MAX = 10_000     # steps or crew members another Mac can claim for one run
+CURRENT_SHOWN = 3      # steps running now that presence names (work.run_summary)
+
+
+def _count(v, hi: int = STEPS_MAX):
+    """A whole number in [0, hi], or None."""
+    n = _num(v, 0, hi)
+    return int(n) if n is not None and n == int(n) else None
+
+
+def _remote_steps(b: dict, plan: list) -> dict:
+    """How far another Mac's run is: the steps done of the steps that count (skipped steps count in neither), the
+    steps running or blocked now (at most CURRENT_SHOWN, by name, and how many more), and the crew members at work.
+    Presence publishes them as the run's summary (work.run_summary); an older devkit published the whole plan and
+    lanes instead, which give the same numbers."""
+    if "steps_total" not in b:
+        now = [s for s in plan if s["state"] in ("running", "blocked")]
+        lanes = b.get("agents") if isinstance(b.get("agents"), list) else []
+        skipped = sum(1 for s in plan if s["state"] == "skipped")
+        return {"steps_done": sum(1 for s in plan if s["state"] == "done"), "steps_total": len(plan) - skipped,
+                "steps_skipped": skipped, "current": [s["name"] for s in now[:CURRENT_SHOWN] if s["name"]],
+                "current_more": max(0, len(now) - CURRENT_SHOWN),
+                "crew": sum(1 for a in lanes[:50] if isinstance(a, dict) and a.get("state") == "running")}
+    done, total = _count(b.get("steps_done")), _count(b.get("steps_total"))
+    names = b.get("current") if isinstance(b.get("current"), list) else []
+    return {"steps_done": done if done is None or total is None or done <= total else None, "steps_total": total,
+            "steps_skipped": _count(b.get("steps_skipped")),
+            "current": [n for n in (_line(c, 120) for c in names[:20] if isinstance(c, str)) if n][:CURRENT_SHOWN],
+            "current_more": _count(b.get("current_more")) or 0, "crew": _count(b.get("crew"), 1000)}
 
 
 def _remote_run(s, h: str, user: str, updated, now: float):

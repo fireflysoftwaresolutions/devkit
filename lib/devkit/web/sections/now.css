@@ -65,7 +65,8 @@
 .now-rt{margin:0;font-size:var(--fs-body);font-weight:600;line-height:1.45;color:var(--ink-strong);overflow-wrap:anywhere}
 .now-rt a{color:inherit;text-decoration:none}
 .now-run:hover .now-rt a,.now-rt a:hover{text-decoration:underline}
-.now-meta,.now-status{margin:var(--s1) 0 0;font-size:var(--fs-meta);color:var(--ink-2)}
+.now-meta,.now-status,.now-current{margin:var(--s1) 0 0;font-size:var(--fs-meta);color:var(--ink-2)}
+.now-current{overflow-wrap:anywhere}
 .now-lands{margin:var(--s1) 0 0;font-size:var(--fs-body);line-height:1.5;color:var(--ink)}
 .now-strip{display:flex;align-items:center;gap:var(--s2);margin:var(--s3) 0 var(--s2);min-width:0;color:var(--ink-2)}
 .now-track{flex:none;overflow:visible}
