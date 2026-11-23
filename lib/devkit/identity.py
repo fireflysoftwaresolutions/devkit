@@ -1148,15 +1148,18 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
 #     this process, and so could a closed one that ran in the background or got no clean result: the call is then
 #     contested (_later_calls). A Claude Code foreground call that got its clean result owns no running process;
 #   - on Codex, a dev process that replaced the call's shell (no shell is left to show the command) in a session
-#     where a member may run carries the caller's own thread id (_thread_proof);
+#     where a member may run carries the caller's own thread id (_thread_check). Any process can set CODEX_THREAD_ID,
+#     so this keeps callers from being mixed up and proves nothing against a member that sets it: the checks above
+#     and below are what hold;
 #   - for a state change or a wait: no other process right below the agent, started in the call's time, claims the
 #     same command (a second claimant), and the call's pin, written by its first dev command with O_EXCL, names that
 #     same process; either one marks the call contested, which refuses it for everyone and is audited.
 # A read that fails these checks falls to the ledger rules (text equality decides reads only); a wait or a state
-# change names nobody. A background call's entry closes as soon as it starts; its record is kept for
-# BACKGROUND_KEEP_S for its reads and waits only (keep_background), with its pin and use marks, and a state change in
-# it is refused with the foreground fix. A text call that ends with no result (refused, failed, expired) after a state
-# change ran under its name is audited (calls.text-use-without-result).
+# change names nobody. A plain call runs exactly one dev command: a second verified use of it is contested. A
+# background call's entry closes as soon as it starts; its record is kept for BACKGROUND_KEEP_S for its reads and
+# waits only (keep_background), with its pin and use marks, and a state change in it is refused with the foreground
+# fix. A text call that ends with no result (refused, failed, expired, or still open when the session ends) after a
+# state change ran under its name is audited (calls.text-use-without-result).
 BACKGROUND_KEEP_S = 60.0
 AMBIGUOUS = ("several open calls of this session run this very command, so devkit cannot tell whose it is: run it "
              "again in a moment, as a command of its own")
@@ -1366,10 +1369,11 @@ def _own_shells(agent: str, calls: list, procs: list) -> list:
     return owned
 
 
-def _thread_proof(agent: str, sid: str, caller: str, now) -> str:
+def _thread_check(agent: str, sid: str, caller: str, now) -> str:
     """A Codex dev process that replaced its call's shell: '' when no member may run in the session, or when
     CODEX_THREAD_ID names the caller (the member's own thread; the root thread for the tech lead once members showed
-    threads of their own, codex_threads per-agent); else why it does not."""
+    threads of their own, codex_threads per-agent); else why it does not. A guard against mix-ups, not proof: any
+    process can set the variable."""
     from . import progress, state
     run = progress.load_run(agent, sid) or {}
     if not (run.get("agents") or {}) and not _may_speak(progress, agent, sid, run, now):
@@ -1471,7 +1475,7 @@ def _text_verdict(agent: str, sid: str, args: list, changes: bool, now, strict: 
         if clash:
             return no("caller.conflict", clash, CONFLICT, above)
         if call == me:
-            why = _thread_proof(agent, sid, caller, now)
+            why = _thread_check(agent, sid, caller, now)
             if why:
                 return no("caller.text-no-thread", why, ancestors=above)
     if strict:
