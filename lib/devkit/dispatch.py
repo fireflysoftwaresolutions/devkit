@@ -152,23 +152,30 @@ SCOPE_HELP = ("--scope takes repository-relative paths or globs, such as lib/** 
 
 # Characters no path in the repository holds that a scope could hide: controls, format characters (U+202E turns
 # the text around where it is shown, U+200B shows nothing), surrogates, private-use characters, line and paragraph
-# separators, and the no-break space (U+00A0), which shows as a plain space. Code points with no character assigned
-# (Cn) are not among them: which those are depends on the Unicode version of the Python that reads the scope.
+# separators, and every space but the plain one (U+0020): a no-break, thin or ideographic space shows as a plain one.
+# Code points with no character assigned (Cn) are not among them, and which those are depends on the Unicode version
+# of the Python that reads the scope: a format character a newer version added (U+0890, in Unicode 14) is Cn, and so
+# kept, on a Python whose Unicode is older.
 _INVISIBLE = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
-_LOOKALIKE = ("\u00a0",)
+
+
+def _lookalike(c: str) -> bool:
+    """A space separator (Zs) other than the plain space: it shows as a plain space while the path holds another
+    character."""
+    return c != " " and unicodedata.category(c) == "Zs"
 
 
 def _scope_entries(scope: str) -> list:
     """The paths or globs of a step's --scope (delegate, dev progress assign), each one repository-relative or an
     absolute path that _repository_globs turns into one. Raises StepError, quoting none of the text, for a scope that
     holds a secret or an entry that cannot be a path in the repository: a URL or a remote (any ":"), a ".." segment,
-    or a control, invisible or look-alike character (_INVISIBLE, _LOOKALIKE). The step keeps its scope, so text that
+    or a control, invisible or look-alike character (_INVISIBLE, _lookalike). The step keeps its scope, so text that
     is not a path would be saved in the run unchecked."""
     if messaging.secret_shaped(scope):
         raise StepError(f"{SCOPE_HELP}; this one holds a secret, so devkit saved nothing")
     entries = [x.strip() for x in scope.split(",") if x.strip()]
     for x in entries:
-        if ":" in x or ".." in x.split("/") or any(unicodedata.category(c) in _INVISIBLE or c in _LOOKALIKE
+        if ":" in x or ".." in x.split("/") or any(unicodedata.category(c) in _INVISIBLE or _lookalike(c)
                                                    for c in x):
             raise StepError(f"{SCOPE_HELP}; one entry is a URL, a remote, a path outside the repository or text "
                             f"with a control, invisible or look-alike character, so devkit saved nothing")

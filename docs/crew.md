@@ -121,9 +121,11 @@ short version:
    there, a deleted one included; give the files relative to the repository instead. Both take paths in the
    repository by one rule: they refuse, saving nothing and quoting nothing, a scope that holds a secret, a URL, or
    a remote (any `:`), a `..` segment, a control or invisible character (such as U+202E, which turns the text around
-   where it is shown, or a line separator), a no-break space (U+00A0), which shows as a plain space, or a path
-   outside every checkout. The characters refused do not depend on the Python that runs devkit: a code point with no
-   character assigned yet is judged like any other.
+   where it is shown, or a line separator), a space other than the plain space (U+0020), such as the no-break space
+   (U+00A0) or the thin space (U+2009), which shows as a plain one, or a path outside every checkout. A code point
+   with no character assigned is kept. Which code points those are depends on the Unicode version of the Python that
+   runs devkit, so a format character that a newer Unicode version added (such as U+0890, in Unicode 14) is refused
+   only by a Python whose Unicode version has it.
 
    Outside the repository, a scope may name only these folders, as absolute or `~` paths: this project's plans
    folder in the handoff repository (`~/Development/.handoff/plans/<project id>/`), where the Software architect and

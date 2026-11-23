@@ -65,6 +65,21 @@ class PythonIndependentCharacterScopeTests(unittest.TestCase):
             self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("scope"), ["lib/\u0378.py"])
 
 
+class SpaceSeparatorScopeTests(unittest.TestCase):
+    # Each space separator but the plain space (U+0020) shows as a space while the path holds another character: only
+    # the no-break space (U+00A0) was refused, so a narrow, figure, thin or ideographic space named another file.
+    refused = PythonIndependentCharacterScopeTests.refused
+
+    def test_a_scope_with_any_space_separator_but_the_plain_space_is_refused(self):
+        for c in ("\u1680", "\u2000", "\u2007", "\u2009", "\u200a", "\u202f", "\u205f", "\u3000"):
+            with self.subTest(code=f"U+{ord(c):04X}"):
+                self.refused(f"lib/a{c}b.py")
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=T0)
+            pg.assign("parser", "Neo", scope="lib/a b.py", now=T0 + 60)
+            self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("scope"), ["lib/a b.py"])
+
+
 class AssignScopeTests(unittest.TestCase):
     def test_assign_refuses_a_scope_with_a_secret_and_saves_nothing(self):
         # assign saved the scope text unchecked: a token in it went into the run
