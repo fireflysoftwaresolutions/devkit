@@ -335,10 +335,12 @@ def listing_on() -> bool:
     return os.environ.get("DEVKIT_TEST_LISTING") == "1" or bool((core.CFG.get("test") or {}).get("listing"))
 
 
-def _list_key(top, runner, repo) -> str:
-    """What a runner's listing depends on: the runner and its command, its configuration files (their text, conftest
+def _list_key(top, runner, repo, argv=()) -> str:
+    """What a runner's listing depends on: the runner and its command, the listing command devkit runs (its script:
+    a devkit that lists otherwise lists again) and devkit's version, its configuration files (their text, conftest
     files too) and the names of the files of its language under its root (a new test file lists again)."""
-    h = hashlib.sha256(json.dumps([runner["name"], runner["root"], runner.get("exec")]).encode())
+    h = hashlib.sha256(json.dumps([runner["name"], runner["root"], runner.get("exec"), [str(x) for x in argv],
+                                   core.VERSION]).encode())
     for f in repo.existing:
         if _under(f, runner["root"]) and (f.rpartition("/")[2] in _LIST_CONFIGS or _lang(f) == runner["lang"]):
             h.update(f.encode() + b"\0")
@@ -434,7 +436,7 @@ def list_tests(top, runner, repo=None):
     cmd = _list_command(top, runner)
     if cmd is None:
         return None
-    key = _list_key(top, runner, repo)
+    key = _list_key(top, runner, repo, cmd[0])
     cache = core.STATE / "test-lists" / f"{project_key(top)[1]}--{hashlib.sha256((runner['root'] + runner['name']).encode()).hexdigest()[:12]}.json"
     held = core.read_json(cache, {}) or {}
     if held.get("key") == key and isinstance(held.get("files"), list):
