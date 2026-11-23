@@ -237,8 +237,7 @@ class NowScreenTests(unittest.TestCase):
         def long(d):
             step = lambda name, state, mins: {"name": name, "state": state, "est": 10, "min": mins, "owner": "main"}  # noqa: E731  (a remote run's plan step)
             plan = [step(f"step {i}", "done", 10) for i in range(90)] + [step("wire", "running", 2)] + [step(f"open {i}", "pending", 0) for i in range(30)]
-            # an older devkit's whole plan: the server counts it as it counts a summary (dashnow._remote_steps)
-            d["runs"] = [dict(d["runs"][1], plan=plan, step=90, steps=121, steps_done=90, steps_total=121, current=["wire"], current_more=0)]
+            d["runs"] = [dict(d["runs"][1], plan=plan, step=90, steps=121)]
         out = self.probe("""const s = $(".now-run .now-strip"); out.glyphs = $$(".now-step", s).map(g => g.getAttribute("data-state")); out.rest = text($(".now-rest", s));""", change=long)
         self.assertEqual(out["glyphs"], ["done", "running", "pending", "pending", "pending", "pending", "pending", "pending"])
         self.assertEqual(out["rest"], "+89 done")
