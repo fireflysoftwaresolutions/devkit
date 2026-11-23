@@ -1308,6 +1308,25 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
 
+    # A redirect or tee target this Mac cannot tell (a command's output, a folder `cd` went to that it cannot follow)
+    # may be any file, ~/.bashrc as well: next to a check it blocks the evidence and says why. A fresh file mktemp
+    # makes lies in a temporary folder, so a log written there still runs as written.
+    def test_a_check_written_to_a_target_this_mac_cannot_tell_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Assigned": "LOG=$(echo ~/.bashrc); pytest > $LOG",
+                                      "Substituted": 'pytest > "$(echo ~/.bashrc)"',
+                                      "Tee": 'npm test | tee -a "$(dirname ~/.zshrc)/.zshrc"',
+                                      "Unfollowed": 'cd "$(git rev-parse --show-toplevel)/.." && pytest > log.txt',
+                                      "Temp": 'LOG=$(mktemp); pytest > "$LOG"',
+                                      "Temp tee": "LOG=`mktemp -t pytest`; pytest | tee $LOG"})
+        for name in ("Assigned", "Substituted", "Tee", "Unfollowed"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"a path this Mac cannot tell next to a check")
+        for name in ("Temp", "Temp tee"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""

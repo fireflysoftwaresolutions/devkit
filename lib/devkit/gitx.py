@@ -2398,8 +2398,9 @@ _HOME_KINDS = ("home", "home-dot", "home-root")  # a write into the home folder,
 # a write outside the checkout, or a command run as root: setup with no check beside it; next to one, all but "home"
 # block the step instead, and "root-system" (a root write into a system folder) and "root-setup" (any other setup
 # command run with sudo, `sudo systemctl start …`) only next to a check that is not a download (_SETUP_FEEDS): a
-# check piped into sudo (`pytest | sudo cat`) cannot run here
-_OUTSIDE_KINDS = _HOME_KINDS + ("root-write", "root-system", "root-setup")
+# check piped into sudo (`pytest | sudo cat`) cannot run here; "unknown" (a redirect or tee target this Mac cannot
+# tell, _unknown_write) may be any file, a dotfile of the home folder as well, so it blocks next to a check too
+_OUTSIDE_KINDS = _HOME_KINDS + ("root-write", "root-system", "root-setup", "unknown")
 _ROOT_SETUP_KINDS = ("root-system", "root-setup")
 # the folders a hosted runner's own system setup writes as root (`curl … | sudo tee /etc/apt/keyrings/…`, a tool into
 # /usr/local/bin), and the temporary folders under them, which hold a check's log instead (/var/tmp, macOS's
@@ -2436,8 +2437,33 @@ def _home_write(targets, as_root: bool, state: dict):
     return found
 
 
+def _unknown_write(targets, state: dict):
+    """("unknown", why) for the first file a redirect or tee writes whose path this Mac cannot tell (_shell_path:
+    a command's output, another expansion, a relative path after a `cd` it could not follow): it may be any file, a
+    dotfile of the home folder as well, so devkit cannot rule out a write outside the checkout. None when every
+    target is known; a known one inside the checkout or a temporary folder is never in doubt. `targets`: the words
+    that name the files, as written."""
+    for w in targets:
+        if _shell_path(w, state["here"], state["env"]) is None:
+            return "unknown", f"runner prep (writes {w}, a path this Mac cannot tell)"
+    return None
+
+
 _DECLARES = frozenset({"export", "declare", "typeset", "readonly", "local"})
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=(.*)", re.S)
+# a variable the step sets to a fresh file or folder mktemp makes in the temporary folder (`LOG=$(mktemp)`,
+# `export DIR="$(mktemp -d -t ci)"`): with no template or folder of its own it is a new path there, never a file that
+# already exists. The shell reader keeps only `LOG=$` of it, so the piece's own text tells (_temp_assigned).
+_MKTEMP_ASSIGN = re.compile(r"(?:^|[\s;&|(])(?:(?:export|declare|typeset|readonly|local)(?:\s+[-+]\w+)*\s+)?"
+                            r"([A-Za-z_]\w*)=(\"?)(?:\$\(|`)\s*mktemp(?:\s+(?:-[dqu]+|-t\s*[\w.-]+|--tmpdir))*\s*"
+                            r"(?:\)|`)\2(?=$|[\s;&|)])")
+
+
+def _temp_assigned(code: str, state: dict) -> None:
+    """Each variable the piece sets to a fresh mktemp path (_MKTEMP_ASSIGN) holds a path in the temporary folder for
+    the rest of the step, so a log written through it (`pytest > "$LOG"`) is known to stay there."""
+    for m in _MKTEMP_ASSIGN.finditer(code):
+        state["env"][m.group(1)] = os.path.join(tempfile.gettempdir(), f"mktemp-{m.group(1)}")
 
 
 def _assign(argv, words, state: dict) -> None:
@@ -2514,7 +2540,8 @@ def _prep_one(argv, words, as_root: bool, state: dict):
         # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs. A
         # dotfile or dot folder, or a write as root, blocks the step instead next to a check.
         targets = _written(words, _WRITERS[name])
-        found = _home_write(targets, as_root, state)
+        found = _home_write(targets, as_root, state) or (_unknown_write(targets, state) if name == "tee" and
+                                                         not as_root else None)
         if found:
             return found
         # A write as root cannot run here, so next to a check it blocks: skipping `pytest | sudo tee /tmp/x.log`
@@ -2624,7 +2651,9 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     a substitution that runs the setup, next to a check, is tangled: the setup cannot be taken out without the check.
     `source`/`.` and a command or process substitution (see _substitutions) are checks. A write into the home folder,
     by a writing command or a shell redirect, is setup only in a piece that runs no check: `pytest | tee
-    ~/pytest.log` and `pytest > ~/pytest.log` are the check, and run."""
+    ~/pytest.log` and `pytest > ~/pytest.log` are the check, and run. A redirect or tee target this Mac cannot tell
+    (_unknown_write) is setup alone too, and next to a check it blocks the piece, as a dotfile does: `LOG=$(echo
+    ~/.bashrc); pytest > $LOG` is not run. A variable set to a fresh mktemp path is known (_temp_assigned)."""
     code = piece["code"]
     piped = _PIPED_INSTALLER.search(code)
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
@@ -2643,9 +2672,16 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             target = got[1].split("writes ", 1)[1].split(" into the home folder", 1)[0]
             held = held or ("tangled", f"writes {target} into a dotfile of the home folder next to a check, which "
                                        f"would change this Mac's own settings: write the log inside the checkout")
+        elif got[0] == "unknown":
+            target = got[1].split("writes ", 1)[1].split(", a path this Mac cannot tell", 1)[0]
+            held = held or ("tangled", f"writes {target}, a path this Mac cannot tell next to a check: it may be any "
+                                       f"file, a dotfile of the home folder as well, so devkit cannot rule out a "
+                                       f"write outside the checkout: write the log to a path inside the checkout or "
+                                       f"from mktemp")
 
     for argv, words, as_root, container, redirects in _commands(code, state=state):
-        shell = _home_write(*redirects, state)  # `pytest > ~/.bashrc`: the shell writes it, whatever the command
+        # `pytest > ~/.bashrc`, `pytest > "$(…)"`: the shell writes it, whatever the command
+        shell = _home_write(*redirects, state) or _unknown_write(redirects[0], state)
         if shell:
             wrote(shell, words)
         nested = nested or container
@@ -2664,6 +2700,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             roots.append(got[1])
         elif not _informational(argv, words):
             checks.append(words)
+    _temp_assigned(code, state)
     fed = not roots and all(os.path.basename(c[0]) in _SETUP_FEEDS for c in checks)  # only downloads beside it
     if system and not held and not fed:  # `pytest | sudo tee /var/log/pytest.log`: a check's output, as root
         held = ("root", f"runs {system} as root (sudo), which dev ci --run does not do on this Mac")
@@ -2681,7 +2718,8 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
         inside = dict(state, env=dict(state["env"]))  # a subshell of its own: its `cd` and variables stay in it
         for argv, words, as_root, container, redirects in _commands(script, state=inside):
             got = None if container else _prep_one(argv, words, as_root, inside)
-            got = got if got and got[0] in ("setup",) + _OUTSIDE_KINDS else _home_write(*redirects, inside)
+            got = got if got and got[0] in ("setup",) + _OUTSIDE_KINDS else \
+                _home_write(*redirects, inside) or _unknown_write(redirects[0], inside)
             if got:
                 setup, first, nested = setup or got[1], first or " ".join(words[:2]), True
     why = setup or install
