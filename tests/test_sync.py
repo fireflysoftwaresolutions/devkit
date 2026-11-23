@@ -871,6 +871,56 @@ class TeamPolicySyncTests(unittest.TestCase):
                 self.assertEqual(cli.commit_push(quiet=True, urgent=True), "failed")
                 self.assertEqual((len(failed()), len(notices)), (2, 2))
 
+    def test_a_broken_policy_the_repository_also_has_is_held_with_its_reason(self):
+        # An older Mac pushed a broken policy/audit.json and this Mac broke its own copy too: the hold put the
+        # repository's version back, found it broken, and said this Mac's text "could not be moved", with no .why
+        # beside the held copy. The text is held with its reason, and the record says the repository's version
+        # cannot be loaded either.
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            _git(m.other, "pull", "-q")
+            (m.other / "policy" / "audit.json").write_text("{")
+            _git(m.other, "commit", "-qam", "an older Mac broke it")
+            _git(m.other, "push", "-q")
+            _git(m.here, "pull", "-q")
+            mine = '{"redact": ' + json.dumps(self.TOKEN)
+            policy.write_text(mine)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cli.commit_push(quiet=False, urgent=True)
+            held = work.held_policies()
+            self.assertEqual([(h["path"], h["why"], Path(h["saved"]).read_text()) for h in held],
+                             [("policy/audit.json", "is not valid JSON", mine)])
+            self.assertTrue(Path(held[0]["saved"]).with_suffix(".why").is_file())
+            self.assertEqual(policy.read_text(), "{")  # the repository's version, as it was pulled
+            blocked = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
+            self.assertEqual([r["target"] for r in blocked], ["policy/audit.json"])
+            self.assertNotIn("could not be moved", err.getvalue())
+            self.assertIn("the handoff repository's version cannot be loaded either", err.getvalue())
+            found = subprocess.run(["git", "-C", str(remote), "log", "--all", "-p"], capture_output=True, text=True)
+            self.assertNotIn(self.TOKEN, found.stdout)
+
+    def test_a_new_broken_policy_that_cannot_be_deleted_is_left_out_without_stopping_the_sync(self):
+        # A PermissionError removing the file escaped the hold after git had taken it out of the index: the sync
+        # stopped. It counts as a restore that failed: the file stays on this Mac, out of every commit.
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            new = m.here / "policy" / "progress.json"
+            new.write_text("{")
+            write_note(m.here, note_text("pushed beside a file that stays"))
+            (m.here / "policy").chmod(0o555)
+            try:
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(cli.commit_push(quiet=False, urgent=True), "pushed")
+            finally:
+                (m.here / "policy").chmod(0o755)
+            self.assertEqual(new.read_text(), "{")
+            self.assertNotIn("policy/progress.json", _git(remote, "ls-tree", "-r", "--name-only", "main"))
+            self.assertIn("pushed beside a file that stays", _git(remote, "show", f"main:projects/{PID}.md"))
+            self.assertIn("could not be moved", err.getvalue())
+            self.assertEqual(work.held_policies(), [])
+
     def test_a_policy_that_cannot_be_moved_aside_is_recorded_once_and_said_at_every_sync(self):
         with TwoMacs() as m:
             policy, good, remote = self.published(m)

@@ -978,6 +978,7 @@ def hold_broken_policies(root: Path, paths=None) -> list:
             if saved is not None and src.exists():  # a copy cut short holds nothing the repository lost
                 with contextlib.suppress(OSError):
                     saved.unlink()
+        theirs = ""  # why the repository's own version no Mac could load either
         if problem is None:
             if staged_text is not None and not keep_index:  # staged and broken too: held as well, once
                 with contextlib.suppress(OSError):
@@ -992,9 +993,15 @@ def hold_broken_policies(root: Path, paths=None) -> list:
             else:  # new since the last commit: out of the index, and gone
                 rc, drop = core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)[0], True
             if rc == 0 and drop:
-                with contextlib.suppress(FileNotFoundError):
+                try:
                     src.unlink()
-            if rc != 0 or src.exists() and audit.publishable_policy(src):  # git could not put the file back
+                except FileNotFoundError:
+                    pass
+                except OSError:  # a folder this Mac cannot write: the file stays, as a restore that failed
+                    rc = 1
+            if rc == 0 and not drop and src.exists():  # git put the repository's version back: broken too?
+                theirs = audit.publishable_policy(src)
+            if rc != 0 or drop and src.exists():  # git could not put the file back
                 problem = "git could not restore the repository's version"
                 with contextlib.suppress(OSError):
                     if not src.exists():  # moved, and nothing came back: a git add -A would commit a deletion
@@ -1015,6 +1022,8 @@ def hold_broken_policies(root: Path, paths=None) -> list:
                 "handoff repository keeps " + ("the deletion staged before it" if deleted else
                                                "the version staged before it" if keep_index else
                                                "the version it last pulled"))
+        if theirs:  # pushed by an older Mac, a raw commit, or an import: this Mac's commits leave it as it is
+            text += f", but the handoff repository's version cannot be loaded either: it {theirs}"
         audit.record("handoff.push", rel, text, "blocked", severity="critical")
         try:  # each live session hears of it once, with its next wake or hook
             from . import watch
@@ -1060,11 +1069,17 @@ def held_policies() -> list:
 def held_policy_line() -> str:
     """What a sync and a session start tell the developer while a held team policy text waits: each file, why no Mac
     could load it, when it was held and where its text is, and how to repair or drop it. "" when none waits."""
+    from . import audit
     held = held_policies()
     if not held:
         return ""
+
+    def theirs(rel: str) -> str:  # the repository's own version is broken too (an older Mac pushed it)
+        f = HANDOFF / rel
+        why = audit.publishable_policy(f) if _POLICY_FILE.fullmatch(rel) and f.is_file() else ""
+        return f", and the handoff repository's version cannot be loaded either: it {why}" if why else ""
     each = "; ".join(f"{h['path']}{' ' + h['why'] if h['why'] else ''} (held {h['time']}: {core.tilde(h['saved'])})"
-                     for h in held[:5])
+                     f"{theirs(h['path'])}" for h in held[:5])
     more = f"; and {len(held) - 5} more in {core.tilde(held_policy_dir())}" if len(held) > 5 else ""
     return (f"devkit moved this Mac's copy of {len(held)} team policy file{'s' if len(held) != 1 else ''} that no "
             f"Mac could load out of the handoff repository, which keeps the version it last pulled, so syncing goes "
