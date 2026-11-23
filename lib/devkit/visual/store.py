@@ -1572,7 +1572,7 @@ def _outcome(doc: dict, result: str, message: str) -> dict:
 def _verification(capture=None, check="none", **fields) -> dict:
     v = {"capture": capture, "check": check, "inside": None, "outside": None, "new_signals": [], "accepted_by": None,
          "diff": None, "anchor": None, "measured": None, "error": None, "commit": None, "map_version": None,
-         "review": None, "at": _now(), "by": who()}
+         "review": None, "compared": None, "at": _now(), "by": who()}
     v.update(fields)
     return v
 
@@ -1590,31 +1590,44 @@ def _failed(project: str, f: dict, message: str, commit, capture=None) -> dict:
     return _outcome(doc, "error", f"Could not verify {f['id']}: {error}{on}. Status: {doc['status']}.")
 
 
-def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = None) -> dict:
+def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = None, before_on=None) -> dict:
     """Keep the verification and move the status: verified when the check no longer fires; reopened when it still
     fires on a finding that was fixed or verified, else the status stays (R24). When the anchor was found by its old
     position only, the message and the history say so: what sits there now may be another element, so a check that
-    no longer fires there never verifies the finding (`result` is then "none"); a reviewer accepts it instead."""
+    no longer fires there never verifies the finding (`result` is then "none"); a reviewer accepts it instead. When
+    the picture before is not on this Mac (`v["compared"]` is False), nothing was compared: the history names the
+    Mac that took it by its machine id (`before_on`, as the record does), the message by its name (map.mac_name)."""
     check = (f.get("source") or "").partition(":")[2]
     only = f" · {OLD_POSITION}" if (v.get("anchor") or {}).get("found_by") == "region" else ""
+    away = v.get("compared") is False
+    taken = "picture before was taken on {} and is not on this Mac"
+    said = taken.format(vmap.mac_name(before_on))
+    # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history
+    on_id = before_on if identity.MACHINE_ID.fullmatch(str(before_on or "")) else "another Mac"
+    kept = f" · nothing compared: the {taken.format(on_id)}" if away else ""
+    nothing = f" · nothing compared: the {said}" if away else ""  # the words a person reads
 
     def fn(doc):
         doc["verification"] = v
         cur = doc.get("status")
         if result == "pass":
             doc["status"] = "verified"
-            _history(doc, "verified", f"{check} no longer fires on {what}{only}")
+            _history(doc, "verified", f"{check} no longer fires on {what}{only}{kept}")
         elif result == "fail":
             doc["status"] = "reopened" if cur in REOPENS else cur
-            _history(doc, "reopened" if doc["status"] != cur else "verify", f"still there on {what}: {check}{only}")
+            _history(doc, "reopened" if doc["status"] != cur else "verify", f"still there on {what}: {check}{only}{kept}")
         else:
-            _history(doc, "verify", note)
+            _history(doc, "verify", f"{note}{kept}" if note else note)
     doc = _update(project, f["id"], fn)
     fid = doc["id"]
+    note = f"{note}{nothing}" if note else note
     if result == "pass":
-        message = f"{fid}  verified · {check} no longer fires on {what}{only}"
+        message = f"{fid}  verified · {check} no longer fires on {what}{only}{nothing}"
     elif result == "fail":
-        message = f"{fid} is still there: {check} fires again on {what}{only}. Status: {doc['status']}."
+        message = f"{fid} is still there: {check} fires again on {what}{only}{nothing}. Status: {doc['status']}."
+    elif f.get("source") == "judgment" and away:
+        message = (f"{fid} came from judgment, and its {said}. Look at {what}, then accept it: dev visual verify {fid} "
+                   f"--accept --why \"…\"")
     elif f.get("source") == "judgment":
         message = (f"{fid} came from judgment. Before and after are in the report; accept with dev visual verify "
                    f"{fid} --accept --why \"…\"")
@@ -1635,9 +1648,16 @@ def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: li
         if box and list(box) not in boxes:
             boxes.append(list(box))
     commit = (after.get("env") or {}).get("commit")
+    # the picture before can be on the Mac that took it only (records sync, pictures do not): then the check decides
+    # on the new capture alone, and nothing is compared
+    sha = (before.get("image") or {}).get("sha256")
+    here = isinstance(sha, str) and (store_dir(project) / "blobs" / f"{sha}.png").is_file()
+    before_on = None if here else str((before.get("image") or {}).get("where") or "").removeprefix("local:") or None
     try:
         cmp = vcompare.compare_captures(records_dir(project), store_dir(project), before["id"], after["id"],
-                                        boxes or None)
+                                        boxes or None) if here else \
+            {"inside": None, "outside": None, "diff": None, "signals": [], "pixels": None, "changed": None,
+             "regions_total": None}
     except vcompare.CompareError as e:
         return _failed(project, f, str(e), commit, capture=after["id"])
     source = f.get("source") or ""
@@ -1660,8 +1680,8 @@ def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: li
         note = f"before and after are {before['id']} and {after['id']}; waiting for a reviewer"
     refs = _number_regions(project, after["id"], cmp["signals"]) if regions and cmp["signals"] else []
     v = _verification(after["id"], result, inside=cmp["inside"], outside=cmp["outside"], new_signals=refs,
-                      diff=cmp["diff"], anchor=at, measured=measured, commit=commit, review=review)
-    out = _settle(project, f, v, result, after["id"], note)
+                      diff=cmp["diff"], anchor=at, measured=measured, commit=commit, review=review, compared=here)
+    out = _settle(project, f, v, result, after["id"], note, before_on)
     out["numbers"] = {k: cmp[k] for k in ("pixels", "changed", "regions_total")}
     return out
 
@@ -1922,9 +1942,9 @@ def share(project: str, rid: str) -> dict:
         try:
             data = blob.read_bytes()
         except OSError:
-            where = (c.get("image") or {}).get("where") or "another Mac"
-            raise VisualError(f"The picture of {cid} is not on this Mac ({where}). Share it from there, or capture "
-                              f"it here: dev visual capture --again {cid}") from None
+            mac = vmap.mac_name(str((c.get("image") or {}).get("where") or "").removeprefix("local:"))
+            raise VisualError(f"The picture of {cid} is not on this Mac: it was taken on {mac}. Share it from there, "
+                              f"or capture it here: dev visual capture --again {cid}") from None
         if hashlib.sha256(data).hexdigest() != sha:
             raise VisualError(f"The picture of {cid} does not match its record (SHA-256 {sha[:12]}…). Nothing was "
                               f"shared. Capture it again: dev visual capture --again {cid}")

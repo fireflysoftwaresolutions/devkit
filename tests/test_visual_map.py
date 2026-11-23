@@ -27,7 +27,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, identity  # noqa: E402
+from devkit import core, identity, work  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
 
 APP = ROOT / "tests" / "fixtures" / "visual" / "app"
@@ -45,6 +45,40 @@ HOST = "ana-macbook-pro"  # this Mac's hostname in these tests: the map, which s
 def mac(mid):
     # this Mac as identity.machine names it: the machine id, with the hostname as its label
     return identity.Machine(mid, HOST, {HOST: [[0, 4e9]]})
+
+
+def presence(folder: Path, who: str, label: str):
+    # the presence file another Mac publishes in the handoff repository: user@<machine id>, with its hostname as label
+    folder.mkdir(parents=True, exist_ok=True)
+    user, _, host = who.partition("@")
+    (folder / f"{who}.json").write_text(json.dumps({"user": user, "host": host, "label": label}))
+
+
+class MacNameTest(unittest.TestCase):
+    # A record names a Mac by its machine id, which says nothing to a reader; a message names it as the dashboard
+    # does (work.display): its short name, with the id in parentheses
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="devkit-visual-mac-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        for p in (mock.patch.object(work, "PRESENCE", self.tmp / "presence"),
+                  mock.patch.object(identity, "machine", lambda now=None: mac("m-test0001"))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_this_macs_id_reads_as_its_short_name_with_the_id(self):
+        self.assertEqual(vmap.mac_name("m-test0001"), f"{HOST} (m-test0001)")
+
+    def test_another_macs_id_reads_as_the_name_its_presence_publishes(self):
+        presence(self.tmp / "presence", "bob@m-studio01", "studio")
+        self.assertEqual(vmap.mac_name("m-studio01"), "studio (m-studio01)")
+
+    # a Mac with no presence here, or one whose label is not a plain short hostname (presence is another person's
+    # text), is another Mac with its id; a record from before the machine id names a hostname, and keeps it
+    def test_an_id_without_a_plain_name_is_another_mac_and_a_hostname_stays(self):
+        self.assertEqual(vmap.mac_name("m-studio01"), "another Mac (m-studio01)")
+        presence(self.tmp / "presence", "bob@m-studio01", "Bob's <b>Mac</b>")
+        self.assertEqual(vmap.mac_name("m-studio01"), "another Mac (m-studio01)")
+        self.assertEqual([vmap.mac_name(h) for h in (None, "", "mac-studio")], ["another Mac", "another Mac", "mac-studio"])
 
 
 @unittest.skipUnless(NODE and GITLEAKS, "node and gitleaks run the redaction (brew install node gitleaks)")
@@ -102,9 +136,11 @@ class MapTest(unittest.TestCase):
         with mock.patch.object(identity, "machine", lambda now=None: mac("m-studio01")):
             vmap.add_node(P, "invoices.list", "Invoices", route="/invoices", by="kid")
         stale["partial"] = True
-        with self.assertRaises(vmap.MapConflict) as cm:
+        # the Mac that changed it, by the name its presence publishes, with its id
+        presence(self.tmp / "presence", "kid@m-studio01", "studio")
+        with mock.patch.object(work, "PRESENCE", self.tmp / "presence"), self.assertRaises(vmap.MapConflict) as cm:
             vmap.save(P, stale, base=1, why="crawl from /", by="neo")
-        self.assertEqual(str(cm.exception), "The map changed to v2 on m-studio01. Run the command again on v2.")
+        self.assertEqual(str(cm.exception), "The map changed to v2 on studio (m-studio01). Run the command again on v2.")
         self.assertFalse((self.dir / "map" / "v3.json").exists())
         self.assertEqual(vmap.load(P)["version"], 2)
         self.assertFalse(vmap.load(P)["partial"])

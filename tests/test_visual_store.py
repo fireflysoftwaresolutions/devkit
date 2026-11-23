@@ -39,10 +39,11 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, gc, identity  # noqa: E402
+from devkit import core, gc, identity, work  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
 from devkit.visual import report  # noqa: E402
 from devkit.visual import store  # noqa: E402
+from test_visual_map import presence  # noqa: E402
 
 P = "acme/billing"
 NODE = shutil.which("node")
@@ -817,6 +818,24 @@ class ShareTest(StoreCase):
             store.share(P, f["id"])
         self.assertIn("remote", str(e.exception))
         self.assertFalse((self.records / "media").exists())
+
+    # a picture taken on another Mac is not here to share: the refusal names that Mac as the dashboard does, its
+    # name with its machine id, never the record's bare local:<id>
+    def test_share_names_the_mac_a_missing_picture_is_on(self):
+        c = self.shot(check=False)
+        f = store.add_finding(P, c["id"], region=[0, 0, 100, 40], pass_="layout", rules=["nielsen:8"],
+                              severity="P2", title="t", impact="i", evidence="e", fix="x")
+        rec = self.record(c["id"])
+        rec["image"]["where"] = "local:m-studio01"
+        store.save(P, rec)
+        (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+        self.patched(work, "PRESENCE", new=self.tmp / "presence")
+        presence(self.tmp / "presence", "bob@m-studio01", "studio")
+        with self.assertRaises(store.VisualError) as e:
+            store.share(P, f["id"])
+        self.assertEqual(str(e.exception), f"The picture of {c['id']} is not on this Mac: it was taken on studio "
+                                           f"(m-studio01). Share it from there, or capture it here: dev visual capture "
+                                           f"--again {c['id']}")
 
 
 # --------------------------------------------------------------------------- records read, replays, the driver

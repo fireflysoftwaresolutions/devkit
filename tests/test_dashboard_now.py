@@ -744,6 +744,14 @@ class CopyToastPlaceholderTests(unittest.TestCase):
         self.assertEqual(self.said("""dev wt rm 'it'"'"'s <x>'"""), "Copied. Run it in your terminal.")
         self.assertEqual(self.said("""dev task add 'parse <y> as it'"'"'s "…"' --why <why>"""), "Copied. Replace <why>, then run it.")
 
+    # quotes are read by kind, as the shell reads them: an apostrophe inside double quotes opens no value, so the
+    # <why> after it is still to be replaced; a double quote inside a single-quoted value is data, and so is a value
+    # around the '\'' that POSIX shells write for an apostrophe
+    def test_quotes_are_read_by_kind_so_an_apostrophe_in_double_quotes_hides_no_placeholder(self):
+        self.assertEqual(self.said("""dev task add "don't" --why <why> && echo 'x'"""), "Copied. Replace <why>, then run it.")
+        self.assertEqual(self.said("""dev wt rm 'say "<x>"' && git push <remote>"""), "Copied. Replace <remote>, then run it.")
+        self.assertEqual(self.said("""dev wt rm 'it'\\''s <x>'"""), "Copied. Run it in your terminal.")
+
 
 @unittest.skipUnless(T.CHROME, T.NO_CHROME)
 class CopyToastTests(unittest.TestCase):

@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -32,7 +33,9 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
+from devkit import identity, work  # noqa: E402
 from devkit.visual import report  # noqa: E402
+from test_visual_map import presence  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "visual" / "records"
 PRODUCT, SCREEN, COMPONENT = "VA-g33z0k2m4q", "VA-g33y9s1t2u", "VA-g33y8c1o2p"
@@ -219,6 +222,23 @@ class ProductReport(unittest.TestCase):
         self.assertIn("Captured on mac-studio by Frontend engineer (Trinity). The picture stays on that Mac. "
                       "Capture it here: dev visual capture --again VC-g33z1c5h8j", capture_view.text())
         self.assertEqual(list(capture_view.find("img")), [])
+
+    # a record names the Mac by its machine id; the report names it as the dashboard does, the name its presence
+    # publishes with the id, in the note where the picture is missing and in the capture's details
+    def test_a_capture_from_another_mac_names_it_by_its_published_name_and_its_id(self):
+        records_dir, store = fixture_copy(self)
+        path = records_dir / "captures" / "VC-g33z1c5h8j.json"
+        rec = json.loads(path.read_text())
+        rec["by"]["host"], rec["image"]["where"] = "m-studio01", "local:m-studio01"
+        path.write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
+        presence(records_dir.parent / "presence", "ana@m-studio01", "studio")
+        with mock.patch.object(work, "PRESENCE", records_dir.parent / "presence"), \
+                mock.patch.object(identity, "machine", lambda now=None: identity.Machine("m-test0001", "laptop", {})):
+            root = Tree(report.render_html(report.load(records_dir, store, PRODUCT))).root
+        text = " ".join(root.one("section", id="VC-g33z1c5h8j").text().split())
+        self.assertIn("Captured on studio (m-studio01) by Frontend engineer (Trinity). The picture stays on that Mac.", text)
+        self.assertRegex(text, r"Taken: [\d-]+ [\d:]+ by Frontend engineer \(Trinity\) on studio \(m-studio01\)")
+        self.assertNotRegex(text, r"on m-studio01")
 
     def test_vd_ac_25_the_verified_finding_shows_before_after_and_difference(self):
         detail = self.finding_detail("VF-g33z2a1c9d")
