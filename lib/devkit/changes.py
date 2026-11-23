@@ -21,6 +21,7 @@ after a release has removed every fragment.
 from __future__ import annotations
 
 import codecs
+import os
 import re
 import time
 from pathlib import Path
@@ -39,10 +40,11 @@ _UNRELEASED = re.compile(r"(?i)^##\s*\[?unreleased\]?\s*$")
 
 
 class FragmentError(ValueError):
-    """A fragment devkit cannot read: its file, the line, and why."""
+    """A fragment devkit cannot read, or an entry of changes/ that is no fragment: its path, the line (0: the whole
+    entry), and why."""
 
     def __init__(self, where: str, line: int, reason: str):
-        super().__init__(f"{where}:{line}: {reason}")
+        super().__init__(f"{where}:{line}: {reason}" if line else f"{where}: {reason}")
         self.where, self.line, self.reason = where, line, reason
 
 
@@ -69,18 +71,25 @@ def fragment_path(branch) -> str:
     return f"{FOLDER}/{name or 'change'}.md"
 
 
-def fragments(top) -> list:
-    """The fragment files of the working tree, as paths from the repository top, sorted: every .md file under changes/
-    except a README.md and hidden files."""
+def _entries(top) -> list:
+    """Every entry under changes/ but its folders, README.md files and hidden names -> [(path from the repository top,
+    Path)], sorted. A symbolic link is an entry whatever it points to, and a linked folder is not walked into."""
     root = Path(top) / FOLDER
-    if not root.is_dir():
-        return []
     out = []
-    for f in root.rglob("*.md"):
-        inside = f.relative_to(root)
-        if f.is_file() and f.name.lower() != "readme.md" and not any(p.startswith(".") for p in inside.parts):
-            out.append(f"{FOLDER}/{inside.as_posix()}")
+    for here, dirs, files in os.walk(root):
+        base = Path(here)
+        links = [d for d in dirs if (base / d).is_symlink()]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in links]
+        for name in files + links:
+            if not name.startswith(".") and name.lower() != "readme.md":
+                out.append((f"{FOLDER}/{(base / name).relative_to(root).as_posix()}", base / name))
     return sorted(out)
+
+
+def fragments(top) -> list:
+    """The fragments of the working tree, as paths from the repository top, sorted: every entry under changes/ named
+    *.md except README.md and hidden ones (read refuses one that is a symbolic link)."""
+    return [rel for rel, _ in _entries(top) if rel.endswith(".md")]
 
 
 def parse(text: str, where: str = "") -> dict:
@@ -132,11 +141,19 @@ def _utf8(data: bytes):
 
 
 def read(top) -> list:
-    """[(fragment path, its entries by section)] for every fragment, in path order. Raises FragmentError, also for a
-    fragment that is not UTF-8 (a leading byte-order mark is dropped)."""
+    """[(fragment path, its entries by section)] for every fragment, in path order. Raises FragmentError for a fragment
+    it cannot parse or that is not UTF-8 (a leading byte-order mark is dropped), and for an entry of changes/ that is
+    a symbolic link (changes/ itself too) or no fragment (a .md file); README.md and hidden names are left alone."""
+    if (Path(top) / FOLDER).is_symlink():
+        raise FragmentError(FOLDER, 0, "a symbolic link: keep changes/ as a folder of this repository")
     out = []
-    for rel in fragments(top):
-        text, bad = _utf8((Path(top) / rel).read_bytes())
+    for rel, f in _entries(top):
+        if f.is_symlink():
+            raise FragmentError(rel, 0, "a symbolic link: write the change fragment as a file of its own")
+        if not (rel.endswith(".md") and f.is_file()):
+            raise FragmentError(rel, 0, "not a change fragment, which is a .md file: rename it, or move it out of "
+                                        f"{FOLDER}/")
+        text, bad = _utf8(f.read_bytes())
         if bad:
             raise FragmentError(rel, bad[0], bad[1] + ": save the fragment as UTF-8")
         out.append((rel, parse(text, rel)))
@@ -261,7 +278,7 @@ def prepare_release(c, a, today: str = "") -> int:
     try:
         parts = read(c.top)
     except FragmentError as e:
-        return gitx.refuse(f"change fragment {e}", "fix the fragment, then: dev release")
+        return gitx.refuse(str(e), "fix it, then: dev release")
     names = [rel for rel, _ in parts]
     path = Path(c.top) / CHANGELOG
     data = path.read_bytes() if path.is_file() else b"# Changelog\n"
@@ -305,8 +322,8 @@ def ci_problem(top, branch):
     try:
         read(top)
     except FragmentError as e:
-        return (f"change fragment {e}",
-                "a fragment has Keep a Changelog headings (### Added, ### Fixed …) with `- ` entries under them")
+        return (str(e), f"{FOLDER}/ holds change fragments, README.md and hidden files only; a fragment is a .md file "
+                        "with Keep a Changelog headings (### Added, ### Fixed …) and `- ` entries under them")
     if release_branch(branch):
         return None
     from . import testx

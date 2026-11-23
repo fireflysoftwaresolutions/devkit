@@ -79,6 +79,50 @@ class ReadTests(unittest.TestCase):
         (self.top / "changes" / "feat-bom.md").write_bytes(b"\xef\xbb\xbf### Fixed\n\n- Caf\xc3\xa9 export.\n")
         self.assertEqual(changes.read(self.top), [("changes/feat-bom.md", {"Fixed": ["- Café export."]})])
 
+    def test_a_symbolic_link_is_refused_with_its_name_wherever_it_points(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        secret = Path(outside.name) / "secret.md"
+        secret.write_text("### Fixed\n\n- Read from outside the repository.\n")
+        cases = {"feat-link.md": secret, "feat-dangling.md": Path(outside.name) / "none.md",
+                 "linked": Path(outside.name)}
+        for name, target in cases.items():
+            with self.subTest(name=name):
+                link = self.top / "changes" / name
+                link.symlink_to(target)
+                try:
+                    with self.assertRaises(changes.FragmentError) as e:
+                        changes.read(self.top)
+                    self.assertEqual(e.exception.where, f"changes/{name}")
+                    self.assertIn("symbolic link", e.exception.reason)
+                finally:
+                    link.unlink()
+
+    def test_a_linked_changes_folder_is_refused(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        (Path(outside.name) / "feat-a.md").write_text("### Fixed\n\n- A.\n")
+        (self.top / "changes").rmdir()
+        (self.top / "changes").symlink_to(outside.name)
+        with self.assertRaises(changes.FragmentError) as e:
+            changes.read(self.top)
+        self.assertEqual(e.exception.where, "changes")
+        self.assertIn("symbolic link", e.exception.reason)
+
+    def test_a_file_that_is_no_fragment_is_refused_with_its_name(self):
+        (self.top / "changes" / "feat-a.md").write_text("### Fixed\n\n- A.\n")
+        (self.top / "changes" / "README.md").write_text("# Fragments\n")
+        (self.top / "changes" / ".gitkeep").write_text("")
+        for name in ("feat-z.MD", "notes.txt"):
+            with self.subTest(name=name):
+                (self.top / "changes" / name).write_text("### Fixed\n\n- Z.\n")
+                with self.assertRaises(changes.FragmentError) as e:
+                    changes.read(self.top)
+                self.assertEqual(e.exception.where, f"changes/{name}")
+                self.assertIn("not a change fragment", e.exception.reason)
+                (self.top / "changes" / name).unlink()
+        self.assertEqual([rel for rel, _ in changes.read(self.top)], ["changes/feat-a.md"])
+
 
 class MergeTests(unittest.TestCase):
     def test_the_new_version_goes_above_the_newest_release_with_sections_in_keep_a_changelog_order(self):
@@ -271,6 +315,12 @@ class DirectEditTests(unittest.TestCase):
         self.s.commit("feat: odd", {"changes/feat-odd.md": "### Added\n\n- One.\n\n### Notes\n\n- Two.\n"})
         reason, _ = changes.ci_problem(str(self.s.repo), "feat/odd")
         self.assertIn("changes/feat-odd.md:5:", reason)
+
+    def test_a_file_in_changes_that_is_no_fragment_fails_with_its_name(self):
+        self.s.branch("feat/z")
+        self.s.commit("feat: z", {"changes/feat-z.MD": "### Fixed\n\n- Z.\n"})
+        reason, _ = changes.ci_problem(str(self.s.repo), "feat/z")
+        self.assertIn("changes/feat-z.MD: not a change fragment", reason)
 
     def test_a_repository_without_a_changes_folder_keeps_editing_its_changelog(self):
         git(self.s.repo, "rm", "-q", "-r", "changes")
