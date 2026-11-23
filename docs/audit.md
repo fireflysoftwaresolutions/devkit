@@ -338,7 +338,9 @@ it. An agent's call is refused and recorded as `audit.reseal` blocked.
    through a reseal map that an `audit.reseal` record backs. It never changes the fields devkit's own checks read
    back, even when a pattern of `audit.redact.extra` matches them (see [Export and forwarding](#export-and-forwarding)):
    a pattern in the team policy, which any teammate can commit, so cannot lift an embargo or unhook the chain.
-4. It rewrites this machine's copy in the handoff repository to match, with the map, and commits it.
+4. It rewrites this machine's copy in the handoff repository to match, with the map, and commits it. Whenever the
+   job publishes a segment, it also copies each map the handoff copy lacks whose `audit.reseal` record that copy
+   holds, so a re-seal before the first publish still leaves a copy that verifies.
 5. It records `audit.reseal` with the map's SHA-256 (`evidence.check`), then closes and publishes the segment that
    holds that record, so every machine can check the map.
 

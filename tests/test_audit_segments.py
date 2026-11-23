@@ -699,6 +699,28 @@ class MissingSegmentTests(SegmentCase):
         self.assertFalse(any(f.exists() for f in files))
 
 
+class ResealBeforePublishTests(SegmentCase):
+    sealed_record = ResealTests.sealed_record
+
+    def test_a_reseal_before_the_first_publish_leaves_a_handoff_copy_that_verifies(self):
+        audit._append(self.sealed_record(noon(2), "the Acme roadmap again"), now=noon(2))
+        self.write(noon(2) + 5, 1)
+        self.write(noon(1), 1)
+        audit.close()
+        self.assertFalse(audit.team_dir().exists())
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertTrue(res["ok"], res)
+        for team in (False, True):
+            v = audit.verify(team=team)
+            self.assertTrue(v["ok"], v["first"])
+        copy = audit.team_dir() / "reseal" / f"{res['id']}.json"
+        self.assertEqual(copy.read_bytes() if copy.is_file() else None, Path(res["map"]).read_bytes())
+        audit.AUDIT = self.elsewhere  # another Mac checks the handoff copy alone
+        v = audit.verify()
+        self.assertTrue(v["ok"], v["first"])
+
+
 class CommandTests(SegmentCase):
     def test_dev_audit_parses_reseal_and_apply(self):
         from devkit import cli

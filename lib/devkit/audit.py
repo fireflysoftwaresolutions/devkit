@@ -3903,7 +3903,31 @@ def _publish_segments(dest: Path, now: float) -> list:
     if _manifest_bytes(new) != (mf.read_bytes() if mf.is_file() else b""):
         _write(mf, _manifest_bytes(new))
         changed.append(mf)
+    if any(f != mf for f in changed):
+        changed += _publish_maps(dest, pub)
     return changed
+
+
+def _publish_maps(dest: Path, pub: dict) -> list:
+    """Copy into the handoff copy each reseal map of this Mac that it lacks and that an audit.reseal record in its
+    published segments backs: verify reads a copy's maps from the copy, and a reseal before the first publish found no
+    copy to write its map to. `pub`: the published segments' manifest entries, by name. -> files written."""
+    want = sorted(f for f in (AUDIT / "reseal").glob("*.json")
+                  if _RESEAL_ID.fullmatch(f.stem) and not (dest / "reseal" / f.name).exists())
+    if not want:
+        return []
+    files = [_unit_file(dest, n, published=True) for n, e in sorted(pub.items())
+             if not isinstance(e.get("actions"), dict) or "audit.reseal" in e["actions"]]
+    checks, out = _reseal_checks(files), []
+    for f in want:
+        try:
+            raw = f.read_bytes()
+        except OSError:
+            continue
+        if checks.get(f.stem) == f"sha256:{hashlib.sha256(raw).hexdigest()}":
+            _write(dest / "reseal" / f.name, raw)
+            out.append(dest / "reseal" / f.name)
+    return out
 
 
 def publish(now: float = None) -> list:
@@ -4067,7 +4091,13 @@ _RESEAL_ID = re.compile(r"[0-9A-Z]{26}")  # a reseal's id, which names its map: 
 
 def _reseal_ids(files) -> list:
     """The ids of the reseal maps that the audit.reseal records in these files back, in order."""
-    ids = []
+    return list(_reseal_checks(files))
+
+
+def _reseal_checks(files) -> dict:
+    """{reseal id: its record's evidence.check (sha256:<the map's SHA-256>)} of the audit.reseal records in these
+    files, in order."""
+    out = {}
     for f in files:
         try:
             data = read_trail(f)
@@ -4081,10 +4111,11 @@ def _reseal_ids(files) -> list:
             if not isinstance(rec, dict) or rec.get("action") != "audit.reseal" or rec.get("outcome") != "ok":
                 continue
             ref = rec.get("ref") if isinstance(rec.get("ref"), dict) else {}
+            ev = rec.get("evidence") if isinstance(rec.get("evidence"), dict) else {}
             rid = str(ref.get("id") or "")
-            if _RESEAL_ID.fullmatch(rid) and rid not in ids:
-                ids.append(rid)
-    return ids
+            if _RESEAL_ID.fullmatch(rid) and rid not in out:
+                out[rid] = str(ev.get("check") or "")
+    return out
 
 
 def _forget(mf: Path, gone: list, private: bool):
