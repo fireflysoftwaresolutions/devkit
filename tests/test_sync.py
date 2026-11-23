@@ -648,8 +648,8 @@ class TeamPolicySyncTests(unittest.TestCase):
             refused = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
             self.assertEqual([(r["target"], r["severity"]) for r in refused], [("policy/audit.json", "critical")])
             failed = work.push_failed_file().read_text()  # dev status shows it until a push succeeds
-            for said in ("policy/audit.json", "is not valid JSON", "dev audit config", "git commit --amend",
-                         "git reset"):
+            for said in ("policy/audit.json (commit ", "is not valid JSON", "dev audit config",
+                         "git reset --soft @{u}"):
                 self.assertIn(said, err.getvalue())
                 self.assertIn(said, failed)
             # a repair committed on top would publish the pasted token in the history: the refusal says to undo it
@@ -667,6 +667,92 @@ class TeamPolicySyncTests(unittest.TestCase):
             _git(m.here, "commit", "-qam", "drop the team policy")
             self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
             self.assertNotIn("policy/audit.json", _git(remote, "ls-tree", "-r", "--name-only", "main"))
+
+    def test_a_broken_policy_in_an_older_unpushed_commit_is_never_pushed_after_a_repair_on_top(self):
+        # The check read only HEAD's version: an older devkit's commit with a pasted token, then a good commit on top,
+        # pushed both, and the token reached the remote's history. Every unpushed commit is checked, the refusal
+        # names the file and the commit, and its repair (git reset --soft @{u}) pushes one clean commit.
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            policy.write_text('{"redact": ' + json.dumps(self.TOKEN))
+            _git(m.here, "commit", "-qam", "an older devkit's commit")
+            broken_at = _git(m.here, "rev-parse", "--short", "HEAD")
+            repaired = json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{15}"]}})
+            policy.write_text(repaired)
+            _git(m.here, "commit", "-qam", "a repair on top")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.commit_push(quiet=False, urgent=True), "failed")
+            found = subprocess.run(["git", "-C", str(remote), "log", "--all", "-p"], capture_output=True, text=True)
+            self.assertNotIn(self.TOKEN, found.stdout)
+            self.assertEqual(_git(remote, "show", "main:policy/audit.json"), good)
+            for said in ("policy/audit.json", broken_at, "is not valid JSON", "git reset --soft @{u}"):
+                self.assertIn(said, err.getvalue())
+                self.assertIn(said, work.push_failed_file().read_text())
+            self.assertNotIn(self.TOKEN, err.getvalue())
+            refused = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
+            self.assertEqual([r["target"] for r in refused], ["policy/audit.json"])
+            _git(m.here, "reset", "-q", "--soft", "@{u}")
+            self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
+            self.assertEqual(_git(remote, "show", "main:policy/audit.json"), repaired)
+            found = subprocess.run(["git", "-C", str(remote), "log", "--all", "-p"], capture_output=True, text=True)
+            self.assertNotIn(self.TOKEN, found.stdout)
+
+    def test_a_broken_policy_the_remote_already_has_lets_this_macs_other_commits_through(self):
+        # An older Mac pushed a broken policy/audit.json; this Mac's commits, the merge a sync makes among them,
+        # change other files only: they publish nothing broken, so they are pushed.
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            (m.here / "policy" / "progress.json").write_text('{"max_parallel": 3}')
+            sync()
+            _git(m.other, "pull", "-q")
+            (m.other / "policy" / "audit.json").write_text("{")
+            _git(m.other, "commit", "-qam", "an older Mac broke it")
+            _git(m.other, "push", "-q")
+            _git(m.here, "fetch", "-q", "origin")
+            (m.here / "policy" / "progress.json").write_text('{"max_parallel": 2}')
+            _git(m.here, "commit", "-qam", "this Mac's change")
+            _git(m.here, "merge", "-q", "--no-edit", "@{u}")
+            self.assertEqual(work.unpublishable_commits(m.here), [])
+            write_note(m.here, note_text("pushed past the remote's broken file"))
+            self.assertEqual(cli.commit_push(quiet=True, urgent=True), "pushed")
+            self.assertEqual(_git(remote, "show", "main:policy/progress.json"), '{"max_parallel": 2}')
+            self.assertIn("pushed past the remote's broken file", _git(remote, "show", f"main:projects/{PID}.md"))
+            # a merge that writes a broken version itself publishes it, so it is refused
+            _git(m.here, "checkout", "-qb", "side", "origin/main")
+            (m.here / "side.md").write_text("a side change\n")
+            _git(m.here, "add", "side.md")
+            _git(m.here, "commit", "-qm", "a side change")
+            _git(m.here, "checkout", "-q", "main")
+            _git(m.here, "merge", "-q", "--no-ff", "--no-commit", "side")
+            (m.here / "policy" / "progress.json").write_text("[")
+            _git(m.here, "add", "-A")
+            _git(m.here, "commit", "-qm", "a merge that broke it")
+            self.assertEqual([(rel, sha) for rel, _, sha in work.unpublishable_commits(m.here)],
+                             [("policy/progress.json", _git(m.here, "rev-parse", "--short", "HEAD"))])
+
+    def test_the_policy_check_reads_only_the_policy_files_each_unpushed_commit_changed(self):
+        # A long unpushed history (a Mac offline for weeks) is checked by one git log and one read per policy change,
+        # never a read of every file at every commit. With no upstream, every commit is checked.
+        with TwoMacs() as m:
+            policy, good, remote = self.published(m)
+            for n in range(60):
+                write_note(m.here, note_text(f"offline day {n}"))
+                _git(m.here, "add", "-A")
+                _git(m.here, "commit", "-qm", f"day {n}")
+                if n == 30:
+                    policy.write_text("{")
+                    _git(m.here, "commit", "-qam", "broken mid-way")
+                    policy.write_text(good)
+                    _git(m.here, "commit", "-qam", "repaired")
+            reads = []
+            real = work._blob
+            with mock.patch.object(work, "_blob", lambda root, spec: reads.append(spec) or real(root, spec)):
+                refused = work.unpublishable_commits(m.here)
+            self.assertEqual([(rel, why) for rel, why, _ in refused], [("policy/audit.json", "is not valid JSON")])
+            self.assertEqual(len(reads), 2)
+            _git(m.here, "branch", "--unset-upstream")
+            self.assertEqual([rel for rel, _, _ in work.unpublishable_commits(m.here)], ["policy/audit.json"])
 
     def test_a_staged_good_policy_is_kept_when_its_working_copy_is_held(self):
         # git checkout HEAD -- path reset the index too, so a good version staged before the copy broke was lost.
@@ -728,7 +814,7 @@ class TeamPolicySyncTests(unittest.TestCase):
                         self.assertEqual(cli.commit_push(quiet=False, urgent=True), "failed")
                     said.append(err.getvalue())
                 for each in said:
-                    self.assertIn("policy/audit.json is not valid JSON", each)
+                    self.assertRegex(each, r"policy/audit\.json \(commit \w+\) is not valid JSON")
 
                 def records(outcome):
                     return [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == outcome]

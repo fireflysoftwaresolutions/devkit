@@ -1506,38 +1506,53 @@ POLICY_REFUSED = "refused to push: "
 
 
 def unpublishable_commits(root: Path) -> list:
-    """The team policy files (policy/<name>.json) that this Mac's commits not pushed yet change, whose version at
-    HEAD no Mac could load (audit.publishable_text): committed by a raw git commit, an import, or an older devkit
-    whose push failed, they never went through hold_broken_policies. A file HEAD deletes publishes nothing broken.
-    With no upstream, every policy file at HEAD. -> [(path, reason)]."""
+    """The team policy files (policy/<name>.json) that a commit of this Mac not pushed yet (@{u}..HEAD; every commit
+    when there is no upstream) changes to a version no Mac could load (audit.publishable_text): committed by a raw git
+    commit, an import, or an older devkit whose push failed, they never went through hold_broken_policies. Every such
+    commit counts, not only HEAD's version: a repair on top still publishes the broken text in the history. A merge
+    counts for what it changes itself (git's combined diff), so a broken file the remote already has publishes
+    nothing new. A deletion publishes nothing broken. One git log reads the policy paths each commit changed, then
+    one read per change. When the commits cannot be read, the push is refused too.
+    -> [(path, reason, short commit)], oldest first."""
     from . import audit
-    if core.git(root, "rev-parse", "-q", "--verify", "@{u}")[0] == 0:
-        names = core.gitout(root, "diff", "--name-only", "-z", "--no-renames", "@{u}...HEAD", "--", "policy")
-    else:
-        names = core.gitout(root, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "policy")
+    has_upstream = core.git(root, "rev-parse", "-q", "--verify", "@{u}")[0] == 0
+    rc, log, _ = core.git(root, "log", "-z", "--reverse", "--format=%x01%h", "--name-only", "--no-renames",
+                          "--full-history", "--diff-merges=combined", "@{u}..HEAD" if has_upstream else "HEAD",
+                          "--", "policy", timeout=120)
+    if rc != 0 and core.git(root, "rev-parse", "-q", "--verify", "HEAD")[0] == 0:
+        return [("policy", "could not be checked (git log failed)", "")]
     out = []
-    for rel in names.split("\0"):
-        data = _blob(root, f"HEAD:{rel}") if _POLICY_FILE.fullmatch(rel) else None
-        why = audit.publishable_text(Path(rel).name, data) if data is not None else ""
-        if why:
-            out.append((rel, why))
+    for chunk in log.split("\x01")[1:]:
+        sha, *names = chunk.split("\0")
+        for rel in dict.fromkeys(n.lstrip("\n") for n in names):
+            data = _blob(root, f"{sha}:{rel}") if _POLICY_FILE.fullmatch(rel) else None
+            why = audit.publishable_text(Path(rel).name, data) if data is not None else ""
+            if why:
+                out.append((rel, why, sha))
     return out
 
 
-_AMEND = ("and a repair on top still publishes it, secrets too. Undo the unpushed commits (git reset --soft @{u}, or "
-          "git commit --amend for the last one); dev sync recommits the rest and holds the file for repair (dev audit "
-          "config)")
+_AMEND = ("and a repair on top still publishes it, secrets too. Undo the unpushed commits (git reset --soft @{u}); "
+          "dev sync recommits the rest and holds the file for repair (dev audit config)")
+
+
+def _named(rel: str, sha: str) -> str:
+    return f"{rel} (commit {sha})" if sha else rel
 
 
 def _refuse_policy_push(root: Path, refused) -> str:
-    """Record each committed team policy file no Mac could load (a critical, blocked handoff.push), once per file and
-    reason (_not_recorded) -> the problem, said at every refusal. The broken text may hold a pasted secret, and a
-    repair committed on top would still publish it in the history, so the repair amends or drops the commit."""
+    """Record each committed team policy file no Mac could load (a critical, blocked handoff.push), once per file,
+    commit and reason (_not_recorded) -> the problem, said at every refusal. The broken text may hold a pasted secret,
+    and a repair committed on top would still publish it in the history, so the repair undoes the commits."""
     from . import audit
-    for rel, why in _not_recorded("refused", root, dict(refused)).items():
-        text = f"refused: a commit not pushed yet changes it to a version that {why}, so no Mac could load it, {_AMEND}"
+    now = {_named(rel, sha): (rel, sha, why) for rel, why, sha in refused}
+    for key in _not_recorded("refused", root, {k: v[2] for k, v in now.items()}):
+        rel, sha, why = now[key]
+        text = f"refused: commit {sha} not pushed yet changes it to a version that {why}, so no Mac could load it, " \
+               f"{_AMEND}"
         audit.record("handoff.push", rel, text, "blocked", severity="critical")
-    return POLICY_REFUSED + "; ".join(f"{rel} {why}" for rel, why in refused) + f": no Mac could load it, {_AMEND}"
+    return POLICY_REFUSED + "; ".join(f"{_named(rel, sha)} {why}" for rel, why, sha in refused) + \
+        f": no Mac could load it, {_AMEND}"
 
 
 def push_handoff(timeout: int = 60) -> tuple:
