@@ -167,7 +167,7 @@ class CoordWorld(model.World):
 
     def check(self, a, before, expect):
         super().check(a, before, expect)
-        for v in coord.check(self.run_(), time.time(), review=pg.is_review_step):
+        for v in coord.check(self.run_(), time.time(), review=pg.is_review_step, who=pg.member_id):
             self.flag(v.split(":", 1)[0], v)
 
 

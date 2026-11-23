@@ -214,9 +214,12 @@ and configuration, and the tech lead the rest. In the team's RACI, compliance is
 incidents by the tech lead.
 
 A review never goes to its author: `dev progress assign` refuses a review step for a member whose lane ran a step it
-follows, and no lane of that member takes it from the queue or by naming it. A review given to a member before it did
-the work stays its member's in the plan, but that member's `dev progress step --step "<review>"` is refused, records
-nothing, and says the review never joins its lane: the tech lead gives it to another member. devkit also starts no step in a member's call: when a
+follows, and no lane of that member takes it from the queue or by naming it. devkit compares crew members, never lane
+names: a lane that names no crew member, such as a general-purpose agent whose description does not start with
+`<Member>:`, takes no review, and `dev progress assign` gives a review to no label outside the roster. A review given
+to a member before it did the work stays its member's in the plan, but that member's
+`dev progress step --step "<review>"` is refused, records nothing, and says the review never joins its lane: the tech
+lead gives it to another member. devkit also starts no step in a member's call: when a
 member closes its step, only the free lanes take what waits for them. The tech lead's next step starts in the tech
 lead's own call, and only when it is the tech lead's own work: never a review, which waits for its reviewer, and never
 a step whose kind of work another member is Responsible for.

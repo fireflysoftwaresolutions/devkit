@@ -1987,27 +1987,41 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
     return run
 
 
+def member_id(name):
+    """The id of the crew member a persona, a launch description or a label names ("Neo", "Neo: the parser",
+    "devkit:neo" -> "neo"), as approvals.doer reads one; None when it names none or the roster cannot be read. The
+    rule coord compares a reviewer and the authors of the work it reviews by (coord.independent)."""
+    from . import crew
+    try:
+        m = crew._for_label(name)
+    except Exception:
+        return None
+    return m["id"] if m else None
+
+
 def _refuse_own_review(run: dict, s: dict, label: str):
-    """A review step goes to no member whose lane ran a step it follows (coord.independent): StepError naming that
-    work and what to do. No --why overrides it: an author's review approves nothing of its own work."""
+    """A review step goes to no member whose lane ran a step it follows, nor to a label that names no crew member
+    (coord.independent): StepError naming that work and what to do. No --why overrides it: an author's review
+    approves nothing of its own work."""
     if not is_review_step(s):
         return
     from . import crew
-    mem = crew._for_label(label)
-    name = (mem or {}).get("name") or coord.member_of(label)
-    if coord.independent(run, s, name):
+    if coord.independent(run, s, label, who=member_id):
         return
-    did = _own_work(run, s, name)
-    raise StepError(f"“{s['name']}” reviews {_quoted_and(did)}, {crew.who(mem or label)}'s own work: a member never "
-                    f"reviews its own work. Give it to another member (dev crew raci review names who reviews), "
-                    f"or skip it (dev progress skip \"{s['name']}\" --why \"…\")")
+    mem = crew._for_label(label)
+    if not mem:
+        raise StepError(f"“{s['name']}” is a review, and “{label}” names no crew member, so devkit cannot show it is "
+                        f"not the author of the work it reviews: give it to a member (dev crew raci review names who "
+                        f"reviews)")
+    raise StepError(f"“{s['name']}” reviews {_quoted_and(_own_work(run, s, label))}, {crew.who(mem)}'s own work: a "
+                    f"member never reviews its own work. Give it to another member (dev crew raci review names who "
+                    f"reviews), or skip it (dev progress skip \"{s['name']}\" --why \"…\")")
 
 
-def _own_work(run: dict, s: dict, name: str) -> list:
-    """The names of the steps review `s` follows that a lane of member `name` ran (coord.independent's test)."""
-    agents, steps = run.get("agents") or {}, _by_name(run.get("plan") or [])
-    return [n for n in s.get("after") or [] if ((agents.get((steps.get(n) or {}).get("owner") or "") or {})
-                                                .get("persona") or "").lower() == (name or "").lower()]
+def _own_work(run: dict, s: dict, reviewer) -> list:
+    """The names of the steps review `s` follows that the member of `reviewer` (a lane, or a member's name or label)
+    ran (coord.own_work, coord.independent's test)."""
+    return coord.own_work(run, s, reviewer, who=member_id)
 
 
 def _scope_top(run: dict, cwd: str | None) -> str:
@@ -2165,7 +2179,7 @@ def _queued_for(run: dict, aid: str) -> list:
     marks = []
     for i, x in enumerate(run.get("plan") or []):
         it = coord.intent(x) if x.get("state") == "pending" else None
-        if not it or (is_review_step(x) and not coord.independent(run, x, lane.get("persona") or "")):
+        if not it or (is_review_step(x) and not coord.independent(run, x, lane, who=member_id)):
             continue
         other = (run.get("agents") or {}).get(it["lane"]) or {} if it["lane"] else {}
         if it["lane"] == aid or (it["lane"] and other.get("state") != "running" and _label_matches(it["member"], lane)
@@ -2266,13 +2280,13 @@ def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True, told=
     taken = []
     while coord.can_claim(lane) and len(taken) < 20:
         named = _launch_named(run, aid, lane)
-        s = coord.claimable(run, aid, named, member_wide, review=is_review_step)
+        s = coord.claimable(run, aid, named, member_wide, review=is_review_step, who=member_id)
         if s is None:
             break
         who = crew.who(lane.get("persona") or s.get("label") or "")
         why = (f"{who}'s launch names it" if s["name"] == named else f"{who} holds no other step now: it took this "
                f"step, the oldest waiting for it")
-        coord.claim(run, aid, now, why, named, member_wide, review=is_review_step)
+        coord.claim(run, aid, now, why, named, member_wide, review=is_review_step, who=member_id)
         _remember_step(lane, s)
         lane.pop("handed_over", None)
         _audit("crew.claim", s["name"], why, project=run.get("project") or "", agent_id=aid[:16])
@@ -2299,7 +2313,8 @@ def _claim_free_lanes(run: dict, now: float, told=()):
     agents = run.get("agents") or {}
     states = None
     for aid in sorted(agents, key=lambda k: (agents[k].get("started") or 0, k)):
-        if not coord.can_claim(agents[aid]) or coord.claimable(run, aid, review=is_review_step) is None:
+        if not coord.can_claim(agents[aid]) or coord.claimable(run, aid, review=is_review_step,
+                                                               who=member_id) is None:
             continue
         if states is None:
             states = lane_states(run, now, own=True)
@@ -2364,11 +2379,16 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
         return (f"“{name}” waits for {', '.join(deps)}, so it cannot close yet and devkit recorded nothing: it joins "
                 f"your lane once {'that is' if len(deps) == 1 else 'they are'} done; run this again then")
     lane = (run.get("agents") or {}).get(aid) or {}
-    me = lane.get("persona") or ""
     if st.get("state") == "pending" and is_review_step(st) and _label_matches(st.get("label") or "", lane) \
-            and not coord.independent(run, st, me):
+            and not coord.independent(run, st, lane, who=member_id):
         from . import crew
-        return (f"“{name}” reviews {_quoted_and(_own_work(run, st, me))}, {crew.who(me)}'s own work, so it never "
+        did = _own_work(run, st, lane)
+        if not did:
+            return (f"“{name}” is a review, and devkit cannot tell which crew member your lane is, so it never "
+                    f"joins your lane and devkit recorded nothing: the tech lead gives the review to a member's own "
+                    f"launch (dev crew brief)")
+        me = lane.get("persona") or lane.get("label") or ""
+        return (f"“{name}” reviews {_quoted_and(did)}, {crew.who(me)}'s own work, so it never "
                 f"joins your lane and devkit recorded nothing: a member never reviews its own work, and the tech lead "
                 f"gives the review to another member (dev crew raci review names who reviews)")
     holder ="the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"

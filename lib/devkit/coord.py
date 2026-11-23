@@ -8,7 +8,9 @@ progress.py, so every path that gives, takes, blocks or closes a step reads the 
   step holds no lane. Its write scope is the union of the globs of the steps it holds (`scope`), never a stored copy.
 - A lane is *busy* while it holds a step that is not a review; review steps share a lane.
 - A review is *independent* of its author: no lane of a member that ran a step the review follows takes it
-  (`independent`), so nobody reviews, and approves, their own work.
+  (`independent`), so nobody reviews, and approves, their own work. Members are compared as the member each lane
+  works as (`lane_member`: its persona, else its launch description, else its step's label), named by the caller's
+  `who` (progress passes the roster's ids); a reviewer devkit cannot name is independent of nobody.
 - An *intent* says who the tech lead gave a pending step to: a member (any of its lanes may take it) or one lane.
   It lives on the step, so a lane's end, stop or resume never loses it, and only a claim, a new assignment, the step
   leaving pending or the run's end removes it.
@@ -82,19 +84,51 @@ def busy(run: dict, aid: str, step: dict | None = None, review=None) -> bool:
     return False
 
 
-def independent(run: dict, step: dict, member: str) -> bool:
-    """May `member` (a crew member's name, as a lane's persona holds it) review `step`? Not when a lane of that member
-    ran a step `step` comes after: a review never goes to its author, whichever of the author's lanes asks."""
-    me = (member or "").strip().lower()
+def _plain(name) -> str | None:
+    """The member a persona or a label names, as written and without case: "Tank: the API" -> "tank"; None for none.
+    The rule `who` defaults to; progress passes the roster's (progress.member_id), which also knows aliases."""
+    return member_of(name).lower() or None
+
+
+def lane_member(lane, label: str = "", who=None):
+    """The member lane `lane` works as -> `who` of its persona, else of its launch description, else of `label` (its
+    step's), as approvals.doer reads it; None when that names no member."""
+    lane = lane if isinstance(lane, dict) else {}
+    return (who or _plain)(lane.get("persona") or lane.get("label") or label or "")
+
+
+def _reviewer(step: dict, reviewer, who):
+    """The member `reviewer` is: a lane (lane_member, with the review's label) or a member's name."""
+    if isinstance(reviewer, dict):
+        return lane_member(reviewer, step.get("label") or "", who)
+    return who(str(reviewer or ""))
+
+
+def own_work(run: dict, step: dict, reviewer, who=None) -> list:
+    """The names of the steps review `step` follows that a lane of `reviewer`'s member ran. `reviewer`: the lane that
+    would review it, or a member's name; `who`: the member a persona or label names (default `_plain`). [] when
+    `reviewer` names no member."""
+    who = who or _plain
+    me = _reviewer(step, reviewer, who)
     if not me:
-        return True
+        return []
     agents = (run or {}).get("agents") or {}
     steps = {x.get("name"): x for x in (run or {}).get("plan") or []}
+    out = []
     for name in step.get("after") or []:
-        owner = (steps.get(name) or {}).get("owner") or "main"
-        if owner != "main" and ((agents.get(owner) or {}).get("persona") or "").strip().lower() == me:
-            return False
-    return True
+        x = steps.get(name) or {}
+        owner = x.get("owner") or "main"
+        if owner != "main" and lane_member(agents.get(owner), x.get("label") or "", who) == me:
+            out.append(name)
+    return out
+
+
+def independent(run: dict, step: dict, reviewer, who=None) -> bool:
+    """May `reviewer` (the lane that would review, or a member's name) review `step`? Not when a lane of its member
+    ran a step `step` comes after (own_work): a review never goes to its author, whichever of the author's lanes
+    asks. Nor when devkit cannot tell which member `reviewer` is (`who` names none): it could be the author."""
+    who = who or _plain
+    return bool(_reviewer(step, reviewer, who)) and not own_work(run, step, reviewer, who)
 
 
 def scope(run: dict, aid: str) -> list:
@@ -167,14 +201,15 @@ def queued_lanes(step: dict) -> list:
     return [it["lane"]] if it and it.get("lane") else []
 
 
-def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, review=None) -> dict | None:
+def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, review=None,
+              who=None) -> dict | None:
     """The step lane `aid` takes now, or None: of the pending steps whose dependencies are done and whose intent
     names this lane, or its member with no lane (unless `member_wide` is False: a resume whose member has a new
     launch on its way leaves those to that launch; nor a lane launched as a follow-up of a finished step,
     `follow_up`), and that the lane is free for (busy), never a review of its member's own work (independent), the
     step its launch names
     (`launch_named`: a step or its name), then a front intent, then a lane-bound one, then a member-wide one, each
-    oldest first, then in plan order."""
+    oldest first, then in plan order. `who`: the member a persona or label names (independent)."""
     lane = ((run or {}).get("agents") or {}).get(aid)
     if not can_claim(lane):
         return None
@@ -198,18 +233,18 @@ def claimable(run: dict, aid: str, launch_named=None, member_wide: bool = True, 
             continue
         if deps_open(run, s, review) or busy(run, aid, s, review):
             continue
-        if _rv(review)(s) and not independent(run, s, lane.get("persona") or ""):
-            continue  # the author's own work: another member reviews it
+        if _rv(review)(s) and not independent(run, s, lane, who):
+            continue  # the author's own work, or a lane devkit cannot name: another member reviews it
         rank = 0 if named and s.get("name") == named else 1 if it["front"] else 2 if it["lane"] else 3
         found.append((rank, it["ts"] or 0, i, s))
     return min(found, key=lambda t: t[:3])[3] if found else None
 
 
 def claim(run: dict, aid: str, now: float, why: str, launch_named=None, member_wide: bool = True,
-          review=None) -> dict | None:
+          review=None, who=None) -> dict | None:
     """Lane `aid` takes the step `claimable` chooses: pending -> running in that lane, its intent removed, with a
     history entry. -> the step, or None."""
-    s = claimable(run, aid, launch_named, member_wide, review)
+    s = claimable(run, aid, launch_named, member_wide, review, who)
     if s is None:
         return None
     s.update(owner=aid, state="running", started=s.get("started") or now)
@@ -276,8 +311,9 @@ def _history(run: dict, s: dict, old, new, by: str, why: str, now: float):
     run["history"] = run["history"][-200:]
 
 
-def check(run: dict, now: float, review=None) -> list:
-    """The invariants run record `run` breaks -> ["I-owner: …", …], [] when it is sound."""
+def check(run: dict, now: float, review=None, who=None) -> list:
+    """The invariants run record `run` breaks -> ["I-owner: …", …], [] when it is sound. `review`: which steps are
+    reviews; `who`: the member a persona or label names (independent)."""
     out = []
     plan, agents = (run or {}).get("plan") or [], (run or {}).get("agents") or {}
     live = {k for k, v in agents.items() if isinstance(v, dict) and v.get("state") == "running"}
@@ -295,13 +331,14 @@ def check(run: dict, now: float, review=None) -> list:
         if len(builds) > 1:
             out.append(f"I-one-step: lane {aid} runs {', '.join(builds)}")
         for s in held(run, aid):
-            if rv(s) and isinstance(lane, dict) and not independent(run, s, lane.get("persona") or ""):
-                out.append(f"I-independent: lane {aid} reviews “{s.get('name')}”, which follows work its member did")
+            if rv(s) and isinstance(lane, dict) and not independent(run, s, lane, who):
+                out.append(f"I-independent: lane {aid} reviews “{s.get('name')}”, which follows work its member did, "
+                           f"or devkit cannot tell which member it is")
         if isinstance(lane, dict) and plan and ("handed_over" in lane or
                                                 ("scope" in lane and sorted(lane["scope"] or []) != scope(run, aid))):
             out.append(f"I-scope: lane {aid} keeps a stored scope or hand-over that its running steps do not give")
         if aid in live:
-            s = claimable(run, aid, review=review)
+            s = claimable(run, aid, review=review, who=who)
             if s is not None:
                 out.append(f"I-claim: lane {aid} is free while “{s.get('name')}” waits for it")
     ids = sorted(live)
