@@ -289,5 +289,28 @@ class BusyAtTheTimeOfTheWorkTests(Base):
         self.assertTrue(self.told("worked on “x” after"))
 
 
+class UnseenWorkOfADoneStepTests(Base):
+    # x is done by its author's own close at m10, before the Code reviewer's review of it begins at m12; then a file of
+    # x's scope is rewritten at m20. The review's ✓ at m30 never saw that rewrite: it approves nothing, and the tech
+    # lead is told to have the new work reviewed.
+    def rewrite_after_the_review_began(self, by):
+        pg.start("Fix", plan=["x=30m [backend]", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: x", at=self.m(1))
+        pg.step("x built", which="x", check="✓ 3 of 3 tests", from_agent="a_tank", now=self.m(10))
+        pg.assign("review-x", "Seraph", activity="review", now=self.m(11))
+        launch("a_ser", "devkit:seraph", f"{SER}: review-x", at=self.m(12))
+        self.edit(by, "src/x.py", self.m(20))
+        self.end_review()
+        self.assertEqual(self.approved("x"), [])
+        self.assertTrue(self.told("“review-x” began before “x” last ended"))
+
+    def test_the_tech_leads_rewrite_of_a_done_steps_file_after_its_review_began_is_not_approved(self):
+        self.rewrite_after_the_review_began("main")
+
+    def test_the_authors_rewrite_of_a_done_steps_file_after_its_review_began_is_not_approved(self):
+        self.rewrite_after_the_review_began("a_tank")
+
+
 if __name__ == "__main__":
     unittest.main()
