@@ -732,6 +732,87 @@ class MissingSegmentTests(SegmentCase):
         self.assertFalse(any(f.exists() for f in files))
 
 
+class RemovedWithEntryTests(SegmentCase):
+    # a segment that held an embargo, removed together with its manifest entry: the first record of the segment after
+    # it still links to its end
+    read_embargoes = MissingSegmentTests.read_embargoes
+    sealed_record = ResealTests.sealed_record
+
+    def embargo_scene(self) -> str:
+        self.write(noon(4), 1)
+        audit._append(audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
+                                  {"project": "acme/app", "branch": "fix/unshipped"}, now=noon(3)), now=noon(3))
+        self.write(noon(2), 1)
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        core.HANDOFF.mkdir(parents=True, exist_ok=True)
+        return f"{utc_day(noon(3))}.01"
+
+    def unlist(self, mf: Path, name: str):
+        m = json.loads(mf.read_text())
+        m["units"] = [e for e in m["units"] if e["name"] != name]
+        mf.write_text(json.dumps(m))
+
+    def test_a_segment_removed_with_its_entry_from_another_macs_copy_makes_the_embargo_check_say_why(self):
+        name = self.embargo_scene()
+        audit.publish(now=noon(0))
+        audit.AUDIT = self.elsewhere  # another Mac, which reads the embargo from the handoff copy only
+        self.assertIn("fix/unshipped", self.read_embargoes()[0])
+        (audit.team_dir() / name[:7] / f"{name}.jsonl").unlink()
+        self.unlist(audit.team_dir() / "manifest.json", name)
+        embargoes, why = self.read_embargoes()
+        self.assertIsNone(embargoes)
+        self.assertIn(f"{utc_day(noon(2))}.01.jsonl", why)
+
+    def test_a_reseal_that_rewrote_a_segment_another_one_follows_leaves_no_gap(self):
+        from devkit import branches
+        ResealTests.scene(self)  # the segment of two days ago, with one after it, holds a record today's rules clean
+        with self.as_developer():
+            self.assertTrue(audit.reseal(apply=True)["units"])
+        branches._TRAIL_CACHE.clear()
+        self.assertEqual(branches.embargo_trails()[1], "")
+        audit.AUDIT = self.elsewhere  # another Mac: the handoff copy, with its map
+        branches._TRAIL_CACHE.clear()
+        self.assertEqual(branches.embargo_trails()[1], "")
+
+    def test_a_reseal_map_no_record_backs_does_not_bridge_the_gap(self):
+        name = self.embargo_scene()
+        audit.publish(now=noon(0))
+        audit.AUDIT = self.elsewhere
+        mf = audit.team_dir() / "manifest.json"
+        ends = {e["name"]: e["link"] for e in json.loads(mf.read_text())["units"]}
+        (audit.team_dir() / name[:7] / f"{name}.jsonl").unlink()
+        self.unlist(mf, name)
+        forged = audit.team_dir() / "reseal" / f"{audit.new_id(noon(0))}.json"
+        forged.parent.mkdir()
+        forged.write_text(json.dumps({"v": 1, "id": forged.stem, "links": [[ends[name], ends[f"{utc_day(noon(4))}.01"]]]}))
+        embargoes, why = self.read_embargoes()
+        self.assertIsNone(embargoes)
+        self.assertIn(f"{utc_day(noon(2))}.01.jsonl", why)
+
+    def test_the_first_segment_removed_with_its_entry_makes_the_embargo_check_say_why(self):
+        audit._append(audit.build("git.embargo", "fix/unshipped", "set: an unshipped security fix", "ok",
+                                  {"project": "acme/app", "branch": "fix/unshipped"}, now=noon(3)), now=noon(3))
+        self.write(noon(2), 1)
+        audit.close(now=noon(0))
+        core.HANDOFF.mkdir(parents=True, exist_ok=True)
+        self.assertIn("fix/unshipped", self.read_embargoes()[0])
+        self.closed(noon(3)).unlink()
+        self.unlist(audit.AUDIT / "manifest.json", f"{utc_day(noon(3))}.01")  # no start: the chain began there
+        embargoes, why = self.read_embargoes()
+        self.assertIsNone(embargoes)
+        self.assertIn(self.closed(noon(2)).name, why)
+
+    def test_a_segment_removed_with_its_entry_here_makes_the_embargo_check_say_why(self):
+        name = self.embargo_scene()
+        self.assertIn("fix/unshipped", self.read_embargoes()[0])
+        self.closed(noon(3)).unlink()
+        self.unlist(audit.AUDIT / "manifest.json", name)
+        embargoes, why = self.read_embargoes()
+        self.assertIsNone(embargoes)
+        self.assertIn(self.closed(noon(2)).name, why)
+
+
 class ResealBeforePublishTests(SegmentCase):
     sealed_record = ResealTests.sealed_record
 

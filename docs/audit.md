@@ -39,7 +39,11 @@ folder). The daily `audit` job closes each segment once its day has passed, comp
   about one day, not a month. The embargo check reads every segment: the manifest is outside the chain, so it never
   decides whether an embargo is found. `dev audit verify` reports an edited manifest. When a manifest, this
   machine's or one in the handoff copy, lists a segment whose file is gone, the embargo check cannot tell what that
-  segment held: it holds every push and backup and names the file, as it does for a file it cannot read.
+  segment held: it holds every push and backup and names the file, as it does for a file it cannot read. It does the
+  same when a segment's first record does not link to the end of the segment its manifest lists before it, or, for
+  the first segment, to where the manifest says the chain starts, which is what a segment removed together with its
+  manifest entry leaves. A reseal map that an `audit.reseal` record backs bridges a resealed segment's old end, as
+  in verify.
 - **A close that stops is finished by the next one.** The job compresses a segment, lists it in the manifest, then
   removes the plain file. If it stops between those steps, the plain file stays the segment until the next run
   closes it again, and a record written meanwhile never goes into a segment the manifest lists already.

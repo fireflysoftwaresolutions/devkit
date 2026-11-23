@@ -222,6 +222,11 @@ def embargo_trails() -> tuple:
     if gone:
         return {}, (f"the audit trail {core.tilde(gone[0])} is in its manifest, but its file is gone "
                     "(dev audit verify)")
+    # a unit removed together with its manifest entry is not missing, but the next one still links to its end
+    gap = audit.unlinked(team=True)
+    if gap:
+        return {}, (f"the audit trail {core.tilde(gap[0])} does not link to the segment its manifest lists before it: "
+                    "a segment may have been removed with its entry (dev audit verify)")
     files = audit.trail_files()
     mine = set(files)
     files += [f for f in audit.trail_files(team=True) if f not in mine]

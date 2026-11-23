@@ -3093,6 +3093,58 @@ def missing(team: bool = False) -> list:
     return out
 
 
+def unlinked(team: bool = False) -> list:
+    """The segments whose first record does not link to the end of the segment before them, or to their manifest's
+    `start` or `origin`: this Mac's, and with `team` every machine's handoff copy. A segment removed together with its
+    manifest entry leaves such a gap, which `missing` cannot see; a reader that must see every record (the embargo
+    check) fails closed on it too. -> [path]"""
+    man = _read_manifest(_manifest_file())
+    out = _gaps(_units(man=man), man, AUDIT)
+    root = core.HANDOFF / "audit"
+    for mf in sorted(root.glob("*/manifest.json")) if team and root.is_dir() else ():
+        man = _read_manifest(mf)
+        out += _gaps(_team_segments(mf.parent, man), man, mf.parent)
+    return out
+
+
+def _gaps(units: list, man: dict, where: Path) -> list:
+    """The segments of one trail (`units`, in chain order) whose first record's `prev` is not the end of the segment
+    before them, as its manifest entry or its own bytes say. A link to a resealed segment's old end holds through a
+    reseal map in `where`/reseal/ that an audit.reseal record of the trail backs, as verify accepts it."""
+    start = man.get("start") if isinstance(man.get("start"), dict) else man.get("origin")
+    # with neither, the chain began at this trail's first segment, whose first record links to nothing (""), as
+    # verify checks it; None: a link this check cannot know (a file it could not read), not checked
+    want = str(start.get("link") or "") if isinstance(start, dict) else ""
+    out, bridges = [], None
+    for u in (u for u in units if u["kind"] == "day"):
+        end = str(u["entry"].get("link") or "") if u["entry"] else None
+        try:
+            with open_trail(u["path"]) as fh:
+                first = next((r for r in map(_v2, fh) if r is not None), None)
+            if end is None:
+                data = read_trail(u["path"])
+                end = seal(*_chain_end(data, len(data)))
+        except FileNotFoundError:  # a listed file that is gone: missing() names it
+            want = end
+            continue
+        except _READ_ERRORS:
+            first = None
+        prev = first.get("prev") if first else None
+        if want is not None and prev is not None and prev != want:
+            if bridges is None:  # read only when a link differs: after a reseal, or a gap. An index that leaves out
+                # audit.reseal can only leave a map unbacked, so the check fails closed, never open
+                held = [x["path"] for x in units if not isinstance((x["entry"] or {}).get("actions"), dict)
+                        or "audit.reseal" in x["entry"]["actions"]]
+                checks = _reseal_checks(held)
+                backed = {f for f, rid, sha in _load_maps(where / "reseal")[1]
+                          if rid and checks.get(rid) == f"sha256:{sha}"}
+                bridges = _load_maps(where / "reseal", only=backed)[0]
+            if not _bridged(prev, want, bridges):
+                out.append(u["path"])
+        want = end
+    return out
+
+
 def _files(team: bool = False) -> list:
     return trail_files(team)
 
@@ -3450,10 +3502,13 @@ def _verify_team(root: Path, known: set = None) -> tuple:
     return out, extra
 
 
-def _load_maps(folder: Path) -> tuple:
-    """The reseal maps in `folder` -> ({old link: new link}, [(map file, reseal id, SHA-256 of the file)])."""
+def _load_maps(folder: Path, only=None) -> tuple:
+    """The reseal maps in `folder` (`only`: those of these files) -> ({old link: new link}, [(map file, reseal id,
+    SHA-256 of the file)])."""
     bridges, maps = {}, []
     for f in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        if only is not None and f not in only:
+            continue
         try:
             raw = f.read_bytes()
             m = json.loads(raw)
