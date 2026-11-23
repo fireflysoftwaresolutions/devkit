@@ -407,7 +407,8 @@ def agent_pid(procs: dict | None = None):
 # process or recency ever makes a caller main. Hooks never ask who calls: their payload says it.
 
 CALL_TTL = 600  # an open call expires after its tool's timeout, 10 minutes at most; it is audited then
-APPROVAL_S = CALL_TTL  # the longest devkit waits for the developer to approve a call that goes out as written
+APPROVAL_S = 600  # the longest devkit waits for the developer to approve a call that goes out as written: its own
+# limit, so a longer CALL_TTL never widens the window in which a text call's shell may start
 CALL_TEXT = 4096  # characters of a call's command kept, redacted (its start and its end when it is longer)
 NOT_A_LANE = ("main", "unknown", "unverified", "human")
 
