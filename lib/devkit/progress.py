@@ -892,7 +892,7 @@ def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
         return dict(out, caller="human")
     if getattr(found, "refusal", ""):  # identity refuses this call (a failed or missing call token)
         return dict(out, caller="unknown", why=found.refusal)
-    if found.agent == "codex" and sp.how not in ("token", "thread"):
+    if found.agent == "codex" and sp.how not in ("token", "thread", "text-pinned"):
         return dict(out, caller="unverified")
     out["calls"] = list(found.calls)
     if sp.how == "stamped" and sp.lane != "main":
