@@ -4106,7 +4106,7 @@ def cmd_test(a) -> int:
     sub = getattr(a, "test_cmd", None)
     if getattr(a, "project", None):  # another project (id or a unique part of its name): run from its folder
         from . import cli
-        os.chdir(cli._resolve(cli._reg(prs=False), a.project)["path"])
+        os.chdir(cli._resolve(None, a.project)["path"])
     if sub == "audit":
         return _audit(a)
     top = _top()

@@ -2564,6 +2564,30 @@ class LaneScopeTests(unittest.TestCase):
             self.assertEqual(data["outside_lane"], ["tests/test_other.py"])
 
 
+class AnotherProjectTests(unittest.TestCase):
+    # dev test -p <name> finds that one project in the map the last dev sync cached, as dev task -p does: building
+    # the whole map runs git in every checkout on the Mac before a test starts
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_startup import Layout, touching  # a Mac's dev root with git and lsof stand-ins that log calls
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.mac = Layout(Path(os.path.realpath(tmp.name)))
+        self.touching = touching
+
+    def test_dev_test_of_another_project_reads_only_that_checkout(self):
+        self.mac.sync()
+        (self.mac.app / "tests").mkdir()
+        (self.mac.app / "tests" / "test_one.py").write_text("import unittest\n\n\nclass One(unittest.TestCase):\n"
+                                                            "    def test_one(self):\n        self.assertEqual(1, 1)\n")
+        rc, out, calls = self.mac.dev("test", "-p", "app", "plan", "--json", cwd=self.mac.home)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("tests/test_one.py", out)
+        self.assertEqual(self.touching(calls, self.mac.api), [], calls)
+        self.assertEqual([c for c in calls if c.startswith("lsof ")], [], calls)
+
+
 def _progress():
     from devkit import progress
     return progress
