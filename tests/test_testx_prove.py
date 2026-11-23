@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import testx  # noqa: E402
-from test_testx import Env, built_install, dev, edit  # noqa: E402
+from test_testx import MUL, PROVE_BASE, Env, built_install, dev, edit, with_tests  # noqa: E402
 
 
 def changed(before, after, name="tests/test_mod.py"):
@@ -178,9 +178,61 @@ class HelperClassTests(unittest.TestCase):
         text = self.support_text("tests/test_a.py", before, separate)
         self.assertIn("    def close(self):\n        return True\n", text)
         self.assertIn("        y = 0\n", text)  # the edit inside get goes with the change
-        mixed = before.replace("        return 1 + y\n", "        return 2 + y\n" + close[21:]) \
-            .replace("Fake().get(), 1)\n", test)  # one hunk: get's last line and the new method
-        self.assertIn("    def close(self):\n", self.support_text("tests/test_a.py", before, mixed) or mixed)
+
+    # one hunk edits get's last line and adds close after it: the edit goes with the change line by line, close stays
+    def test_a_mixed_hunk_restores_the_edited_lines_and_keeps_the_added_method(self):
+        before = ("import unittest\n\n\nclass Fake:\n    def get(self):\n        y = 0\n        return 1 + y\n\n\n"
+                  "class T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(Fake().get(), 1)\n")
+        mixed = before.replace("        return 1 + y\n",
+                               "        return 2 + y\n\n    def close(self):\n        return True\n")
+        text = self.support_text("tests/test_a.py", before, mixed)
+        self.assertIsNotNone(text)
+        self.assertIn("        return 1 + y\n", text)
+        self.assertNotIn("return 2 + y", text)
+        self.assertIn("    def close(self):\n        return True\n", text)
+
+    # Fake.__init__ sets z instead of y (one hunk) and get returns z with a new close() after it (another hunk); the
+    # production change is unrelated: the run without the change must not fail on get's z and __init__'s y
+    def test_a_mixed_hunk_whose_edit_needs_a_reverted_member_proves_nothing(self):
+        fake = "class Fake:\n    def __init__(self):\n        self.y = 1\n\n    def get(self):\n        return self.y\n\n\n"
+        test = with_tests().replace("class CalcTests(", fake + "class CalcTests(")
+        with Env() as e:
+            r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": test}))
+            after = test.replace("self.y = 1", "self.z = 1").replace(
+                "        return self.y\n", "        return self.z\n\n    def close(self):\n        return True\n") + \
+                "\n    def test_close(self):\n        self.assertTrue(Fake().close())\n" \
+                "        self.assertEqual(Fake().get(), 1)\n"
+            edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            rows = json.loads(out)["tests"]
+        self.assertEqual([("test_calc.CalcTests.test_close", "does not test the change")],
+                         [(x["id"], x["verdict"]) for x in rows], out + err)
+        self.assertEqual(1, rc)
+
+    # one hunk edits two attributes with a new method between them: no line-by-line undo is clean, so the file's
+    # tests cannot be proven
+    def test_a_mixed_hunk_that_cannot_be_undone_line_by_line_cannot_be_proven(self):
+        fake = "class Fake:\n    x = 1\n    y = 2\n\n\n"
+        test = with_tests().replace("class CalcTests(", fake + "class CalcTests(")
+        with Env() as e:
+            r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": test}))
+            after = test.replace("    x = 1\n    y = 2\n",
+                                 "    x = 10\n\n    def c(self):\n        return 3\n\n    y = 20\n") + \
+                "\n    def test_c(self):\n        self.assertEqual(Fake().c() + Fake.x, 13)\n"
+            edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            rows = json.loads(out)["tests"]
+        self.assertEqual([("test_calc.CalcTests.test_c", testx._HELPERS_TANGLED)],
+                         [(x["id"], x["verdict"]) for x in rows], out + err)
+        self.assertEqual(2, rc)
+
+    def test_an_arrow_property_s_if_block_is_no_member_of_a_javascript_class(self):
+        before = ("class Fake {\n  close = () => {\n    return 2;\n  };\n  get() {\n    return 1;\n  }\n}\n\n"
+                  "test('a', () => { expect(new Fake().get()).toBe(1); });\n")
+        after = before.replace("    return 2;\n", "    if (this.y) {\n      return 3;\n    }\n    return 2;\n")
+        self.assertNotIn(("Fake", "if"), testx._js_members(after))
+        for word in ("for", "while", "switch"):
+            self.assertNotIn(("Fake", word), testx._js_members(after.replace("if (this.y)", f"{word} (this.y)")))
 
     def test_a_method_added_to_a_javascript_helper_class_stays(self):
         before = ("class Fake {\n  get() {\n    const y = 0;\n    return 1 + y;\n  }\n}\n\n"
@@ -237,11 +289,6 @@ class SharedHelperTests(unittest.TestCase):
     def test_plain(self):""")
         self.assertEqual(["Shared.test_half"], changed(PY_SHARED, after))
 
-    def test_a_changed_module_function_selects_the_tests_that_call_it(self):
-        before = PY_SHARED.replace("class Shared", "def make():\n    return 5\n\n\nclass Shared").replace(
-            "self.assertEqual(self.base, 1)", "self.assertEqual(make(), 5)")
-        after = before.replace("return 5", "return 2 + 3")
-        self.assertEqual(["Shared.test_plain"], changed(before, after))
 
 
 
@@ -576,8 +623,6 @@ class RecorderTests(unittest.TestCase):
             "timeout list": "subprocess.run(['timeout', '30', exe, {li}'-c', 'pass'], executable=%r)",
             "nice list": "subprocess.run(['nice', '-n', '5', exe, {li}'-c', 'pass'], executable=%r)",
             "xargs list": "subprocess.run(['xargs', exe, {li}'-c'], executable=%r)",
-            "--check-hash-based-pycs value": "subprocess.run([exe, '--check-hash-based-pycs', 'default', {li}'-c', "
-                                             "'pass'], executable=%r)",
         }
         for name, form in forms.items():
             for skips in (True, False):

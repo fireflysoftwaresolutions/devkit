@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import difflib
 import fcntl
 import fnmatch
 import glob
@@ -3725,7 +3726,9 @@ def _js_support(text: str) -> list:
     return out
 
 
-_JS_MEMBER = re.compile(r"^[ \t]*(?:(?:static|async|get|set)\s+)*\*?\s*([A-Za-z_$#][\w$]*)\s*\(", re.M)
+# a statement inside an arrow property's body (if (…) {, for (…) {) is no member
+_JS_MEMBER = re.compile(r"^[ \t]*(?:(?:static|async|get|set)\s+)*\*?\s*"
+                        r"(?!(?:if|for|while|switch|catch|with|return|function)\b)([A-Za-z_$#][\w$]*)\s*\(", re.M)
 
 
 def _js_members(text: str) -> dict:
@@ -3875,8 +3878,9 @@ def _support_text(top, base, f):
     defined inside a test module is part of the change, as a fix in a helper file is, so the module's tests run
     against the helper's old text without the change. Lines the change adds inside a named helper that was there at
     `base` go with it, so the helper comes back whole: never its old signature with a body that reads the new one. A
-    helper the change adds stays, as an added helper file does, and so does every test. -> the text, or None when no
-    support of `f` changed."""
+    helper the change adds stays, as an added helper file does, and so does every test. A hunk that both edits a
+    helper that was there and adds one is undone line by line (_undo_mixed). -> the text, None when no support of `f`
+    changed, or _SUPPORT_TANGLED when a change to it cannot be undone without the helpers it adds."""
     if _lang(f) not in ("py", "js"):
         return None
     p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
@@ -3902,23 +3906,73 @@ def _support_text(top, base, f):
         existing = [(a, b) for x, a, b in js if x in had and x not in classes]
     existing += [span for k, span in members.items() if k in had_members]
     added = [span for k, span in members.items() if k not in had_members]  # a member the change adds stays whole
-    edits = []  # (index in `new`, lines replaced, their text without the change)
+    edits, tangled = [], False  # edits: (index in `new`, lines replaced, their text without the change)
     for m in re.finditer(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
                          _git(top, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--", f)):
         o, oc, n, nc = (int(g) if g is not None else 1 for g in m.groups())  # a count left out is 1
         lines = range(n, n + nc) if nc else (n, n + 1)  # -U0 writes a deletion as +<the line before it>,0
         said = [x for x in old[o - 1:o - 1 + oc] + new[n - 1:n - 1 + nc]
                 if x.strip() and not x.strip().startswith(("#", "//"))]
-        if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines) and \
-                not any(s <= ln <= e for s, e in added for ln in lines):
-            edits.append((n - 1 if nc else n, nc, old[o - 1:o - 1 + oc]))
+        if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines):
+            # a hunk that also adds a helper keeps only that helper's lines, so the edit beside it goes with the change
+            keep = [any(s <= ln <= e for s, e in added) for ln in range(n, n + nc)]
+            before = _undo_mixed(old[o - 1:o - 1 + oc], new[n - 1:n - 1 + nc], keep) if any(keep) else \
+                old[o - 1:o - 1 + oc]
+            tangled = tangled or before is None
+            edits.append((n - 1 if nc else n, nc, new[n - 1:n - 1 + nc] if before is None else before))
         elif not oc:  # an addition: its lines inside a helper that was there at base go
             inside = [ln for ln in lines if any(s <= ln <= e for s, e in existing)]
             if any(new[ln - 1].strip() and not new[ln - 1].strip().startswith(("#", "//")) for ln in inside):
                 edits += [(ln - 1, 1, []) for ln in inside]
     for at, count, before in sorted(edits, key=lambda x: x[0], reverse=True):
         new[at:at + count] = before
-    return "".join(new) if edits else None
+    if _lang(f) == "py" and edits and not tangled:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                ast.parse("".join(new))
+        except (SyntaxError, ValueError):
+            tangled = True
+    return _SUPPORT_TANGLED if tangled else "".join(new) if edits else None
+
+
+# _support_text's answer for a test module whose helper change cannot be undone apart from the helpers it adds
+_SUPPORT_TANGLED = object()
+
+
+def _undo_mixed(old, new, keep):
+    """The lines of a hunk without the change, when it edits helpers that were there and adds others: `old` and `new`
+    are its lines at base and now, `keep[j]` whether new[j] is inside a helper the change adds. Each block that differs
+    (difflib's opcodes) keeps its lines of added helpers and its blank lines, and its other lines give way to the old
+    ones. -> the lines, or None when where the old lines go is unclear (two runs of edited lines around an added
+    helper)."""
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag == "equal" or j1 == j2:
+            out += new[j1:j2] if tag == "equal" else old[i1:i2]
+            continue
+        pieces = []  # a kept line, or a list: a run of the other new lines
+        for j in range(j1, j2):
+            if keep[j]:
+                pieces.append(new[j])
+            elif pieces and isinstance(pieces[-1], list):
+                pieces[-1].append(new[j])
+            else:
+                pieces.append([new[j]])
+        runs = [p for p in pieces if isinstance(p, list) and any(x.strip() for x in p)]
+        was = old[i1:i2]
+        if len(runs) > 1 and any(x.strip() for x in was):
+            return None
+        out += was if not runs else []
+        for p in pieces:
+            if not isinstance(p, list):
+                out.append(p)
+            elif runs and p is runs[0]:  # the edited lines give way to the old ones; the blank lines after them stay
+                blank = len(p) - next(i for i in range(len(p), 0, -1) if p[i - 1].strip())
+                out += was + p[len(p) - blank:]
+            elif not any(x.strip() for x in p):
+                out += p
+    return out
 
 
 _SETUP_NAMES = {"setUp", "tearDown", "setUpClass", "tearDownClass", "asyncSetUp", "asyncTearDown",
@@ -4372,9 +4426,10 @@ _SETUP_STOPPED = "cannot be proven: stops in its class or module setup without t
 _CHECKOUT_IMPORT = "cannot be proven: imported the checkout's "  # + the changed files it imported
 _NO_IMPORT_RECORD = "cannot be proven: no record of what the run imported"
 _NOT_FROM_COPY = "cannot be proven: imported none of the changed files from the copy"
+_HELPERS_TANGLED = "cannot be proven: its module's helper change cannot be undone apart from the helpers it adds"
 
 _NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD,
-               _NOT_FROM_COPY)
+               _NOT_FROM_COPY, _HELPERS_TANGLED)
 
 
 def _not_proven(verdict: str) -> bool:
@@ -4968,8 +5023,14 @@ def _prove(a, top, runners) -> int:
     # test helpers, conftest.py, fixtures: part of the change, restored with it
     helpers = [f for f in changed if repo.is_test(f) and not repo.runnable(f) and f not in scripts and f not in tests]
     # helpers defined inside the changed test modules (outside every test): their fixes are part of the change too
-    inner = {f: text for f in tests for text in [_support_text(top, base, f)] if text is not None}
-    if not prod and not helpers and not inner:
+    inner, tangled = {}, []  # tangled: modules whose helper change cannot be undone apart from the helpers it adds
+    for f in tests:
+        text = _support_text(top, base, f)
+        if text is _SUPPORT_TANGLED:
+            tangled.append(f)
+        elif text is not None:
+            inner[f] = text
+    if not prod and not helpers and not inner and not tangled:
         return _refuse(f"no production change to prove against: only test modules changed since {label}",
                        "prove checks that each new test fails without your change (code outside the tests, a test "
                        "helper or a fixture); compare with --since <ref>")
@@ -5133,6 +5194,8 @@ def _prove(a, top, runners) -> int:
         verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
+                   # its module ran with its helper change in place, so its result says nothing about the change
+                   _HELPERS_TANGLED if rec["file"] in tangled else
                    # the run without the change ran the checkout's changed code: its result says nothing
                    _CHECKOUT_IMPORT + ", ".join(stayed) if stayed else
                    _NO_IMPORT_RECORD if py and py_undo and (not mine["recorded"] or mine["unrecorded"]) else
@@ -5158,6 +5221,7 @@ def _prove(a, top, runners) -> int:
         print(json.dumps({**({"prevention_eligible": prevention_eligible} if isolated else {}),
                           "base": label, "production": prod, "helpers": helpers,
                           **({"test_module_helpers": sorted(inner)} if inner else {}),
+                          **({"test_module_helpers_kept": tangled} if tangled else {}),
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
                           "imports": {k: evidence[k] for k in ("from_copy", "from_checkout")},
                           **({"unrecorded": evidence["unrecorded"]} if evidence["unrecorded"] else {}),
@@ -5208,6 +5272,9 @@ def _prove(a, top, runners) -> int:
                                              "PYTHONPATH without devkit's recorder, skips the record" +
                  (": " + "; ".join(f"`{c}`" for c in evidence["unrecorded"][:3]) if evidence["unrecorded"] else "") +
                  "):"),
+                (_HELPERS_TANGLED, ui.WARN, "cannot be proven: one hunk of their module both edits a helper that was "
+                                            "there and adds another, and no line-by-line undo of it is clean, so "
+                                            "the run without the change kept the helper change:"),
                 (_NOT_FROM_COPY, ui.WARN, "cannot be proven: the run without the change imported none of the changed "
                                           "Python files from the copy, so nothing shows that it ran the code without "
                                           "the change:"),

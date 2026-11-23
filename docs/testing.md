@@ -220,8 +220,10 @@ never touched):
    merge-base with `origin/<default>`, or `--since REF`) and runs the test. A changed test helper or fixture counts
    as part of the change and is restored too, and so is changed helper code inside a Python test module, outside its
    tests, so a fix that lives only in a helper is proven. Such a helper comes back whole, without the lines the change
-   added inside it; a helper the change adds stays. A test that still
-   passes is reported as "does not test the change."
+   added inside it; a helper the change adds stays. When one diff hunk both edits a helper that was there and adds
+   another, the hunk is undone line by line: the added helper's lines stay and the edited lines go back. If that
+   cannot be done cleanly, the module's tests are "cannot be proven." A test that still passes is reported as "does
+   not test the change."
 2. **It is stable.** It runs the test five times with your change (`--runs N` changes the count). A test that is not
    five times green is reported as flaky. This is the rule Meta's TestGen-LLM applies to generated tests.
 
