@@ -803,14 +803,35 @@ def _js_code(text: str) -> str:
     return "".join(out)
 
 
+_JS_TYPE_ONLY = re.compile(r"""^(?:import|export)\s+type\b""")
+_JS_ONLY_NAMED = re.compile(r"""^(?:import|export)\s*\{([^}]*)\}\s*from\b""")  # no default or namespace import
+
+
+def _js_value_specs(code: str) -> list:
+    """The modules JS/TS `code` loads at run time: every import, export … from, require and dynamic import, except
+    those that bring in types only (import type, export type … from, import { type A, type B } from), which the
+    compiler erases."""
+    out = []
+    for m in _JS_SPEC.finditer(code):
+        stmt = m.group(0)
+        if _JS_TYPE_ONLY.match(stmt):
+            continue
+        named = _JS_ONLY_NAMED.match(stmt)
+        names = [x.split() for x in named.group(1).split(",") if x.strip()] if named else []
+        if names and all(x[0] == "type" for x in names):
+            continue  # every name in the braces is a type (`import {} from` still loads the module)
+        out.append(m.group(1))
+    return out
+
+
 def _uses_playwright(repo, f, seen=None) -> bool:
-    """Does JavaScript file `f` import @playwright/test, itself or through the local modules it imports (a fixtures
-    file that extends Playwright's test)?"""
+    """Does JavaScript file `f` load @playwright/test at run time, itself or through the local modules it loads (a
+    fixtures file that extends Playwright's test)? A type imported from it, directly or by a helper, loads nothing."""
     seen = set() if seen is None else seen
     if f in seen:
         return False
     seen.add(f)
-    specs = _JS_SPEC.findall(_js_code(repo.text(f)))
+    specs = _js_value_specs(_js_code(repo.text(f)))
     if any(s == "@playwright/test" or s.startswith("@playwright/test/") for s in specs):
         return True
     d = f.rpartition("/")[0]
