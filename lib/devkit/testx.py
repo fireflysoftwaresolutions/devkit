@@ -345,7 +345,9 @@ def _list_key(top, runner, repo) -> str:
     return h.hexdigest()
 
 
-_LIST_UNITTEST = """import json, sys, unittest
+# a module that fails to import is listed as unittest.loader's stand-in test named after the module: it is a test file
+# that fails, so it is listed by the file its name finds
+_LIST_UNITTEST = """import importlib.util, json, sys, unittest
 start, top = sys.argv[1], sys.argv[2]
 suite = unittest.TestLoader().discover(start, top_level_dir=top)
 out = set()
@@ -355,6 +357,13 @@ def walk(s):
             walk(x)
         elif type(x).__module__ != "unittest.loader":
             out.add(sys.modules[type(x).__module__].__file__)
+        else:
+            try:
+                spec = importlib.util.find_spec(x._testMethodName)
+            except Exception:
+                spec = None
+            if spec is not None and spec.origin:
+                out.add(spec.origin)
 walk(suite)
 print(json.dumps(sorted(out)))
 """

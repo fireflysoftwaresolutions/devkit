@@ -96,6 +96,20 @@ class ListingTests(unittest.TestCase):
                         "tests/test_support.py": "def make():\n    return 1\n"}, branch=None)
             self.assertEqual(["tests/test_calc.py"], testx._Repo(str(r)).tests)
 
+    # a test module that fails to import is a failing test file, not a non-test: the listing keeps it, and its
+    # recorded failure stays until it passes
+    def test_a_unittest_module_that_fails_to_import_stays_a_test_and_keeps_its_failure(self):
+        ok = "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(1, 1)\n"
+        with Env() as e:
+            r = e.repo({"tests/__init__.py": "", "tests/test_ok.py": ok, "tests/test_broken.py": ok})
+            write(r, {"tests/test_broken.py": "import no_such_module\n" + ok})
+            self.assertEqual(["tests/test_broken.py", "tests/test_ok.py"], testx._Repo(str(r)).tests)
+            for _ in range(2):  # the second run starts with the recorded failure
+                rc, out, err = dev(r, "--json", "--listed")
+                failed = [f["id"] for s in json.loads(out)["steps"] for x in s["runs"] for f in x["failures"]]
+                self.assertEqual((1, True), (rc, any("test_broken" in i for i in failed)), out + err)
+                self.assertNotIn("no longer select", out + err)
+
     # dev test plan --listed says the selection came from the runner's listing
     def test_plan_says_the_tests_come_from_the_runners_listing(self):
         with Env() as e:
