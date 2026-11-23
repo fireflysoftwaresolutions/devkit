@@ -37,6 +37,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -4867,8 +4868,9 @@ def _matches(text: str, step: dict) -> bool:
 def _audit(action: str, target: str, detail: str = "", outcome: str = "ok", **extra):
     """Every coordination event goes to the audit trail too (dev audit; published to the handoff repository). Inside
     _audits_held, the record waits for the end of that block."""
-    if _HELD_AUDITS:
-        _HELD_AUDITS[-1].append((action, target, detail, outcome, extra))
+    blocks = _held_blocks()
+    if blocks:
+        blocks[-1].append((action, target, detail, outcome, extra))
         return
     try:
         from . import audit
@@ -4877,7 +4879,15 @@ def _audit(action: str, target: str, detail: str = "", outcome: str = "ok", **ex
         pass
 
 
-_HELD_AUDITS: list = []  # the open _audits_held blocks, innermost last: each the records it holds
+_HELD_AUDITS = threading.local()  # per thread: a command's block never holds another thread's records
+
+
+def _held_blocks() -> list:
+    """This thread's open _audits_held blocks, innermost last: each the records it holds."""
+    blocks = getattr(_HELD_AUDITS, "blocks", None)
+    if blocks is None:
+        blocks = _HELD_AUDITS.blocks = []
+    return blocks
 
 
 @contextlib.contextmanager
@@ -4885,14 +4895,14 @@ def _audits_held():
     """Around a command's transaction that can still be refused after it changed the run in memory (a notice that
     cannot be sent, _ask_in): the audit records written inside are recorded when the block ends without an error, and
     dropped when it raises, so the audit trail never records a change the run never saved."""
-    held = []
-    _HELD_AUDITS.append(held)
+    held, blocks = [], _held_blocks()
+    blocks.append(held)
     try:
         yield
     except BaseException:
-        _HELD_AUDITS.pop()
+        blocks.pop()
         raise
-    _HELD_AUDITS.pop()
+    blocks.pop()
     for action, target, detail, outcome, extra in held:
         _audit(action, target, detail, outcome, **extra)
 
