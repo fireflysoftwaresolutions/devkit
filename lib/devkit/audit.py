@@ -1834,6 +1834,16 @@ def _nameable(key, rules) -> bool:
         and not any(r.search(k) for r in rules or ())
 
 
+def nameable_key(key, own=None) -> bool:
+    """_nameable with the patterns that load now: this Mac's audit section (`own`, the raw section a caller checks;
+    else the loaded configuration's) and the team policy's. For text outside an audit record that names a key a
+    person typed: `dev config validate`."""
+    mine = core.audit_config(own if own is not None else core.CFG.get("audit") or {})[0]
+    raw, _ = _team_policy(policy_file())
+    team = core.audit_config(raw, fill=False)[0] if raw is not None else {}
+    return _nameable(key, _loaded_rules(mine, team))
+
+
 def _unknown_key(path, rules) -> str:
     """An unknown key of an audit section, as a reason says it: "an unknown key audit.redcat", or, when the key may
     not be named (_nameable), its length and where it is: "an unknown key of 40 characters in audit.retention"."""
