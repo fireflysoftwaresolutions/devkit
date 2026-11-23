@@ -22,15 +22,31 @@ each failure with `file:line` and its first error line, and the path to the full
 terminal, or with `-v`. A package gets the Node runner when its `package.json` test script runs `node --test`, or runs
 its test scripts with `node`, and `node` is on the `PATH`. A path you name must be inside the repository:
 `dev test run ../other/a.test.js`, an absolute path outside it, or a symlink that leads out of it is refused with
-`no test runner for:` and runs nothing.
+`no test runner for:` and runs nothing. A list passed as one word, which zsh does with an unquoted `$MODULES`, is split
+into its tests, and the run says so; write `${=MODULES}` in zsh to pass the words yourself.
+
+The command comes from the project first. Each runner takes the first plain call of the same runner in the same folder
+that the project declares: a `test_gate` entry of its delivery policy (`dev delivery`), then a step of its CI
+workflows (as `dev ci` reads them), then the `package.json` test script. A bare `python` in a CI step becomes the
+interpreter devkit found here. Only without a declaration does devkit infer the command from the project's files.
+`dev test plan` prints which (`command: declared by …` or `inferred`), and `dev test --json` gives `source` and
+`declared_by` for every run.
+
+With `--listed` (or `"test": {"listing": true}` in devkit's configuration), the runner's own listing decides which
+files hold tests: `pytest --collect-only`, unittest's discovery, `vitest list`, `playwright test --list`, or
+`jest --listTests`. A file named like a test that the runner does not collect is no test, and a file it collects under
+another name is one. The listing is cached in devkit's state and runs again only when the runner's configuration
+files or the names of its files change. devkit's own suite lists in about 4.5 seconds, then 1 second from the cache;
+a large pytest suite can take 30 seconds, which is why it is not the default yet.
 
 Some test files belong to a more specific runner than their package's Jest or Vitest:
 
 - **Browser specs.** The specs in the `testDir` folders of a `playwright.config.*` run with Playwright
   (`npx playwright test <files>`); Vitest and Jest leave them out. A config without `testDir`, or whose `testDir` is
   its own folder (`'.'`), gives Playwright the specs of its folder that import `@playwright/test`, directly or
-  through a local fixtures file, and the unit tests beside them keep their runner. A commented-out `testDir` counts
-  as none.
+  through a local fixtures file, and the unit tests beside them keep their runner. A type imported from
+  `@playwright/test` (`import type`, `import { type Page }`, `export type … from`) loads nothing, so a unit test that
+  only reaches such a type stays with its runner. A commented-out `testDir` counts as none.
 - **Angular unit tests.** A project in `angular.json` whose `test` target uses the unit-test builder
   (`@angular/build:unit-test`) with its Vitest runner runs its specs through `ng test <project> --include <file>`, so
   they build with the workspace's TypeScript paths, setup files, and providers, which a bare Vitest run lacks. Its specs
@@ -66,6 +82,8 @@ devkit maps the files you changed to the tests that can see them:
 | A test helper | the tests that use it |
 | A source file | the tests that import it, directly or through other modules (Python imports, JavaScript and TypeScript imports, Java and Kotlin class references, Go packages, PHP `use` statements), the tests named after it (`parser.py` and `test_parser.py`), or Jest's and Vitest's own related-test search |
 | A data, template, or configuration file that code reads by name | the tests of the code that reads it |
+| A file that a code file names by its whole path (`'lib/devkit/state.py'` in a script) | the tests of that code file |
+| Any file under a folder that a test walks (`(ROOT / "lib" / "devkit").rglob("*.py")`, `os.walk("pkg")`) | that test, though it imports nothing |
 | Lint, format, or release tool configuration | nothing |
 | Documentation | nothing, unless code reads the file by name |
 | A file no test maps to | the tests of its directory or package, widened up to all tests, never nothing |
@@ -130,7 +148,9 @@ from the record:
 
 A runner's own answer for a name that is gone counts as that confirmation, whatever its exit code: pytest stops with
 "no tests ran" and exits with `4`. An incomplete unittest run cannot remove failures this way. A test module that
-exists but fails to import is a real failure and stays recorded.
+exists but fails to import is a real failure and stays recorded. A failure recorded in a file that is no test here any
+more (a module named `test_*.py` outside pytest's `testpaths`, which an older devkit ran) is named and forgotten, so it
+never blocks `dev test` again.
 
 ### After a CI step fails
 
@@ -144,6 +164,8 @@ files changed since then can affect it. A test step with valid completion eviden
 plus the affected ones. An interrupted selection, or an older record without completion evidence, reruns the whole
 test step. This also applies when a previous partial rerun was interrupted. Other unaffected steps can stay kept.
 Full unittest steps retain the original shell's variable expansion, quoting, working directory, and interpreter.
+A partial rerun past the step's time limit stops every process it started (the runner, its workers, and the tests'
+own children), as a full step does.
 
 When it all passes, devkit records evidence of the kind `resumed`, which `dev push` and `dev pr create` accept and the PR
 describes honestly, for example "full on abc123 + 37 affected tests on def456." CI still runs everything.
@@ -194,6 +216,20 @@ never touched):
    passes is reported as "does not test the change."
 2. **It is stable.** It runs the test five times with your change (`--runs N` changes the count). A test that is not
    five times green is reported as flaky. This is the rule Meta's TestGen-LLM applies to generated tests.
+
+A test counts as new or changed when its own text differs from the same-named test at the base, so a test that moved,
+or that new tests were inserted around, stays unchanged. A changed helper of the test file (a method of a shared test
+class, a module function, a JavaScript function between two `it()` blocks) changes the tests that call it, directly or
+through other helpers; `setUp`, a `beforeEach`, a module setup, or an autouse fixture changes every test it runs for.
+A JavaScript test ends at the bracket that closes its `it()` or `test()` call, and `it.each` and `test.each` are one
+test named by their title template (`'adds %i and one'`, `'returns $b for $a'`), which matches each of their cases.
+
+The run without your change records which files each Python process imported. `dev test prove` says "proves the
+change" only with that record: a changed file imported from the checkout, where your change stays (a `.pth` file that
+puts the checkout's folder first, or a built copy of the checkout's package that the copy cannot replace) makes its
+tests "cannot be proven: imported the checkout's `<file>`." A JavaScript workspace package that the linked
+`node_modules` resolves into the checkout does the same. A Python run that left no record is not proven either. `dev test prove
+--json` lists the evidence under `imports`: `from_copy` and `from_checkout`.
 
 The copy carries a clone of the checkout's git repository that shares its objects, so a test that runs git on its
 checkout works there. The dependency folders (`node_modules`, `.venv`, `vendor`) are linked into the copy, not
