@@ -678,6 +678,20 @@ class ReviewLaneTests(unittest.TestCase):
         self.stop(self.m(25))
         self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
 
+    def test_a_launch_naming_one_review_takes_another_waiting_one_only_as_joined_and_tells_the_reviewer(self):
+        # a Code reviewer launched for review-ui also took the older review-api as if its launch named it, since the
+        # word "review" was all that was left to compare once review-ui was taken: nobody told the reviewer, and a
+        # Codex child's brief was review-api's. Reviews share a lane, so it joins, as a step its launch does not name
+        pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
+        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(13))
+        launch("a_ser", "devkit:seraph", "Seraph: review-ui", at=self.m(14))
+        run = pg.load_run("claude", "s1")
+        ui, api = (next(s for s in run["plan"] if s["name"] == n) for n in ("review-ui", "review-api"))
+        self.assertEqual((ui["owner"], ui["state"], ui.get("joined")), ("a_ser", "running", None))
+        self.assertEqual((api["owner"], api.get("joined")), ("a_ser", "a_ser"))
+        told = [m["text"] for m in run.get("messages") or [] if m.get("to") == "a_ser"]
+        self.assertTrue(any("“review-api” is your step now" in t for t in told), told)
+
     def test_one_launch_that_names_two_reviews_binds_both(self):
         pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
         pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(12))

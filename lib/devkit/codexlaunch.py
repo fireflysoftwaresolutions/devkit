@@ -489,8 +489,7 @@ def brief_context(agent: str, data: dict, launch: dict, project: str) -> str:
     its launch bound to. '' when there is nothing to add."""
     from . import progress, skillguard
     run, _ = progress.lane_of(agent, str(data.get("session_id") or ""), str(data.get("agent_id") or ""))
-    step = next((s for s in (run or {}).get("plan") or [] if s.get("owner") == data.get("agent_id")
-                 and s.get("state") not in progress.DONE), None) or {}
+    step = progress.launch_step(run, str(data.get("agent_id") or "")) or {}  # never a step that only joined its lane
     out = skillguard.on_agent_brief(agent, {"description": launch["label"], "prompt": ""}, project,
                                     activity=str(step.get("activity") or ""), files=step.get("scope") or None)
     return str((out or {}).get("prompt") or "").strip()

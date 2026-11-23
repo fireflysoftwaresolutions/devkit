@@ -2152,15 +2152,32 @@ def lane_wait(run: dict, s: dict, live: list) -> str:
             f"dev progress step --step \"{name}\" closes it")
 
 
+def launch_step(run: dict, aid: str):
+    """The open step of lane `aid` its launch is about: of the steps it owns that are not done, those that did not
+    join it later (`joined`: a review that joined a reviewer's lane), the one its launch description names best
+    (_name_score), else the first in plan order; None when it owns none. A Codex member's start context comes from it
+    (codexlaunch.brief_context)."""
+    mine = [s for s in (run or {}).get("plan") or [] if s.get("owner") == aid and s.get("state") not in DONE]
+    own = [s for s in mine if s.get("joined") != aid] or mine
+    if not own:
+        return None
+    task = _task_text((((run or {}).get("agents") or {}).get(aid) or {}).get("label") or "")
+    return max(own, key=lambda s: _name_score(task, s["name"]))  # the first of equals
+
+
 def _launch_named(run: dict, aid: str, lane: dict):
     """The step of its member that lane `aid`'s launch description names best, alone (as _bind_step scores it),
-    among the pending steps that may go to it; None when it names none of them, or two equally."""
+    among the pending steps that may go to it; None when it names none of them, or two equally. The steps the lane
+    runs already count too: a launch that names one of them as well or better names no step still waiting (one
+    word left in common, such as "review" once "review-ui" is taken, names no "review-api")."""
     task = _task_text(lane.get("label") or "")
     scored = [(_name_score(task, x["name"]), x["name"]) for x in _queued_for(run, aid)]
     if not scored:
         return None
     best = max(sc for sc, _ in scored)
     top = [n for sc, n in scored if sc == best]
+    if any(_name_score(task, x["name"]) >= best for x in coord.held(run, aid)):
+        return None
     return top[0] if best[1] and len(top) == 1 else None
 
 
