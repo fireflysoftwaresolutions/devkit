@@ -48,6 +48,16 @@ folder). The daily `audit` job closes each segment once its day has passed, comp
   its month has passed, and holds the file's own lock, the one such a session appends under, from its last read of
   the file until it removes it.
 
+### Known gaps
+
+- **A session still on devkit 26.11.27 or earlier misses the compressed segments until it restarts.** It reads only
+  the plain files at the top of the audit folder, so its `dev audit` queries and its embargo check skip this
+  machine's closed segments. With `audit.publish` on, its embargo check still finds an embargo in the published
+  segments of the handoff copy. Restart every session after the update: `dev install` and `dev update` list them.
+- **Such a session can lose a record at the moment the job closes last month's file.** The job holds the file's lock
+  while it closes it, but a session that opened the file just before waits for that lock and then appends to the
+  file the job has removed. It takes a record dated last month, written in the moment the job runs.
+
 ## Retention
 
 The daily `audit` job publishes the last three months to `audit/<user>@<machine id>/` in the handoff repository (see
@@ -68,9 +78,10 @@ or an external audit, raises `team_months` there and says why in the commit.
 
 Every prune is itself recorded as `audit.prune`, with the months and the number of records it removed. The manifest
 keeps the link of the last segment it removed as `start`, so the first segment kept still verifies. A reseal map
-goes with the `audit.reseal` record that backs it: when prune removes the segment that holds that record, here or in
-the handoff copy, it removes the map there too and names it in `audit.prune`. The segments the map bridged are older,
-so they are gone by then. `dev audit config` shows the effective values, where the records are, their size, and what the next prune removes.
+goes with the `audit.reseal` record that backs it: prune removes the map wherever it removes the segment that holds
+that record (on this machine, in the handoff copy, or both), and names it in `audit.prune`. The segments the map
+bridged are older, so they are gone by then.
+`dev audit config` shows the effective values, where the records are, their size, and what the next prune removes.
 
 ### What git keeps
 
