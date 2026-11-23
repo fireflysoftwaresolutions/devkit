@@ -2305,10 +2305,12 @@ class NamesAndUnknownFiguresTests(unittest.TestCase):
         return out
 
     # A voice-control user says what a button shows: each session bar's name, and the palette button's, starts with its
-    # visible text (WCAG 2.5.3), and the bar's name still carries the task, branch, agent and steps
+    # visible text (WCAG 2.5.3), and the bar's name still carries the task, branch, agent and steps. The text is read as
+    # axe reads it, the spans' text joined as written (a span is phrasing content), so "widget" and "1/3" need a space
     def test_a_session_bar_and_the_palette_button_are_named_first_by_the_text_they_show(self):
-        out = self.probe("""out.bars = $$("main .sbar").map(b => [seen(b), b.getAttribute("aria-label")]);
-            const k = $("#palbtn"); out.pal = [seen(k), k.getAttribute("aria-label"), k.getAttribute("aria-keyshortcuts")];""", 1440, "#/projects/acme/widget")
+        out = self.probe("""const raw = b => b.textContent.replace(/\\s+/g, " ").trim();
+            out.bars = $$("main .sbar").map(b => [raw(b), b.getAttribute("aria-label")]);
+            const k = $("#palbtn"); out.pal = [raw(k), k.getAttribute("aria-label"), k.getAttribute("aria-keyshortcuts")];""", 1440, "#/projects/acme/widget")
         self.assertEqual(len(out["bars"]), 3, out["bars"])
         for shown, name in out["bars"]:
             self.assertTrue(name.startswith(shown + ","), (shown, name))
