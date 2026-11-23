@@ -2607,11 +2607,12 @@ def close(now: float = None, force: bool = False) -> list:
         with _lock():
             _flush_quiet(_utc_day(now - 86400), now)
             man = _read_manifest(_manifest_file())
-            if man.get("error"):
-                return []
-            for e in man["units"]:
+            for e in [] if man.get("error") else man["units"]:
                 if (AUDIT / f"{e['name']}.jsonl").is_file():
                     _drop_leftover(AUDIT / f"{e['name']}.jsonl", e)
+        _forward_summaries()
+        if man.get("error"):
+            return []
         units = _units(man=man)
         done = {e["name"] for e in man["units"]}  # listed: a compressed file alone may be a close that stopped
         # a month file an earlier devkit wrote again after it was closed stays plain: closing it would replace the
@@ -2689,9 +2690,24 @@ def _summary(day: str, action: str, c: dict, ts: float) -> dict:
             "outcome": "ok", "evidence": {"count": n}, "ref": {"type": "summary"}}
 
 
+_UNFORWARDED: list = []  # summaries _flush_quiet wrote under the append lock, for audit.forward once it is released
+
+
+def _forward_summaries(cfg: dict = None):
+    """Send the summaries written under the append lock to audit.forward, after the lock: a slow syslog never holds
+    up the writers. Never raises."""
+    while _UNFORWARDED:
+        rec = _UNFORWARDED.pop(0)
+        try:
+            _forward(rec, cfg or settings())
+        except Exception:
+            pass
+
+
 def _flush_quiet(through: str, now: float):
     """Under the append lock: write the summaries of every counted UTC day up to `through`, then forget their counts.
-    Each goes to the segment of its day, or after it when that one is closed."""
+    Each goes to the segment of its day, or after it when that one is closed, and to audit.forward once the lock is
+    released (_forward_summaries)."""
     q = core.read_json(_quiet_file(), None)
     if not isinstance(q, dict) or not q:
         return
@@ -2708,7 +2724,7 @@ def _flush_quiet(through: str, now: float):
                 last = c.get("last")
                 ts = float(last) if isinstance(last, (int, float)) and not isinstance(last, bool) else now
                 ts = min(max(ts, start), start + 86399.999)
-                _write_record(_summary(d, action, c, ts), ts, flush=False)
+                _UNFORWARDED.append(_write_record(_summary(d, action, c, ts), ts, flush=False))
         del q[d]
     if q:
         _write_file(_quiet_file(), json.dumps(q, sort_keys=True).encode())
@@ -2792,6 +2808,7 @@ def record(action: str, target: str = "", detail: str = "", outcome: str = "ok",
             _count_quiet(rec)
             return None
         rec = _append(rec)
+        _forward_summaries(cfg)  # the first record of a new day wrote the summaries of the days before it
         _forward(rec, cfg)
         return rec
     except Exception:

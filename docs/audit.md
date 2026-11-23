@@ -628,6 +628,8 @@ To send every new record to another system as it is written, set `audit.forward`
 | `syslog` | The Mac's local syslog, as a CEF line (facility 13, log audit) |
 | `syslog://host:port` | A syslog server over UDP, as a CEF line |
 
+The daily summaries of `dev.sync` and handoff pushes at level `changes` are forwarded too, when they are written.
+
 `audit.redact.extra` adds your own regular expressions to the redactor, for secrets that only your team uses. A team
 policy can add patterns, never remove them.
 

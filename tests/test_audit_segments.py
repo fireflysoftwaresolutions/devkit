@@ -706,5 +706,31 @@ class LatePublishTests(SegmentCase):
         self.assertTrue(res["ok"], res["first"])
 
 
+class ForwardTests(SegmentCase):
+    def setUp(self):
+        super().setUp()
+        self.sink = self.root / "forwarded.jsonl"
+        core.CFG["audit"]["forward"] = str(self.sink)
+
+    def forwarded(self) -> list:
+        return [json.loads(ln) for ln in self.sink.read_text().splitlines()] if self.sink.is_file() else []
+
+    def test_the_jobs_daily_summary_is_forwarded(self):
+        for _ in range(3):
+            audit.record("dev.sync", ["--quiet"], "", "ok")
+        audit.close(now=time.time() + DAY)
+        sums = [r for r in self.forwarded() if (r.get("ref") or {}).get("type") == "summary"]
+        self.assertEqual([(r["action"], r["evidence"]["count"]) for r in sums], [("dev.sync", 3)])
+
+    def test_a_summary_written_when_a_new_day_starts_is_forwarded(self):
+        self.write(noon(1), 1)
+        for i in range(2):
+            audit._count_quiet(audit.build("handoff.push", "acme/handoff", "1 commit(s)", "ok", now=noon(1) + i))
+        today = audit.record("dev.task", "today")
+        got = [(r["action"], (r.get("evidence") or {}).get("count")) for r in self.forwarded()]
+        self.assertIn(("handoff.push", 2), got)
+        self.assertEqual(self.forwarded()[-1]["id"], today["id"])
+
+
 if __name__ == "__main__":
     unittest.main()
