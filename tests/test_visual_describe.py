@@ -341,6 +341,15 @@ class PlantedCase(clitest.CliCase):
         return out.split(f"<<captured-data {starts[0]}>>", 1)[1].split(f"<<end captured-data {ends[0]}>>", 1)[0]
 
 
+def taken_elsewhere(case, c):
+    # the capture as another Mac took it: the record names that Mac by its machine id, which publishes "studio"
+    c["by"]["host"], c["image"]["where"] = "m-studio01", "local:m-studio01"
+    store.save(base.P, c)
+    case.patched(work, "PRESENCE", new=case.tmp / "presence")
+    presence(case.tmp / "presence", "bob@m-studio01", "studio")
+    return c
+
+
 class DescribeCommandTest(PlantedCase):
     def test_describe_prints_every_element_inside_one_data_block_whose_nonce_is_new_each_run(self):
         elements = self.invoices()
@@ -402,17 +411,9 @@ class DescribeCommandTest(PlantedCase):
         self.assertIn(f"The description of {c['id']} is not on this Mac", err)
         self.assertIn(f"dev visual capture --again {c['id']}", err)
 
-    def elsewhere(self, c):
-        # the capture as another Mac took it: the record names that Mac by its machine id, which publishes "studio"
-        c["by"]["host"], c["image"]["where"] = "m-studio01", "local:m-studio01"
-        store.save(base.P, c)
-        self.patched(work, "PRESENCE", new=self.tmp / "presence")
-        presence(self.tmp / "presence", "bob@m-studio01", "studio")
-        return c
-
     # the message names the Mac the description is on as the dashboard does, its name with its id, never the bare id
     def test_describe_names_the_mac_the_description_is_on(self):
-        c = self.elsewhere(self.plant(self.invoices()))
+        c = taken_elsewhere(self, self.plant(self.invoices()))
         (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
         rc, out, err = self.dev("describe", c["id"])
         self.assertEqual(rc, 1)
@@ -425,11 +426,9 @@ class MarksCommandTest(PlantedCase):
     def paths(self, out):
         return [Path(p) for p in re.findall(r"(/\S+\.png)", out)]
 
-    elsewhere = DescribeCommandTest.elsewhere
-
     # the picture is on another Mac: the message names it as the dashboard does, its name with its id
     def test_marks_names_the_mac_the_picture_is_on(self):
-        c = self.elsewhere(self.plant(self.invoices()))
+        c = taken_elsewhere(self, self.plant(self.invoices()))
         (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
         rc, out, err = self.dev("marks", c["id"])
         self.assertEqual(rc, 1)
