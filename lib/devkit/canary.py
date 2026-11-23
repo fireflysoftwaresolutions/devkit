@@ -374,6 +374,53 @@ def language_gate(agent: str, data: dict, sess: dict) -> str:
     return why
 
 
+# The auto-mode You rule (a tech lead asked for a spec approval in five replies running in auto mode until the
+# developer objected): in auto, the crew takes the recommended option of each decision and records it, so the You
+# bullet holds only what the developer alone does on their machine or account, and a decision that approves a step,
+# which waits for the developer in either mode. The words of asking for a decision, in English and Spanish; a miss is
+# only reminded, so a bullet that uses one for an account action costs one line of the next prompt.
+_ASKS_DECISION = re.compile(r"\b(approv\w*|sign[ -]?off|decid\w*|decisions?|choos\w*|choice|pick (?:one|an?|between)|"
+                            r"which option|go-?ahead|green light|your call|aprob\w*|aprueb\w*|decisi[oó]n\w*|elig\w*|"
+                            r"escog\w*)\b", re.I)
+
+
+def you_reason(you: str) -> str:
+    """What to do instead of a You bullet that asks the developer to approve or decide while the run follows auto."""
+    shown = you if len(you) <= 90 else you[:89].rstrip() + "…"
+    return (f"devkit: your status block's You bullet asks the developer to approve or decide (\"{shown}\") while the "
+            "work is in auto mode, where nothing waits for them: take the recommended option, record it with "
+            "`dev crew ask --decision \"…\" --options \"A: … | B: …\" --recommend A`, go on, and list it in the final "
+            "report so they can change it (`dev crew decide`). Keep in You only an action on their machine or "
+            "account, and a decision that approves a step.")
+
+
+def you_gate(agent: str, data: dict, sess: dict) -> str:
+    """Stop, main session: you_reason when the final message's You bullet asks for an approval or a decision, the
+    work follows auto mode (progress.mode_of: the run's explicit mode, else the configuration's), and no decision of
+    the run waits for the developer (progress.pending_decisions: one that approves a step waits in either mode). Once
+    per turn (`sess["you_told"]`), never on the reply to a send-back. A presentation rule: recorded and reminded at the
+    next prompt, never a send-back of its own. '' when nothing is wrong, with canary.enforce off, or on any error
+    (fails open)."""
+    if data.get("stop_hook_active") or sess.get("you_told", _UNTOLD) == sess.get("turn_started"):
+        return ""
+    if not (core.CFG.get("canary") or {}).get("enforce", True):
+        return ""
+    try:
+        text = data.get("last_assistant_message") or last_assistant_text(data.get("transcript_path")) or ""
+        you = (parse_status(text) or {}).get("you") or ""
+        if not _ASKS_DECISION.search(you):
+            return ""
+        from . import progress
+        run = progress.load_run(agent, data.get("session_id") or "")
+        if progress.mode_of(run) != "auto" or progress.pending_decisions(run):
+            return ""
+        why = you_reason(you)
+    except Exception:
+        return ""
+    sess["you_told"] = sess.get("turn_started")
+    return why
+
+
 STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I)
 
 

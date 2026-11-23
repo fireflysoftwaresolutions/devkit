@@ -182,6 +182,51 @@ class PresentationMissTests(PresentationCase):
                 self.assertNotIn("without their role", self.prompt(agent, NEXT, **ids(3)))
 
 
+def with_you(text: str) -> str:
+    return BLOCK.replace("- **Next:**", f"- **You:** {text}\n- **Next:**")
+
+
+class AutoModeYouTests(PresentationCase):
+    # In auto mode the crew takes the recommended option of each decision and records it, so the You bullet holds
+    # only what the developer alone does on their machine or account, and a decision that approves a step. A tech
+    # lead asked for a spec approval in five replies running in auto mode until the developer objected.
+    def setUp(self):
+        super().setUp()  # its state fixture saves guided; these turns follow the default, auto
+        p = mock.patch.object(core, "config_snapshot", return_value=(dict(core.CFG, work={"mode": "auto"}), []))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_you_bullet_that_asks_for_approval_in_auto_mode_is_recorded_and_reminded(self):
+        for agent in AGENTS:
+            with self.subTest(agent=agent):
+                self.begin(agent)
+                out = self.stop(agent, with_you("approve the export spec so the crew can start."))
+                self.assertNotIn("decision", out)
+                self.assertEqual(self.reminded(agent), ["you"])
+                ctx = self.prompt(agent)
+                self.assertIn("auto mode", ctx)
+                self.assertIn("dev crew ask --decision", ctx)
+                self.assertIn(NOT_AGAIN, ctx)
+                self.stop(agent, BLOCK)  # the development turn that was told it ends
+                self.assertNotIn("auto mode", self.prompt(agent))
+
+    def test_an_action_on_the_developers_account_a_guided_run_and_an_approval_that_waits_are_no_miss(self):
+        self.begin("claude")
+        self.stop("claude", with_you("run `gh auth refresh -s workflow` so the push can update the workflow."))
+        with mock.patch.object(core, "config_snapshot", return_value=({"work": {"mode": "guided"}}, [])):
+            self.stop("claude", with_you("decide D2: A or B (below)."))
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:s1"}):
+            pg.start("Export", plan=["spec=10m", "api=20m"])
+            d = pg.crew_decision("Is the spec ready?", ["A: yes", "B: no"], recommend="A", approves="spec")
+        self.stop("claude", with_you("approve the spec: D1, A or B."))  # it waits for the developer in either mode
+        self.assertNotIn("you", self.reminded("claude"))  # (the run's Progress line is a rule of its own)
+        with mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:s1"}):
+            pg.crew_decide(d["id"], "A")
+        self.begin("claude")  # the next turn asks for the approval that no longer waits
+        self.stop("claude", with_you("approve the spec: D1, A or B."))
+        self.assertIn("you", self.reminded("claude"))
+
+
 class ReminderTests(PresentationCase):
     # canary.reminder: what the next prompt says about the notes the Stop hook left
     def test_the_reminder_asks_to_follow_the_rule_only_in_a_development_turn(self):

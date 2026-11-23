@@ -1261,6 +1261,9 @@ def stop(agent: str):
         why = canary.language_gate(agent, data, sess) if dev_turn else ""  # the reply language, once per turn
         if why:
             notes.append(("language", why))
+        why = canary.you_gate(agent, data, sess) if dev_turn else ""  # a decision asked of the developer in auto
+        if why:
+            notes.append(("you", why))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
