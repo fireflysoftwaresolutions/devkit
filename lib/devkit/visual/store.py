@@ -222,15 +222,16 @@ def _session() -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", f"{agent}-{sid}")[:120]
 
 
-def _lane():
+def _lane(hint: bool = True):
     """The lane running this command (the crew member's agent id), or None for the tech lead and the developer. The
     crew members of one agent session share its session id, so the lane tells their open audits apart. VisualError
-    when devkit cannot tell which lane runs it: guessing would take another lane's audit."""
+    when devkit cannot tell which lane runs it: guessing would take another lane's audit. The refusal names --audit
+    when `hint`, for the commands that take it."""
     from .. import progress
     try:
         lane = progress._as_lane(os.environ.get(identity.LANE_VAR) or None)
     except identity.IdentityError as e:
-        raise VisualError(f"{e}. Or name the audit: --audit VA-….") from None
+        raise VisualError(f"{e}." + (" Or name the audit: --audit VA-…." if hint else "")) from None
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(lane))[:80] if lane else None
 
 
@@ -335,10 +336,10 @@ def _text(value, option: str, required: bool = True):
 
 # --------------------------------------------------------------------------- the session's audit
 
-def _session_file(project: str) -> Path:
+def _session_file(project: str, hint: bool = True) -> Path:
     """Where the session keeps its open audit: one file for the tech lead and the developer, and one for each crew
     lane, so a member's capture or bulk dismissal without --audit never lands in another lane's audit."""
-    lane = _lane()
+    lane = _lane(hint)
     return store_dir(project) / "sessions" / (f"{_session()}.lane-{lane}.json" if lane else f"{_session()}.json")
 
 
@@ -351,8 +352,9 @@ def open_audit(project: str):
     return aid if isinstance(aid, str) and ID.fullmatch(aid) and _path(project, aid).is_file() else None
 
 
-def _open(project: str, aid: str) -> None:
-    _private_write(_session_file(project), json.dumps({"audit": aid, "at": _now()}).encode())
+def _open(project: str, aid: str, session: Path = None) -> None:
+    """Open `aid` in this session's lane: in `session`, its session file found before (start), else found now."""
+    _private_write(session or _session_file(project), json.dumps({"audit": aid, "at": _now()}).encode())
 
 
 # --------------------------------------------------------------------------- audits (R18, R57)
@@ -407,6 +409,7 @@ def start(project: str, scope: str, question: str, *, task=None, mode=None, view
     if within is not None:
         scope_text = _clean([within])[0]
     version = vmap.load(project)["version"]
+    session = _session_file(project, hint=False)  # before the record: a lane devkit cannot tell leaves no audit
     audit = {"id": new_id("VA", project), "scope": scope, "question": task_text[0], "task": task_text[1] or None,
              "mode": mode, "matrix": {"viewports": sizes or [list(DEFAULT_VIEWPORT)], "themes": looks or ["light"],
                                       "states": [s for s in _clean([str(s) for s in states or ()])]},
@@ -414,7 +417,7 @@ def start(project: str, scope: str, question: str, *, task=None, mode=None, view
              "element": element, "include": list(include or ()), "commit": _git(cwd)["commit"], "taken": _now(),
              "by": actor(), "passes": {}, "signals": []}
     save(project, audit)
-    _open(project, audit["id"])
+    _open(project, audit["id"], session)
     return audit
 
 

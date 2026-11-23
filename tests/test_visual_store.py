@@ -679,6 +679,19 @@ class LaneAuditTest(RecordsCase):
                              ["VC-g33z0c4d4d#1"])
         self.assertIsNone(store._signal(P, "VC-g33z0c5e5e#1")[1]["triage"])
 
+    # a start that cannot tell which lane runs it refuses before it writes: no audit record is left that no lane has
+    # open, however often it is tried, and the refusal names no --audit, an option start does not take
+    def test_a_start_that_cannot_tell_its_lane_writes_no_audit_and_names_no_audit_option(self):
+        from devkit import progress
+        refusal = identity.IdentityError("the open calls of 2 crew members run this same command")
+        with mock.patch.object(progress, "_as_lane", side_effect=refusal):
+            for _ in range(2):
+                with self.assertRaises(store.VisualError) as e:
+                    store.start(P, "screen", "Is the invoice list usable?")
+        self.assertIn("2 crew members", str(e.exception))
+        self.assertNotIn("--audit", str(e.exception))
+        self.assertEqual(sorted(p.name for p in self.records.rglob("VA-*.json")), [])
+
 
 class LaneLookupTest(unittest.TestCase):
     # the lane a session audit belongs to comes from devkit's identity; when devkit cannot tell which of several
