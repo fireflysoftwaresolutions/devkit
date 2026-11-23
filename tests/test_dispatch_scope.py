@@ -40,6 +40,31 @@ class InvisibleCharacterScopeTests(unittest.TestCase):
                 self.assertEqual([(s["name"], s.get("scope")) for s in run["plan"]], [("parser", None)])
 
 
+class PythonIndependentCharacterScopeTests(unittest.TestCase):
+    # The characters a scope refuses do not depend on the Unicode version of the Python that reads it: a no-break
+    # space (U+00A0), which shows as a plain space while the path holds another character, is refused by name, and a
+    # code point no character is assigned to yet (U+0378) is judged like any other, as each newer Unicode assigns
+    # more of them.
+    def refused(self, scope):
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=T0)
+            with self.assertRaisesRegex(pg.StepError, "repository-relative"):
+                dispatch.delegate("add the export column", to="Ghost", scope=scope, now=T0 + 60)
+            with self.assertRaisesRegex(pg.StepError, "repository-relative"):
+                pg.assign("parser", "Neo", scope=scope, now=T0 + 60)
+            self.assertEqual([(s["name"], s.get("scope")) for s in pg.load_run("claude", "s1")["plan"]],
+                             [("parser", None)])
+
+    def test_a_scope_with_a_no_break_space_is_refused(self):
+        self.refused("lib/a\u00a0b.py")
+
+    def test_a_code_point_with_no_character_assigned_is_kept_like_any_other(self):
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=T0)
+            pg.assign("parser", "Neo", scope="lib/\u0378.py", now=T0 + 60)
+            self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("scope"), ["lib/\u0378.py"])
+
+
 class AssignScopeTests(unittest.TestCase):
     def test_assign_refuses_a_scope_with_a_secret_and_saves_nothing(self):
         # assign saved the scope text unchecked: a token in it went into the run
@@ -117,7 +142,8 @@ class OutsideFolderScopeTests(unittest.TestCase):
         return str(by_assign.exception), str(by_delegate.exception)
 
     def test_a_scope_in_this_projects_plans_folder_is_kept(self):
-        # bbfe9ba8 refused it with every path outside the repository, so a spec step could not own its plan
+        # an earlier rule refused every path outside the repository, this folder too, so a spec step could not own
+        # its plan
         real = os.path.realpath(self.plans)
         into = self.d / "into"
         into.symlink_to(self.plans)  # a link that leads into the folder names the folder's files
