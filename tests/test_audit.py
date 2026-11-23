@@ -557,6 +557,25 @@ class TeamPatternsFailClosedTests(AuditCase):
         self.assertIn('(got "everything")', errors)
         self.assertIn("(got 3)", errors)
 
+    def test_dev_audit_config_says_a_nested_unknown_key_by_its_own_length_and_group(self):
+        # a token pasted as a key inside retention was said as "of 62 characters in audit": the group's name counted
+        # in its length, and the place one level too high. A top-level key that has a dot is not in a group.
+        dotted = "retention." + self.GITHUB
+        for where, body, said in (("team", {"retention": {self.GITHUB: 3}},
+                                   f"unknown key of {len(self.GITHUB)} characters in audit.retention"),
+                                  ("team", {dotted: 3}, f"unknown key of {len(dotted)} characters in audit"),
+                                  ("machine", {"retention": {self.GITHUB: 3}},
+                                   f"unknown key of {len(self.GITHUB)} characters in audit.retention")):
+            with self.subTest(where=where, body=list(body)[0][:12]):
+                if where == "team":
+                    self.write_policy(json.dumps(body))
+                else:
+                    audit.policy_file().unlink()
+                    core.CFG["audit"] = body
+                errors = audit.settings()["errors"]
+                self.assertTrue(any(e.endswith(said) for e in errors), errors)
+                self.assertNotIn(self.GITHUB, " ".join(errors))
+
     def test_an_unknown_key_in_the_team_policy_withholds_text(self):
         # a misspelled or misplaced section may hold the team's patterns: the docs call them audit.redact.extra
         for name, body in {"misspelled": {"redcat": {"extra": [self.PATTERN]}},

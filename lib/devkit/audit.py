@@ -1844,16 +1844,20 @@ def _unknown_key(path, rules) -> str:
     return "an unknown key " + where + (f".{key}" if re.fullmatch(r"\w+", key) else f"[{json.dumps(key)}]")
 
 
-def _quiet_errors(errors, rules) -> list:
+def _quiet_errors(errors, rules, raw=None) -> list:
     """core.audit_config's errors as `dev audit config` shows them: an unknown key named only when _nameable, and a
     wrong value quoted only when it is a number, true, false, null or a short word (_SAFE_VALUE); any other key is
-    its length, and any other value is not quoted. A pattern that does not compile stays, so the person who wrote it
-    can find it."""
+    its length and where it is, audit or the group it is in (`raw`, the section the errors are about, tells a key
+    inside retention from a top-level key "retention.<…>"), and any other value is not quoted. A pattern that does
+    not compile stays, so the person who wrote it can find it."""
     out = []
     for e in errors:
         m = re.fullmatch(r"unknown key audit\.(.+)", e, re.S)
         if m and not _nameable(m.group(1), rules):
-            e = f"unknown key of {len(m.group(1))} characters in audit"
+            group, _, key = m.group(1).partition(".")
+            nested = key and isinstance(raw, dict) and isinstance(raw.get(group), dict) and key in raw[group]
+            where, key = ("audit." + group, key) if nested else ("audit", m.group(1))
+            e = f"unknown key of {len(key)} characters in {where}"
         m = re.fullmatch(r"(.+ must be .+) \(got (.*)\)", e, re.S)
         if m and not (_SAFE_VALUE.fullmatch(m.group(2)) and not SECRET.search(m.group(2))
                       and not any(r.search(m.group(2)) for r in rules or ())):
@@ -1946,7 +1950,7 @@ def settings() -> dict:
     team, terrs = core.audit_config(raw, fill=False) if raw is not None else ({}, [])
     rules = _loaded_rules(own, team)
     mine = _rejected(mine_raw, errors, rules)
-    errors = _quiet_errors(errors, rules) + [f"{where}: {e}" for e in _quiet_errors(terrs, rules)]
+    errors = _quiet_errors(errors, rules, mine_raw) + [f"{where}: {e}" for e in _quiet_errors(terrs, rules, raw)]
     if broken:
         errors.append(f"{where}: {broken}")
     elif raw is not None and not isinstance(raw, dict):
