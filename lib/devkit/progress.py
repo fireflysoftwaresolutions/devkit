@@ -2223,17 +2223,19 @@ def _launch_names(run: dict, aid: str, lane: dict) -> list:
     pending steps that may go to it, in the order the lane takes them: the one it names best; [] when it names none
     of them, or two equally but not fully. Steps it names fully (every word of the name, or the whole name) are each
     named, so one launch for `review-api and review-ui` takes both as its own. The steps the lane took as named count
-    too: a launch that names one of them better names no step still waiting (one word left in common, such as
-    "review" once "review-ui" is taken, names no "review-api"); a step that only joined the lane never counts."""
+    too: a launch that names one of them better, or as well but not fully, names no step still waiting (one word left
+    in common, such as "review" once "review-ui" is taken, names no "review-api"); a step that only joined the lane
+    never counts."""
     task = _task_text(lane.get("label") or "")
     scored = [(_name_score(task, x["name"]), x["name"]) for x in _queued_for(run, aid)]
     if not scored:
         return []
     best = max(sc for sc, _ in scored)
     top = [n for sc, n in scored if sc == best]
-    if any(_name_score(task, x["name"]) > best for x in coord.held(run, aid) if x.get("joined") != aid):
-        return []
     fully = best[0] or (best[1] and best[2] == 1.0)
+    took = [_name_score(task, x["name"]) for x in coord.held(run, aid) if x.get("joined") != aid]
+    if any(sc > best or (sc == best and not fully) for sc in took):
+        return []
     return top if best[1] and (len(top) == 1 or fully) else []
 
 

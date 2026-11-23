@@ -701,6 +701,16 @@ class ReviewLaneTests(unittest.TestCase):
         self.stop(self.m(25))
         self.assertEqual((self.held("review-api"), self.held("review-ui")), (("a_ser", "done"), ("a_ser", "done")))
 
+    def test_a_launch_naming_its_review_by_one_shared_word_names_no_later_review_with_that_word(self):
+        # “Seraph: review” took review-api as its own; review-ui, given to Seraph later, shares only the word
+        # “review” with the launch, as review-api does: it joins the lane, and only the lane's evidence closes it
+        pg.assign("review-api", "Seraph", why="test", activity="review", now=self.m(12))
+        launch("a_ser", "devkit:seraph", "Seraph: review", at=self.m(13))
+        pg.assign("review-ui", "Seraph", why="test", activity="review", now=self.m(14))
+        run = pg.load_run("claude", "s1")
+        self.assertEqual([(s["owner"], s.get("joined")) for s in run["plan"] if s["name"].startswith("review-")],
+                         [("a_ser", None), ("a_ser", "a_ser")])
+
     def test_one_launch_that_names_two_reviews_binds_both_as_named_whatever_its_report_says(self):
         # the launch names both reviews fully, so both are its own: neither joins, and its report closes both
         # without spelling their names
