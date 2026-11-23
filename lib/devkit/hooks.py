@@ -207,21 +207,22 @@ def _clone_node_modules(wt: Path, main: Path):
 
 
 _SEEN = {}  # cwd -> what context_for inspected there last ("top", "repo"): the welcome reuses that one inspection
-# the shapes a field of another Mac's presence must have to reach the model as written: a user name and a hostname
-# (or machine id), an agent's name, a git branch name. None holds a space, a quote or a control character.
+# the shapes a field of another Mac's presence must have to reach the model as written: a user name and a machine id
+# (or the hostname a presence from before the machine id was written under), an agent's name, a git branch name.
+# None holds a space, a quote or a control character.
 _PLAIN_WHO = re.compile(r"[A-Za-z0-9._-]{1,40}@[A-Za-z0-9._-]{1,80}")
 _PLAIN_AGENT = re.compile(r"[a-z][a-z0-9-]{0,19}")
 _PLAIN_BRANCH = re.compile(r"[A-Za-z0-9._/+-]{1,100}")
 
 
 def _presence_words(t: dict, s_: dict, team: list) -> str:
-    """Another Mac's presence as the session-start context names it, `user@hostname (agent, branch)`. Presence is
-    another person's text and the model reads this context, so each field shows only in its plain shape (its label
-    only when it looks like a hostname, work.display's rule, else its host), else a neutral word: no sentence or
-    escape code from a presence file reaches the model."""
+    """Another Mac's presence as the session-start context names it, `user@<machine id> (agent, branch)`, as
+    work.display names it: never by the hostname an older devkit still publishes as `label`, which often names the
+    person and would land in the transcript. Presence is another person's text and the model reads this context, so
+    each field shows only in its plain shape, else a neutral word: no sentence or escape code from a presence file
+    reaches the model."""
     from . import work
-    label, host = str(t.get("label") or ""), str(t.get("host") or "")
-    who = work.display(f"{t.get('user')}@{label if work._LABEL.fullmatch(label) else host}", team)
+    who = work.display(f"{t.get('user')}@{t.get('host') or ''}", team)
     agent, branch = str(s_.get("agent") or ""), str(s_.get("branch") or "")
     return (f"{who if _PLAIN_WHO.fullmatch(who) else 'someone on another Mac'} "
             f"({agent if _PLAIN_AGENT.fullmatch(agent) else 'an agent'}, "

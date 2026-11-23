@@ -151,7 +151,8 @@ class ClaimedTaskTests(WiringCase):
 
     def test_this_macs_presence_under_its_former_hostname_is_not_another_machine_at_the_session_start(self):
         # presence this Mac wrote as mac-158 is its own, not someone "also working on this project"; another Mac is
-        # named by its hostname, the label of its machine id
+        # named by its machine id, never by the hostname an older devkit still publishes as its label (a hostname
+        # often names the person, and the context lands in transcripts)
         handoff_of(self, self.root / "handoff")
         pid = core.project_identity(self.repo, "")[0]
         with mock.patch("socket.gethostname", return_value="Mac-158.lan"):
@@ -168,7 +169,8 @@ class ClaimedTaskTests(WiringCase):
                     str(p)).startswith(repo) else real(p)):  # the network renamed the Mac
             text = hooks.context_for(repo, "claude")
         busy = next((ln for ln in text.splitlines() if ln.startswith("Also working on this project")), "")
-        self.assertIn("bob@bob-mbp (claude, main)", busy)
+        self.assertIn("bob@m-0b0b0b0b0b0b (claude, main)", busy)
+        self.assertNotIn("bob-mbp", busy)
         self.assertNotIn("mac-158", busy)
 
     def test_another_macs_presence_reaches_the_model_only_in_plain_words(self):

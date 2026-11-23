@@ -82,9 +82,6 @@ def mine(who: str, a: dict = None, at: float = None) -> bool:
     return host == m.id or identity.was_this_mac(host, at, m)
 
 
-_LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # a short hostname: what a label must look like to be shown
-
-
 def display(who: str, team: list = None) -> str:
     """`who` as a person reads it: as it is written, `user@<machine id>` (or a lock holder `user@<id> (agent:session)`),
     never `user@<hostname>`. What devkit shows lands in the handoff note, in screenshots and in logs shared with the
