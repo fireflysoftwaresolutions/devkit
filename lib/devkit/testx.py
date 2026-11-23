@@ -3807,8 +3807,10 @@ def _support_text(top, base, f):
     """Test module `f` with its changed test support restored from `base` (_support_spans; for JS, _js_support): a
     fix in a helper
     defined inside a test module is part of the change, as a fix in a helper file is, so the module's tests run
-    against the helper's old text without the change. A helper the change adds stays, as an added helper file does,
-    and so does every test. -> the text, or None when no support of `f` changed."""
+    against the helper's old text without the change. Lines the change adds inside a named helper that was there at
+    `base` go with it, so the helper comes back whole: never its old signature with a body that reads the new one. A
+    helper the change adds stays, as an added helper file does, and so does every test. -> the text, or None when no
+    support of `f` changed."""
     if _lang(f) not in ("py", "js"):
         return None
     p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
@@ -3817,8 +3819,16 @@ def _support_text(top, base, f):
     old = p.stdout.decode("utf-8", "replace").splitlines(keepends=True)
     text = _read(os.path.join(top, f))
     new = text.splitlines(keepends=True)
-    spans = _support_spans(text) if _lang(f) == "py" else [(a, b) for _, a, b in _js_support(text)]
-    picked = []
+    if _lang(f) == "py":
+        spans = _support_spans(text)
+        had = {(c, x) for x, _, _, c in _py_support("".join(old))}
+        existing = [(s, e) for x, s, e, c in _py_support(text) if (c, x) in had]
+    else:
+        js = _js_support(text)
+        spans = [(a, b) for _, a, b in js]
+        had = {x for x, _, _ in _js_support("".join(old)) if x}  # hooks have no name to match them by
+        existing = [(a, b) for x, a, b in js if x in had]
+    edits = []  # (index in `new`, lines replaced, their text without the change)
     for m in re.finditer(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
                          _git(top, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--", f)):
         o, oc, n, nc = (int(g) if g is not None else 1 for g in m.groups())  # a count left out is 1
@@ -3826,11 +3836,14 @@ def _support_text(top, base, f):
         said = [x for x in old[o - 1:o - 1 + oc] + new[n - 1:n - 1 + nc]
                 if x.strip() and not x.strip().startswith(("#", "//"))]
         if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines):
-            picked.append((o, oc, n, nc))
-    for o, oc, n, nc in reversed(picked):
-        at = n - 1 if nc else n
-        new[at:at + nc] = old[o - 1:o - 1 + oc]
-    return "".join(new) if picked else None
+            edits.append((n - 1 if nc else n, nc, old[o - 1:o - 1 + oc]))
+        elif not oc:  # an addition: its lines inside a helper that was there at base go
+            inside = [ln for ln in lines if any(s <= ln <= e for s, e in existing)]
+            if any(new[ln - 1].strip() and not new[ln - 1].strip().startswith(("#", "//")) for ln in inside):
+                edits += [(ln - 1, 1, []) for ln in inside]
+    for at, count, before in sorted(edits, key=lambda x: x[0], reverse=True):
+        new[at:at + count] = before
+    return "".join(new) if edits else None
 
 
 _SETUP_NAMES = {"setUp", "tearDown", "setUpClass", "tearDownClass", "asyncSetUp", "asyncTearDown",

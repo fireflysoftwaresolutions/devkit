@@ -3126,6 +3126,45 @@ class CalcTests(unittest.TestCase):
                              [("test_calc.CalcTests.test_sandbox_drops_x", "failed", "proves the change")])
             self.assertIn("{'Y': 2}", data["tests"][0]["message"])
 
+    # a line the change adds inside a helper that was there before is part of that helper's change too
+    def test_a_line_added_inside_a_helper_is_undone_with_the_change(self):
+        with Env() as e:
+            r = e.repo(SANDBOX_BASE)
+            text = (r / "tests" / "test_calc.py").read_text()
+            (r / "tests" / "test_calc.py").write_text(
+                text.replace("    return dict(env)\n",
+                             "    env = {k: v for k, v in env.items() if k != 'X'}\n    return dict(env)\n") +
+                "\n    def test_sandbox_drops_x(self):\n"
+                "        self.assertEqual(sandbox_env({'X': 1, 'Y': 2}), {'Y': 2})\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["test_module_helpers"], ["tests/test_calc.py"])
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in data["tests"]],
+                             [("test_calc.CalcTests.test_sandbox_drops_x", "failed", "proves the change")])
+
+    # a helper of a test class that gains a parameter and a body line that reads it comes back whole without the
+    # change: restored by halves, its old signature ran the new body, and a test the change does not touch crashed on
+    # a NameError that prove took for proof
+    def test_a_helper_comes_back_whole_so_a_test_the_change_does_not_touch_runs_cleanly(self):
+        base = dict(PROVE_BASE, **{"tests/test_calc.py": with_tests().replace(
+            "    def test_add(self):\n        self.assertEqual(calc.add(1, 2), 3)\n",
+            "    def pair(self):\n        a, b = 1, 2\n        return a, b\n\n"
+            "    def test_add(self):\n        self.assertEqual(calc.add(*self.pair()), 3)\n")})
+        with Env() as e:
+            r = e.repo(base)
+            text = (r / "tests" / "test_calc.py").read_text()
+            (r / "tests" / "test_calc.py").write_text(
+                text.replace("    def pair(self):\n        a, b = 1, 2\n",
+                             "    def pair(self, scale=1):\n        a, b = 1, 2\n        a, b = a * scale, b * scale\n")
+                + "\n    def test_mul(self):\n        self.assertEqual(calc.mul(*self.pair(2)), 8)\n")
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertNotIn("NameError", out + err)
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_add", "passed", "does not test the change"),
+                              ("test_calc.CalcTests.test_mul", "failed", "proves the change")], out + err)
+
     # a test helper the change adds is test code, not the change under test: it stays in the copy, so the new test
     # runs against the old production code. Removed, every test that imports it failed on the import and was
     # reported as proving the change, here a test the change does not touch at all.
