@@ -5351,6 +5351,26 @@ def _crashed(argv, exc: BaseException) -> int:
     return bugs.handle_crash(argv, exc)
 
 
+def _refused(cmd: str, exc: Exception) -> int:
+    """A command refused on purpose (core.Refusal): `dev <command>: <message>` and the fix on stderr, redacted, and
+    the refusal's exit status: 2, 75 (core.Busy) when running the command again can work, or the status a domain class
+    documents (`dev session`'s 3 and 4). A `code` that is no exit status (messaging's "invalid_text") gives the
+    class's default. No crash report: a refusal is devkit doing its job, not devkit's bug."""
+    from . import audit
+    code = getattr(exc, "code", None)
+    if not isinstance(code, int) or isinstance(code, bool) or not 1 <= code <= 125:
+        code = core.Busy.code if isinstance(exc, core.Busy) else core.Refusal.code
+    text = f"dev {cmd}: {exc}"
+    if getattr(exc, "fix", ""):
+        text += f"\n  fix: {exc.fix}"
+    try:
+        text = audit.redact(text)
+    except Exception:  # the configured extra patterns could not be read: the built-in rules still apply
+        text = audit.redact(text, extra=[])
+    print(text, file=sys.stderr)
+    return code
+
+
 def _closed_pipe() -> int:
     """The reader of dev's output went away before dev finished writing (`dev audit --json | head -c 100`): that is
     no devkit bug, so no crash record and no notice. What is left to write goes to /dev/null, so the flush at exit
@@ -5405,6 +5425,9 @@ def main(argv=None) -> int:
         return rc
     except BrokenPipeError:  # before Exception: a closed pipe is the reader's choice, not devkit's crash
         rc = _closed_pipe()
+        return rc
+    except core.Refusal as e:  # before Exception: devkit refused on purpose, with the reason and the fix
+        rc = _refused(a.cmd, e)
         return rc
     except Exception as e:  # devkit's own bug: a notice with its marker and exit 70, never a traceback
         rc = _crashed(argv, e)

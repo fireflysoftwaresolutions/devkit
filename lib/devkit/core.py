@@ -70,6 +70,7 @@ os.environ["PATH"] = ":".join(dict.fromkeys((sandbox_path() or _EXTRA_PATH) + os
 from . import configschema
 from .configschema import (DEFAULTS, AUDIT_LEVELS, AUDIT_FLOOR_MIN, AUDIT_RULES, PROGRESS_RULES,
                            SLOT_KINDS, audit_config, progress_config)
+from .refusal import Busy, Refusal  # noqa: F401  (core.Refusal and core.Busy: what a command refuses, cli.main's seam)
 
 
 def config_errors(cfg: dict) -> list:
