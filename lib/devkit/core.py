@@ -136,11 +136,89 @@ def _key_rule(own):
 _SAVED = object()
 
 
+QUIET_KEY = re.compile(r"<key of \d+ characters?>")  # a map key a reader said by its length
+_SAID_UNKNOWN = re.compile(r"of \d+ characters?(?: in .*)?", re.S)  # an unknown key a reader said by its length
+_GOT = re.compile(r" \(got .*\)\Z", re.S)  # configschema's section checks quote up to 40 characters of a value
+_TO_SET = " must be an object to set a child"  # set_value's refusal of a path whose parent holds no object
+_MISSING = object()
+
+
+def _count(n: int, one: str) -> str:
+    return f"{n} {one}" if n == 1 else f"{n} {one}s"
+
+
+def say_value(value) -> str:
+    """A configuration value as an error says it: its type and length, never its text: "a string of 40 characters",
+    "a list of 2 items", "an object of 1 key", "a number", "a boolean", "null"."""
+    if isinstance(value, bool):
+        return "a boolean"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string of " + _count(len(value), "character")
+    if isinstance(value, list):
+        return "a list of " + _count(len(value), "item")
+    if isinstance(value, dict):
+        return "an object of " + _count(len(value), "key")
+    return "a value it does not quote"
+
+
+def _error_parts(raw, path: str) -> tuple:
+    """The keys and list positions an error path names -> (parts, whether `raw` holds the whole path). Read from the
+    document (config_key_parts, so a key with a dot in it is one key); a required key `raw` lacks is its parent's parts
+    and the last word; else the path split at its dots, the way set_value splits a key typed on the command line."""
+    parts = config_key_parts(raw, path)
+    if parts is not None:
+        return parts, True
+    head, dot, last = path.rpartition(".")
+    parent = config_key_parts(raw, head) if dot else None
+    if parent is not None:
+        return [*parent, last], False
+    return [int(i) if i else k for i, k in re.findall(r"\[(\d+)\]|([^.\[\]]+)", path)], False
+
+
+def _say_path(parts, raw, nameable) -> str:
+    """An error path as a reader says it: each key the schema declares by its name; a key the person chose (a map
+    key, such as a job's or a Codex profile's name, or a key devkit does not read) by its name only when `nameable`,
+    else by its length: "jobs.<key of 21 characters>.cmd"."""
+    rule, node, out = configschema.ROOT, raw, ""
+    for p in parts:
+        if isinstance(p, int):
+            out += f"[{p}]"
+            node = node[p] if isinstance(node, list) and p < len(node) else None
+            rule = rule.items if rule is not None else None
+            kind = node.get("kind") if isinstance(node, dict) else None
+            if out == f"ext.add[{p}]" and isinstance(kind, str) and kind in configschema.EXT_RECORDS:
+                rule = configschema.EXT_RECORDS[kind]  # as configschema._walk checks an extension record
+            continue
+        fixed = rule is not None and rule.values is None and p in rule.children
+        named = fixed or QUIET_KEY.fullmatch(str(p)) or nameable(p)
+        out += ("." if out else "") + (str(p) if named else f"<key of {_count(len(str(p)), 'character')}>")
+        rule = rule.children.get(p) if fixed else rule.values if rule is not None else None
+        node = node.get(p) if isinstance(node, dict) else None
+    return out
+
+
+def _value_at(doc, parts):
+    for p in parts:
+        if isinstance(p, int) and isinstance(doc, list) and p < len(doc) or \
+                isinstance(p, str) and isinstance(doc, dict) and p in doc:
+            doc = doc[p]
+        else:
+            return _MISSING
+    return doc
+
+
 def quiet_config_errors(errors, raw=_SAVED) -> list:
-    """The configuration's errors with each key devkit does not read, or map key it refuses, named only when it may be
-    (_key_rule); any other is its length and where it is: "unknown key of 40 characters in progress". `raw`: the
-    document the errors are about (the saved configuration when not given), which tells a key with a dot in it from
-    two keys."""
+    """The configuration's errors as a person may read them anywhere: never the text of a value, and a key the
+    person chose named only when it may be (_key_rule). A key devkit does not read, or a map key it refuses, that may
+    not be named is its length and where it is: "unknown key of 40 characters in progress"; a map key in a path is
+    its length: "jobs.<key of 21 characters>.cmd is required for a custom job"; a wrong value is its type and length:
+    "work.mode must be one of auto, guided (got a string of 40 characters)". The allowed words a value must be one of
+    are devkit's, so the error lists them. `raw`: the document the errors are about (the saved configuration when not
+    given), which tells a key with a dot in it from two keys and holds the value an error is about."""
     if raw is _SAVED:
         try:
             raw = read_config()
@@ -150,17 +228,40 @@ def quiet_config_errors(errors, raw=_SAVED) -> list:
     nameable = _key_rule(own)
     out = []
     for e in errors:
+        e = str(e)
         path, invalid = configschema.unknown_key(e), e.endswith(": invalid map key")
         path = path or (e[:-len(": invalid map key")] if invalid else "")
-        parts = config_key_parts(raw, path) if path else None
-        key = parts[-1] if parts else path
-        if not path or nameable(key):
+        if path:
+            if _SAID_UNKNOWN.fullmatch(path) or QUIET_KEY.search(path):  # said already
+                out.append(e)
+                continue
+            parts = config_key_parts(raw, path) or [path]  # a key with a dot in it, or a path raw lacks: one key
+            key, where = parts[-1], _say_path(parts[:-1], raw, nameable)
+            if nameable(key):
+                said = _say_path(parts, raw, nameable)
+                out.append(f"{said}: invalid map key" if invalid else f"unknown key {said}")
+                continue
+            place = f" in {where}" if where else ""
+            out.append(f"a map key of {_count(len(str(key)), 'character')}{place} is invalid" if invalid else
+                       f"unknown key of {_count(len(str(key)), 'character')}{place}")
+            continue
+        if QUIET_KEY.search(e):  # said already: a path no document holds
             out.append(e)
             continue
-        where = "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in parts[:-1]).lstrip(".") if parts else ""
-        place = f" in {where}" if where else ""
-        out.append(f"a map key of {len(str(key))} characters{place} is invalid" if invalid else
-                   f"unknown key of {len(str(key))} characters{place}")
+        m = re.match(r"(\S+?)(:?\s.*)\Z", e, re.S)
+        top = re.match(r"[^.\[]+", m.group(1)) if m else None
+        if not (m and top and (top.group() in configschema.ROOT.children or config_key_parts(raw, m.group(1)))):
+            out.append(e)  # no configuration path in it: a file that cannot be read, a path typed with an empty word
+            continue
+        parts, whole = _error_parts(raw, m.group(1))
+        rest = m.group(2)
+        if rest.startswith(" must be ") and not rest.startswith(_TO_SET):
+            value = _value_at(raw, parts) if whole else _MISSING
+            if value is not _MISSING:
+                rest = _GOT.sub("", rest) + f" (got {say_value(value)})"
+            elif _GOT.search(rest):
+                rest = _GOT.sub(" (got a value it does not quote)", rest)
+        out.append(_say_path(parts, raw, nameable) + rest)
     return out
 
 
@@ -469,8 +570,10 @@ def _quiet_set_error(doc: dict, key: str, value, message: str) -> str:
             cursor = cursor.setdefault(part, {})
         cursor[path.split(".")[-1]] = value
         return "; ".join(say_config_errors([message], deep_merge(doc, typed)))
-    if not (path or message.endswith(" dev config edit") or "invalid map key" in message):
-        return message  # no key in it: an empty path segment, or a value that must be an object
+    if message.startswith("configuration "):
+        return message  # no key or value in it: an empty path segment, or a document that is not an object
+    if message.endswith(_TO_SET):  # a key typed on the command line, split at its dots as set_value split it
+        return "; ".join(say_config_errors([message], doc))
     candidate = json.loads(json.dumps(doc))
     cursor = candidate
     parts = key.split(".")

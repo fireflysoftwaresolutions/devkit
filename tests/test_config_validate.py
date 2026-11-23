@@ -144,5 +144,98 @@ class ConfigReaderTests(unittest.TestCase):
         self.said(stop)
 
 
+class ConfigValueTests(unittest.TestCase):
+    # A wrong value and a map key in a path were said as the person typed them: a token pasted as a value, or as the
+    # name of a job, a Codex profile or an MCP server's variable, reached every reader's error. Each reader now names
+    # a value by its path, type and length, and a map key only when it is a short word.
+    DOC = {"work": {"mode": GITHUB}, "stacks": [GITHUB], "sync": GITHUB, "docker": {"cpu": [GITHUB, GITHUB]},
+           "codex": {"profiles": {GITHUB: {"model": 3, "extra": 1}}},
+           "jobs": {TEAM_WORD: {"every": 5}, "backup": {"every": 5}},
+           "ext": {"add": [{"kind": "mcp", "license": "MIT", "why": "w", "name": "srv",
+                            "url": "https://example.invalid/mcp", "env": {GITHUB: 5}}]}}
+    SAID = ("work.mode must be one of auto, guided (got a string of 40 characters)",
+            "stacks[0] must be one of java, python, php, node (got a string of 40 characters)",
+            "sync must be an object (got a string of 40 characters)",
+            "docker.cpu must be a whole number greater than zero (got a list of 2 items)",
+            "codex.profiles.<key of 40 characters>.model must be a string (got a number)",
+            "unknown key codex.profiles.<key of 40 characters>.extra",
+            "jobs.<key of 21 characters>.cmd is required for a custom job",
+            "jobs.backup.cmd is required for a custom job",  # a short word is still named
+            "ext.add[0].env.<key of 40 characters> must be a string (got a number)")
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.path = Path(folder.name) / "config.json"
+        self.path.write_text(json.dumps(self.DOC))
+        for p in (mock.patch.object(core, "CONFIG_FILE", self.path),
+                  mock.patch.object(core, "STATE", Path(folder.name) / "state"),
+                  mock.patch.object(audit, "AUDIT", Path(folder.name) / "audit"),
+                  mock.patch.object(audit, "policy_file", lambda: Path(folder.name) / "no-policy.json"),
+                  mock.patch.object(profiles, "resolve", side_effect=ValueError("stopped by the test"))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def said(self, text: str, lines=SAID):
+        for secret in (GITHUB, TEAM_WORD):
+            self.assertNotIn(secret, text)
+        for line in lines:
+            self.assertIn(line, text)
+
+    def run_quietly(self, call):
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = call()
+        return rc, out.getvalue() + err.getvalue()
+
+    def test_every_reader_of_the_saved_configuration_says_no_pasted_value_or_map_key(self):
+        update = argparse.Namespace(check=False, quiet=False, record=False, yes=False)
+        for name, call, code in (("every dev command", core.load_config, None),
+                                 ("dev config show", lambda: cli.cmd_config(argparse.Namespace(config_cmd="show")), 1),
+                                 ("dev config validate", lambda: cli.cmd_config(
+                                     argparse.Namespace(config_cmd="validate")), 1),
+                                 ("dev update", lambda: cli.cmd_update(update), 2),
+                                 ("dev install", setup.run_install, 2)):
+            with self.subTest(reader=name):
+                rc, text = self.run_quietly(call)
+                if code is not None:
+                    self.assertEqual(rc, code)
+                # dev install names only the errors that stop it: not the key devkit does not read
+                self.said(text, self.SAID if name != "dev install" else self.SAID[:5] + self.SAID[6:])
+        stop, _ = setup.config_diagnosis(core.config_snapshot()[1])  # dev doctor
+        self.said(stop)
+
+    def test_dev_config_set_says_no_pasted_value_or_map_key(self):
+        self.path.write_text("{}")
+        for key, value, line in (
+                ("work.mode", GITHUB, "work.mode must be one of auto, guided (got a string of 40 characters)"),
+                ("stacks", json.dumps([GITHUB]), "stacks[0] must be one of java, python, php, node "
+                                                 "(got a string of 40 characters)"),
+                (f"jobs.{TEAM_WORD}.every", "5", "jobs.<key of 21 characters>.cmd is required for a custom job"),
+                (f"jobs.{TEAM_WORD}.cmd.x", "1", "jobs.<key of 21 characters>.cmd must be an object to set a child"),
+                (f"codex.profiles.{GITHUB}.model", "3",
+                 "codex.profiles.<key of 40 characters>.model must be a string (got a number)")):
+            with self.subTest(key=key[:10]):
+                with self.assertRaises(core.ConfigError) as caught:
+                    core.config_set(key, value)
+                self.said(str(caught.exception), (line,))
+        self.assertEqual(self.path.read_text(), "{}")
+
+    def test_a_writer_refusing_a_candidate_says_no_pasted_value_or_map_key(self):
+        self.path.write_text("{}")
+        with self.assertRaises(core.ConfigError) as caught:
+            core.config_update(lambda doc: dict(self.DOC))
+        self.said(str(caught.exception))
+
+    def test_a_quoted_value_from_a_section_check_is_said_by_type_and_length(self):
+        # progress_config and audit_config quote up to 40 characters of a wrong value: the seam says its type instead
+        raw = {"progress": {"max_parallel": GITHUB, "notify": [1, 2, 3]}}
+        said = core.say_config_errors(core.progress_config(raw["progress"])[1], raw)
+        self.assertEqual(said, ["progress.max_parallel must be a whole number from 1 to 10 "
+                                "(got a string of 40 characters)",
+                                "progress.notify must be true or false (got a list of 3 items)"])
+        self.assertEqual(core.say_config_errors(["progress.nudge_minutes must be a number (got \"secret\")"], {}),
+                         ["progress.nudge_minutes must be a number (got a value it does not quote)"])
+
+
 if __name__ == "__main__":
     unittest.main()

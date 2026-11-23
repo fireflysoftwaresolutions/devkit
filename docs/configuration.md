@@ -54,6 +54,10 @@ command, for example `unknown key legacy_root: devkit does not read it; remove i
 Every command names a key only when it is a short word of letters and underscores (at most 24 characters) that no
 secret rule or redaction pattern matches; any other key, such as a token pasted as a key, is named by its length and
 where it is: `unknown key of 40 characters in progress`.
+The same rule holds for a name you choose inside a path, such as a job's or a Codex profile's name:
+`jobs.<key of 21 characters>.cmd is required for a custom job`. An error never quotes a value; it names the
+value's type and length, and lists the allowed words when there are some:
+`work.mode must be one of auto, guided (got a string of 40 characters)`.
 `dev install`, `dev update`, and `dev doctor` name the unknown keys and go on. An unknown key does not block other changes:
 `dev config set`, `dev jobs`, and the other writers save a change as long as they leave every unknown key as it
 was. A wrong value of a known key, such as `work.mode: banana`, still blocks every writer until you repair it.
