@@ -2266,9 +2266,11 @@ def cmd_ack(a) -> int:
         doc["last_ack"] = {"at": int(time.time()), "count": len(items), "tty": tty, "parents": parents}
     try:
         state.update(accepted_file(), drop, indent=1)
-    except state.StateBusy:
-        ui.err("The acceptance list is busy (another dev command writes it). Run `dev ext ack` again in a moment.")
-        return 1
+    except state.StateBusy as e:
+        if e.code != core.Busy.code:  # a list that is unsafe or does not parse: a rerun meets the same file
+            raise
+        raise core.Busy("the acceptance list is busy: another dev command writes it",
+                        fix="run dev ext ack again in a moment") from e
     for p in items:
         audit.record("ext.ack", p["id"], f"acknowledged: {p.get('what') or p['id']}; {where}", "ok",
                      id=p.get("record") or "")
