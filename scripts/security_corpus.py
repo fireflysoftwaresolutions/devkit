@@ -76,13 +76,13 @@ def _directory(path, *, create=False):
                 child = os.open(name, flags, dir_fd=fd)
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise StateBusy("unsafe state path: symbolic link or non-directory") from None
+                    raise StateBusy("unsafe state path: symbolic link or non-directory", code=2) from None
                 raise
             os.close(fd)
             fd = child
             info = os.fstat(fd)
             if info.st_uid not in (0, os.getuid()) or (active and info.st_uid != os.getuid()):
-                raise StateBusy("unsafe state directory: owner mismatch")
+                raise StateBusy("unsafe state directory: owner mismatch", code=2)
             if create and active:
                 os.fchmod(fd, 0o700)
         yield fd
@@ -122,14 +122,14 @@ def _open_base(path, pins, create):
     fd = os.open(str(real), os.O_RDONLY | os.O_DIRECTORY)
     if os.fstat(fd).st_uid not in (0, os.getuid()):
         os.close(fd)
-        raise StateBusy("unsafe state directory: owner mismatch")
+        raise StateBusy("unsafe state directory: owner mismatch", code=2)
     return root, fd
 '''
 REVIEWED_STATE_WRITE = '''def _write(path: Path, doc: dict, indent, durable=False, max_bytes=None):
     text = json.dumps(doc, indent=indent, ensure_ascii=not durable,
                       separators=(",", ":") if durable and indent is None else None)
     if max_bytes is not None and len(text.encode("utf-8")) > max_bytes:
-        raise StateBusy("capacity: record exceeds the storage limit")
+        raise StateBusy("capacity: record exceeds the storage limit", code=2)
     if durable or "messaging-v2" in path.parts:
         with _directory(path.parent, create=True) as directory:
             _record_info(directory, path.name)
