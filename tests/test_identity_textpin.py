@@ -1341,6 +1341,11 @@ class TextPinRecordFailureTests(TextPinCase):
         self.assertEqual(rc, 2, out)
         self.assertFalse(self.added())
         self.assertEqual(len(self.contested()), 2)
+        # the call's contest flag in the ledger goes with the call
+        flag = identity.contest_path("s1", lead["tool_use_id"])
+        self.assertTrue(os.path.lexists(flag))
+        self.closed(lead)
+        self.assertFalse(os.path.lexists(flag))
 
     # a later call that was interrupted (its result says so) but whose shell ignored the signal and took the tech
     # lead's call form is still that later call: the tech lead's call is contested, never taken
@@ -1377,6 +1382,12 @@ class TextPinRecordFailureTests(TextPinCase):
                     mock.patch.object(sys, "argv", ["dev", "watch", "--wait"]), \
                     self.assertRaisesRegex(identity.IdentityError, "another process claimed this call's command"):
                 identity.consumer(False)
+        # the kept call's contest flag in the ledger goes when its kept record expires
+        flag = identity.contest_path("s1", lead["tool_use_id"])
+        self.assertTrue(os.path.lexists(flag))
+        identity._kept_background("s1", time.time() + identity.BACKGROUND_KEEP_S + 5)
+        self.assertFalse(os.path.lexists(identity.background_path("s1", lead["tool_use_id"])))
+        self.assertFalse(os.path.lexists(flag))
 
     # neither the pin's marker nor the call's contest file in the ledger can be made: the claimant is refused, and its
     # record says the contest could not be recorded
