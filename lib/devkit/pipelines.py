@@ -3848,7 +3848,7 @@ def draft_gate(text: str, jobs: bool = True):
         return len(lines[k]) - len(lines[k].lstrip(" "))
 
     edits = []  # (index, kind, payload): insert before index, or replace the line at index
-    job_edits, job_applied, gated = [], [], []  # the job gates come first: they decide whether the type is needed
+    job_edits, job_applied, gated, by_hand = [], [], [], []  # the job gates first: they decide on the type
     res, ready = job_results(tree, _DRAFT_CTX), job_results(tree, _READY_CTX)
     if jobs:
         all_jobs = tree.get("jobs") if isinstance(tree.get("jobs"), dict) else {}
@@ -3869,13 +3869,14 @@ def draft_gate(text: str, jobs: bool = True):
                 expr = m.group(1).strip() if m and "${{" not in m.group(1) else expr
                 raw = lines[ck].split("if:", 1)[1].strip() if "if:" in lines[ck] else ""
                 if not raw or raw[:1] in "|>" or "${{" in expr or ": " in expr or " #" in expr or "\n" in expr:
-                    skipped.append(f"job `{jid}`: add `&& {DRAFT_GATE}` to its `if:` by hand")
+                    by_hand.append(str(jid))
                     continue
                 job_edits.append((ck, "replace", " " * ind(ck) + f"if: ${{{{ ({expr}) && {DRAFT_GATE} }}}}{nl}"))
             gated.append(str(jid))
             job_applied.append(f"`if: {DRAFT_GATE}` on job `{jid}`")
-    pk, by_hand = _kl(on, "pull_request", 0) - 1, len(skipped)
+    pk, typed, before = _kl(on, "pull_request", 0) - 1, False, len(skipped)
     if "ready_for_review" not in types and pk >= 0 and _skips_drafts(res, ready, gated):
+        typed = True  # written here, or a line below says to add it by hand
         unit = max(1, ind(pk) - ind(_kl(tree, "on", 1) - 1))
         flow = "types: [" + ", ".join(types + [t for t in READY_TYPES if t not in types]) + "]"
         if not isinstance(cfg, dict) or not cfg:
@@ -3902,8 +3903,12 @@ def draft_gate(text: str, jobs: bool = True):
                                                    + "ready_for_review" + nl]))
             else:
                 skipped.append(f"line {tk + 1}: add `ready_for_review` to `types` by hand")
-        if len(skipped) == by_hand:
+        if len(skipped) == before:
             applied.append("`ready_for_review` in on.pull_request.types")
+    for k, jid in enumerate(by_hand):  # a gate written by hand needs the type too, unless it is there or added here
+        also = not typed and "ready_for_review" not in types and _skips_drafts(res, ready, [jid])
+        skipped.insert(k, f"job `{jid}`: add `&& {DRAFT_GATE}` to its `if:`"
+                       + (" and `ready_for_review` to `on.pull_request.types`" if also else "") + " by hand")
     edits += job_edits
     applied += job_applied
     for at, kind, payload in sorted(edits, key=lambda e: (e[0], e[1] == "insert"), reverse=True):

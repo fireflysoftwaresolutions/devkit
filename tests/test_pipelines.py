@@ -976,6 +976,18 @@ class DraftGateTests(unittest.TestCase):
                 self.assertNotIn("ready_for_review", new)  # it would start nothing, or re-run what drafts ran
                 self.assertEqual((applied, skipped), ([], []))
 
+    def test_a_gate_left_to_the_developer_names_the_ready_trigger_unless_the_fix_adds_it(self):
+        folded = ("on:\n  pull_request:\njobs:\n  test:\n    if: >-\n      github.actor != 'bot'\n"
+                  "    runs-on: ubuntu-24.04\n    steps:\n      - run: make test\n")
+        new, applied, skipped = P.draft_gate(folded)  # its folded `if:` is left to the developer, so is the type
+        self.assertEqual((new, applied), (folded, []))
+        self.assertEqual(skipped, [f"job `test`: add `&& {P.DRAFT_GATE}` to its `if:` and `ready_for_review` to "
+                                   "`on.pull_request.types` by hand"])
+        with_lint = folded + "  lint:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make lint\n"
+        new, applied, skipped = P.draft_gate(with_lint)  # lint gets the gate, and the type comes with it
+        self.assertIn("`ready_for_review` in on.pull_request.types", applied)
+        self.assertEqual(skipped, [f"job `test`: add `&& {P.DRAFT_GATE}` to its `if:` by hand"])
+
     def test_init_writes_the_gate_and_devkit_own_ci_has_it(self):
         gen, _ = P.generate(repo(PY_PROJECT), "github")
         text = gen[".github/workflows/ci.yml"]
