@@ -454,6 +454,61 @@ class ProductReport(unittest.TestCase):
         self.assertIn("E7 " + XSS, labels)
 
 
+class MacNamesInAFindingsHistory(unittest.TestCase):
+    # A verification whose picture before is on another Mac writes that Mac's machine id into the finding's history
+    # (the record syncs, and keeps the id). The report names the Mac as the rest of it does: in the history list and
+    # in "Still there after the fix", the name its presence publishes with the id, or "another Mac" with the id
+    REOPENED = "VF-g33z2e8t5w"
+
+    def test_a_machine_id_in_a_findings_history_reads_as_the_macs_name_with_the_id(self):
+        records_dir, store = fixture_copy(self)
+        path = records_dir / "findings" / f"{self.REOPENED}.json"
+        rec = json.loads(path.read_text())
+        away = "still there on VC-g33z1e7q5r: truncation · nothing compared: the picture before was taken on {} and is not on this Mac"
+        rec["history"][-1]["why"] = away.format("m-studio01")
+        rec["history"].insert(-1, {"at": "2026-11-09T18:17:00Z", "by": "trinity", "change": "verify",
+                                   "why": away.format("m-laptop02")})
+        path.write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
+        presence(records_dir.parent / "presence", "ana@m-studio01", "studio")
+        with mock.patch.object(work, "PRESENCE", records_dir.parent / "presence"), \
+                mock.patch.object(identity, "machine", lambda now=None: identity.Machine("m-test0001", "laptop", {})):
+            root = Tree(report.render_html(report.load(records_dir, store, PRODUCT))).root
+        detail = root.one("article", id=self.REOPENED)
+        state = " ".join(detail.one("p", class_="state").text().split())
+        history = [" ".join(li.text().split()) for li in detail.one("ol", class_="history").find("li")]
+        self.assertIn("picture before was taken on studio (m-studio01) and is not on this Mac. Reopened.", state)
+        self.assertIn("picture before was taken on another Mac (m-laptop02) and is not on this Mac", history[-2])
+        self.assertIn("picture before was taken on studio (m-studio01) and is not on this Mac", history[-1])
+        self.assertNotRegex(detail.text(), r"taken on m-")
+
+
+class ReviewerWordsInAFindingsHistory(unittest.TestCase):
+    # A person's reason in a finding's history is their own text: a word shaped like a machine id ("the m-dropdown
+    # menu", "at m-1440wide") stays as they wrote it. Only the Mac a verification names where devkit writes one
+    # ("the picture before was taken on m-…") reads as the Mac's name
+    REOPENED = "VF-g33z2e8t5w"
+
+    def test_a_reviewers_word_shaped_like_a_machine_id_stays_as_written(self):
+        records_dir, store = fixture_copy(self)
+        path = records_dir / "findings" / f"{self.REOPENED}.json"
+        rec = json.loads(path.read_text())
+        rec["history"][-1]["why"] = ("still there on VC-g33z1e7q5r: truncation · nothing compared: the picture before "
+                                     "was taken on m-studio01 and is not on this Mac")
+        rec["history"].insert(-1, {"at": "2026-11-09T18:10:00Z", "by": "seraph", "change": "fixing",
+                                   "why": "the m-dropdown menu overlaps the header at m-1440wide"})
+        path.write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
+        presence(records_dir.parent / "presence", "ana@m-studio01", "studio")
+        with mock.patch.object(work, "PRESENCE", records_dir.parent / "presence"), \
+                mock.patch.object(identity, "machine", lambda now=None: identity.Machine("m-test0001", "laptop", {})):
+            audit = report.load(records_dir, store, PRODUCT)
+            root = Tree(report.render_html(audit)).root
+        history = [" ".join(li.text().split()) for li in root.one("article", id=self.REOPENED).one(
+            "ol", class_="history").find("li")]
+        self.assertTrue(history[-2].endswith(": the m-dropdown menu overlaps the header at m-1440wide"), history[-2])
+        self.assertIn("picture before was taken on studio (m-studio01) and is not on this Mac", history[-1])
+        self.assertEqual({"m-studio01", "m-dropdown", "m-1440wide"} & set(audit["macs"]), {"m-studio01"})
+
+
 class ScopeReports(unittest.TestCase):
     def test_vd_ac_13_a_screen_audit_without_passes_shows_twenty_open_cells(self):
         _, root = html_of(SCREEN)

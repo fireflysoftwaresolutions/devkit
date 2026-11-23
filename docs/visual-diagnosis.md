@@ -584,6 +584,7 @@ runs, and a marker inside the text is printed escaped (`<\<`), so the block ends
 | `"button.primary" matches 3 elements` | Use a selector that matches one element, or `--element E<n>` |
 | `Mark 14 is not on the marked copy` | Run `dev visual marks VC-…` again and cite a mark it shows |
 | `The description of VC-… is not on this Mac: it was taken on studio (m-0000beef).` · `The picture of VC-… is not on this Mac: …` | The capture was taken on the Mac the message names (its name as the dashboard shows it, with its machine id), or its files were pruned. Capture it again here: `dev visual capture --again VC-…` |
+| `The picture of VC-… is no longer in this Mac's store` · `The description of VC-… is no longer in this Mac's store` | This Mac took the capture and later pruned its files. `describe` and `marks` say to capture it again here (`dev visual capture --again VC-…`); `share` shares nothing; `verify` compares nothing and lets the checks decide on a new capture |
 | `The picture of VC-… does not match its record` | The local picture changed after the capture. Capture it again; marks are drawn only on the picture the record names |
 | `VC-…'s recipe names the storage state …, outside this project` | A replay reads files only from the project. Save the storage state inside the project and capture again |
 | `The document … that VC-…'s recipe names is not in this project` · `2 files of this project are named …` | Put the document back, or capture the one you mean again: `dev visual capture <file>` |

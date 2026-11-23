@@ -286,13 +286,15 @@ def mac_name(host) -> str:
     its short name with the machine id in parentheses, `studio (m-0000beef)`. This Mac's id reads as this Mac's short
     hostname now; another Mac's as the label its presence in the handoff repository publishes; an id with neither, or
     whose label is not a plain short hostname, as `another Mac (m-…)`. A record from before the machine id names a
-    hostname already, which stays; no name at all is "another Mac". For messages only: records keep the id."""
+    hostname already, which another Mac wrote: it stays when it is a plain short hostname (work._LABEL), as a presence
+    label does, and is "another Mac" otherwise, so no control character reaches a terminal or the report; no name at
+    all is "another Mac". For messages only: records keep the id."""
     from .. import work
     host = str(host or "").strip()
     if not host:
         return "another Mac"
     if not identity.MACHINE_ID.fullmatch(host):
-        return host
+        return host if work._LABEL.fullmatch(host) else "another Mac"
     users = ["me"] if host == identity.machine().id else \
         [p.name[:-len(f"@{host}.json")] for p in sorted(work.PRESENCE.glob(f"*@{host}.json"))]
     for user in users:

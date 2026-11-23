@@ -37,6 +37,9 @@ ID = re.compile(r"^V[ACF]-[0-9a-z]{4,40}$")
 SIGNAL_ID = re.compile(r"^V[AC]-[0-9a-z]{4,40}#\d{1,5}$")
 SHA = re.compile(r"^[0-9a-f]{64}$")
 DIAGRAM = re.compile(r"^[a-z0-9][a-z0-9._-]{0,60}$")
+# a machine id in a history line where devkit writes one: a verification names the Mac that took the picture before by
+# it (store._settle). Anywhere else the words are a person's (a --why), and "the m-dropdown menu" stays as written
+MACHINE_IN_TEXT = re.compile(r"(?<=picture before was taken on )m-[0-9a-z]{8}(?= and is )")
 SEVERITIES = ("P0", "P1", "P2", "P3")
 OPEN = ("open", "reopened", "fixing", "fixed")
 CLOSED = ("wontfix", "duplicate", "not-a-problem")
@@ -173,6 +176,8 @@ def load(records, store, audit_id: str) -> dict:
         if DIAGRAM.match(name) and dark.is_file():
             diagrams.append({"name": name, "light": light, "dark": dark})
     hosts = {str((c.get("by") or {}).get("host")) for c in captures if isinstance(c.get("by"), dict)}
+    hosts |= {m for f in findings for h in f.get("history") or [] if isinstance(h, dict) and isinstance(h.get("why"), str)
+              for m in MACHINE_IN_TEXT.findall(h["why"])}
     return {"audit": audit, "captures": captures, "findings": findings,
             "map": _read(records / "map" / "current.json"), "pictures": pictures, "store": store,
             "descriptions": descriptions, "diagrams": diagrams, "people": _people(),
@@ -452,6 +457,11 @@ class Report:
         # the Mac a capture names, by its name with its machine id (map.mac_name, resolved when the audit loads)
         return self.macs.get(host) or str(host or "") or "another Mac"
 
+    def macs_named(self, text) -> str:
+        # a history line with each machine id devkit wrote in it (MACHINE_IN_TEXT) named as mac() names a Mac:
+        # "taken on studio (m-studio01)"; a person's words stay as written
+        return MACHINE_IN_TEXT.sub(lambda m: self.mac(m.group(0)), str(text))
+
 
 # --------------------------------------------------------------------------- HTML pieces
 
@@ -631,7 +641,7 @@ def _finding_state(r: Report, f: dict) -> Markup | None:
             return _el("p", {"class": "state"}, f"Fixed by {who}. Waiting for a reviewer to accept it.")
     if st == "reopened" and v.get("check") == "fail":
         h = last("reopened")
-        why = f": {h['why']}" if h.get("why") else ""
+        why = f": {r.macs_named(h['why'])}" if h.get("why") else ""
         return _el("p", {"class": "state alert"}, f"Still there after the fix on {_when(h.get('at'))}{why}. Reopened.")
     if st in CLOSED:
         h = last(st)
@@ -687,7 +697,8 @@ def _detail_body(r: Report, f: dict, level: int = 4) -> Markup:
     hist = [h for h in f.get("history") or [] if isinstance(h, dict)]
     history = _el("ol", {"class": "history"}, [
         _el("li", None, f"{HISTORY_VERB.get(h.get('change'), str(h.get('change')))} by {r.person(h.get('by'))} "
-                        f"{_when(h.get('at'))}" + (f": {h['why']}" if h.get("why") else "")) for h in hist]) if hist else None
+                        f"{_when(h.get('at'))}" + (f": {r.macs_named(h['why'])}" if h.get("why") else ""))
+        for h in hist]) if hist else None
     return Markup(_el("dl", None, rows) + _kids([_finding_state(r, f), _compare(r, f),
                                                   _el(f"h{level}", {"class": "hh"}, "History") if hist else None,
                                                   history]))
