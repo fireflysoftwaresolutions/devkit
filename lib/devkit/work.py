@@ -303,8 +303,9 @@ def _replace(path: Path, text: str) -> None:
 RECORD_WAIT = 30  # seconds a write waits for another process's write of the same file on this Mac
 
 
-class RecordBusyError(RecordLossError):
-    """Another devkit process held the record's lock for RECORD_WAIT seconds: nothing was written."""
+class RecordBusyError(core.Busy, RecordLossError):
+    """Another devkit process held the record's lock for RECORD_WAIT seconds: nothing was written. Exit 75: running the
+    command again can work."""
 
     def __init__(self, path, wait):
         self.path, self.lost = Path(path), []

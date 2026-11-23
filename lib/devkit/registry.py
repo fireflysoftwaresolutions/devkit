@@ -1157,7 +1157,7 @@ def _aliases_lock():
     with core.file_lock(aliases_file(), ALIASES_WAIT) as got:
         if not got:
             raise AliasError(f"another devkit process kept {tilde(aliases_file())} locked for {ALIASES_WAIT:.0f} s; "
-                             "nothing changed, run the command again.")
+                             "nothing changed, run the command again.", code=core.Busy.code)
         yield
 
 

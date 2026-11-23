@@ -10,13 +10,14 @@ import contextlib
 import io
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from devkit import (audit, bugs, cli, configschema, core, ext, impeccable, lessons, peers,  # noqa: E402
-                    progress, registry, work)
+                    progress, registry, state, work)
 
 
 def dev(*argv):
@@ -124,6 +125,54 @@ class DomainErrorsAreRefusals(SeamCase):
             with self.subTest(type(exc).__name__):
                 self.assertIsInstance(exc, ValueError)
                 self.assertIsInstance(exc, core.Refusal)
+
+
+class BusyExits75(SeamCase):
+    def test_state_lock_timeout_exits_75(self):
+        exc = state.StateBusy("run record is busy: another devkit process held it for 5 s; try again")
+        self.assertRefused(self.run_raising(exc), 75, "run record is busy")
+
+    def test_record_lock_timeout_exits_75(self):
+        exc = work.RecordBusyError(self.root / "T-1.md", 30)
+        self.assertRefused(self.run_raising(exc), 75, str(exc))
+
+    def test_alias_lock_timeout_exits_75(self):
+        # another process holds the alias file's lock: the change waits, then refuses with the retry exit
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with core.file_lock(registry.aliases_file(), 5):
+                held.set()
+                release.wait(10)
+        t = threading.Thread(target=holder)
+        t.start()
+        self.addCleanup(t.join)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+
+        def change():
+            with registry._aliases_lock():
+                raise AssertionError("the lock was free")
+        with mock.patch.object(registry, "ALIASES_WAIT", 0.1):
+            self.assertRefused(self.run_calling(change), 75, "another devkit process kept")
+
+
+class StateRefusalsThatARetryCannotFix(SeamCase):
+    def test_a_record_that_does_not_parse_exits_2(self):
+        f = self.root / "run.json"
+        f.write_text("{cut off")
+        with mock.patch.object(state.time, "sleep", lambda s: None):
+            self.assertRefused(self.run_calling(lambda: state.load(f)), 2, "run.json does not parse")
+
+    def test_a_corrupt_bounded_record_exits_2(self):
+        exc = state.StateCorrupt("corrupt_state: record does not parse; retained unchanged")
+        self.assertRefused(self.run_raising(exc), 2, "corrupt_state: record does not parse")
+
+    def test_an_oversized_record_exits_2(self):
+        # a record past the storage limit: running the command again writes the same bytes
+        self.assertRefused(self.run_calling(lambda: state.replace(self.root / "big.json", {"x": "y" * 100},
+                                                                  max_bytes=10)),
+                           2, "capacity: record exceeds the storage limit")
 
 
 class TheSeam(SeamCase):
