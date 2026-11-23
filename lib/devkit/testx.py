@@ -3190,13 +3190,187 @@ def _plan(a, top, runners) -> int:
 
 # --------------------------------------------------------------------------- dev test prove
 
-_JS_UNIT = re.compile(r"^\s*(?:it|test)(?:\.(?:only|skip|concurrent|todo|failing))?\s*\(\s*(['\"`])(.+?)\1", re.M)
 _GO_UNIT = re.compile(r"^func (Test\w+)\s*\(", re.M)
 _JVM_UNIT = re.compile(r"@(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b[^\n]*\n(?:\s*@[^\n]*\n)*"
                        r"\s*(?:(?:public|private|protected|internal|open|override|suspend|static|final)\s+)*"
                        r"(?:fun\s+|void\s+|[\w<>\[\],]+\s+)?`?(\w+)`?\s*\(", re.M)
 _PHP_UNIT = re.compile(r"(?:(?:@test|#\[Test\])[^\n]*\n(?:[^\n]*\n){0,3}?\s*(?:public\s+)?function\s+(\w+)"
                        r"|function\s+(test\w*)\s*\()", re.M)
+
+
+_JS_CALL = re.compile(r"^[ \t]*(?:it|test)((?:\s*\.\s*\w+)*)\s*(?=[(`])", re.M)
+_JS_TAKES_ARG = {"each", "skipIf", "runIf", "for"}  # it.each(table)(title, …), it.skipIf(cond)(title, …)
+# members of test/it that are no test (Playwright's test.describe, test.use, test.step; vitest's test.extend)
+_JS_NOT_TEST = {"describe", "use", "step", "extend", "configure", "beforeEach", "afterEach", "beforeAll", "afterAll",
+                "info", "setTimeout", "slow", "expect", "scoped", "override"}
+_JS_HOOK = re.compile(r"^[ \t]*(?:beforeEach|afterEach|beforeAll|afterAll)\s*\(", re.M)
+_JS_DECL = re.compile(r"^[ \t]*(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)"
+                      r"|class\s+([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=)", re.M)
+_JS_REGEX_BEFORE = set("(,=:[!&|?{};+-*%<>~^") | {""}
+
+
+def _js_mask(text: str) -> str:
+    """`text` with the insides of its strings, template literals, regular expressions and comments blanked (new lines
+    kept): brackets and keywords found in the result are code."""
+    out, i, n, last = list(text), 0, len(text), ""
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+    while i < n:
+        c = text[i]
+        if c in "'\"":
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            blank(i + 1, j)
+            i, last = j + 1, c
+        elif c == "`":
+            j, depth = i + 1, 0
+            while j < n and (text[j] != "`" or depth):
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text.startswith("${", j):
+                    depth, j = depth + 1, j + 2
+                    continue
+                if text[j] == "}" and depth:
+                    depth -= 1
+                j += 1
+            blank(i + 1, j)
+            i, last = j + 1, c
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+        elif c == "/" and last in _JS_REGEX_BEFORE:
+            j, cls = i + 1, False
+            while j < n and text[j] != "\n" and (text[j] != "/" or cls):
+                if text[j] == "\\":
+                    j += 1
+                elif text[j] == "[":
+                    cls = True
+                elif text[j] == "]":
+                    cls = False
+                j += 1
+            blank(i + 1, j)
+            i, last = j + 1, "/"
+        else:
+            if not c.isspace():
+                last = c if not (c.isalnum() or c in "_$") else "a"
+            i += 1
+    return "".join(out)
+
+
+def _js_close(masked: str, at: int) -> int:
+    """The index of the bracket closing the one at `at` in masked text (_js_mask), or the end of the text."""
+    pairs, stack = {"(": ")", "[": "]", "{": "}"}, []
+    for k in range(at, len(masked)):
+        c = masked[k]
+        if c in pairs:
+            stack.append(pairs[c])
+        elif c in ")]}" and stack:
+            if stack.pop() != c:
+                return k
+            if not stack:
+                return k
+    return len(masked) - 1
+
+
+def _js_statement_end(masked: str, at: int) -> int:
+    """The index where the statement starting at `at` ends: a new line outside brackets after a complete expression."""
+    depth, k = 0, at
+    while k < len(masked):
+        c = masked[k]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth < 0:
+                return k - 1
+        elif c == ";" and depth == 0:
+            return k
+        elif c == "\n" and depth == 0:
+            before = masked[at:k].rstrip()
+            after = masked[k:].lstrip()
+            if before and not before.endswith(("=", ",", "(", "[", "{", "+", "-", "*", "/", "%", "&", "|", "?",
+                                               ":", "<", ">", "!", ".", "=>")) and \
+                    not after.startswith((".", "?", ":", "+", "-", "*", "/", "&&", "||", "=>")):
+                return k - 1
+        k += 1
+    return len(masked) - 1
+
+
+def _line_of(text: str, i: int) -> int:
+    return text.count("\n", 0, max(0, i)) + 1
+
+
+def _js_units(text: str) -> list:
+    """JS/TS tests: [(title, first line, last line)], each to the bracket closing its it()/test() call, so the code
+    between two tests (a helper, a describe) belongs to neither. it.each(table)(title) and it.each`table`(title)
+    are a unit named by their title template (%i, $a), whose cases _member matches."""
+    masked, out = _js_mask(text), []
+    for m in _JS_CALL.finditer(masked):
+        mods = re.findall(r"\w+", m.group(1))
+        if _JS_NOT_TEST & set(mods):
+            continue
+        k = m.end()
+        if mods and mods[-1] in _JS_TAKES_ARG:
+            if masked[k] == "`":
+                k = masked.find("`", k + 1) + 1
+            else:
+                k = _js_close(masked, k) + 1
+            while k < len(masked) and masked[k].isspace():
+                k += 1
+            if k <= 0 or k >= len(masked) or masked[k] != "(":
+                continue
+        if masked[k] != "(":
+            continue
+        q = k + 1
+        while q < len(text) and text[q].isspace():
+            q += 1
+        if q >= len(text) or text[q] not in "'\"`":
+            continue
+        close = text.find(text[q], q + 1)
+        while close > 0 and text[close - 1] == "\\":
+            close = text.find(text[q], close + 1)
+        if close < 0:
+            continue
+        end = _js_close(masked, k)
+        out.append((text[q + 1:close], _line_of(text, m.start() + len(m.group(0)) - len(m.group(0).lstrip())),
+                    _line_of(text, end)))
+    return out
+
+
+def _js_support(text: str) -> list:
+    """The test support of a JS/TS test file outside its tests: [(name or '', first line, last line)] of its named
+    helpers (function, class, const/let/var) and, named '', its hooks (beforeEach, afterAll, …)."""
+    masked = _js_mask(text)
+    tests = [(s, e) for _, s, e in _js_units(text)]
+    out = []
+    for m in _JS_DECL.finditer(masked):
+        start = _line_of(text, m.start())
+        if any(s <= start <= e for s, e in tests):
+            continue
+        name = next(g for g in m.groups() if g)
+        if m.group(3):
+            end = _js_statement_end(masked, m.end())
+        else:
+            brace = masked.find("{", m.end())
+            end = _js_close(masked, brace) if brace >= 0 else m.end()
+        out.append((name, start, _line_of(text, end)))
+    for m in _JS_HOOK.finditer(masked):
+        start = _line_of(text, m.start())
+        if not any(s <= start <= e for s, e in tests):
+            out.append(("", start, _line_of(text, _js_close(masked, m.end() - 1))))
+    return out
 
 
 def _py_test_class(node, plain) -> bool:
@@ -3237,12 +3411,14 @@ def _units(f, text) -> list:
                 if mine:
                     out += mine + [(f"{node.name}.*",) + span(node)]
         return out
-    rx = {"js": _JS_UNIT, "go": _GO_UNIT, "jvm": _JVM_UNIT, "php": _PHP_UNIT}.get(lang)
+    if lang == "js":
+        return _js_units(text)
+    rx = {"go": _GO_UNIT, "jvm": _JVM_UNIT, "php": _PHP_UNIT}.get(lang)
     if rx is None:
         return []
     starts = []
     for m in rx.finditer(text):
-        name = m.group(2) if lang == "js" else next((g for g in m.groups() if g), None)
+        name = next((g for g in m.groups() if g), None)
         if name:
             starts.append((name, text.count("\n", 0, m.start()) + 1))
     total = text.count("\n") + 1
@@ -3287,24 +3463,27 @@ def _support_spans(text) -> list:
 
 
 def _support_text(top, base, f):
-    """Test module `f` with its changed test support restored from `base` (see _support_spans): a fix in a helper
+    """Test module `f` with its changed test support restored from `base` (_support_spans; for JS, _js_support): a
+    fix in a helper
     defined inside a test module is part of the change, as a fix in a helper file is, so the module's tests run
     against the helper's old text without the change. A helper the change adds stays, as an added helper file does,
     and so does every test. -> the text, or None when no support of `f` changed."""
-    if _lang(f) != "py":
+    if _lang(f) not in ("py", "js"):
         return None
     p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
     if p.returncode != 0:
         return None
     old = p.stdout.decode("utf-8", "replace").splitlines(keepends=True)
     text = _read(os.path.join(top, f))
-    new, spans = text.splitlines(keepends=True), _support_spans(text)
+    new = text.splitlines(keepends=True)
+    spans = _support_spans(text) if _lang(f) == "py" else [(a, b) for _, a, b in _js_support(text)]
     picked = []
     for m in re.finditer(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
                          _git(top, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--", f)):
         o, oc, n, nc = (int(g) if g is not None else 1 for g in m.groups())  # a count left out is 1
         lines = range(n, n + nc) if nc else (n, n + 1)  # -U0 writes a deletion as +<the line before it>,0
-        said = [x for x in old[o - 1:o - 1 + oc] + new[n - 1:n - 1 + nc] if x.strip() and not x.strip().startswith("#")]
+        said = [x for x in old[o - 1:o - 1 + oc] + new[n - 1:n - 1 + nc]
+                if x.strip() and not x.strip().startswith(("#", "//"))]
         if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines):
             picked.append((o, oc, n, nc))
     for o, oc, n, nc in reversed(picked):
@@ -3313,10 +3492,73 @@ def _support_text(top, base, f):
     return "".join(new) if picked else None
 
 
+_SETUP_NAMES = {"setUp", "tearDown", "setUpClass", "tearDownClass", "asyncSetUp", "asyncTearDown",
+                "setup_method", "teardown_method", "setup_class", "teardown_class"}
+_MODULE_SETUP = {"setUpModule", "tearDownModule", "setup_module", "teardown_module", "setup_function",
+                 "teardown_function"}
+
+
+def _py_support(text) -> list:
+    """The named test support of a Python test module: [(name, first line, last line, class or '')] of its
+    module-level functions that are no tests, its assignments and classes without tests, and the methods and class
+    attributes of its test classes that are no tests."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+    def span(n):
+        return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]), getattr(n, "end_lineno", n.lineno)
+
+    def names(n):
+        if isinstance(n, (ast.Assign, ast.AnnAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            return [t.id for t in targets if isinstance(t, ast.Name)]
+        return [n.name]
+
+    out, plain = [], set()
+    for node in tree.body:
+        if isinstance(node, fn) and not node.name.startswith("test") or isinstance(node, (ast.Assign, ast.AnnAssign)):
+            out += [(x, *span(node), "") for x in names(node)]
+        elif isinstance(node, ast.ClassDef):
+            mine = [i for i in node.body if isinstance(i, fn)]
+            if not _py_test_class(node, plain) or not any(i.name.startswith("test") for i in mine):
+                out.append((node.name, *span(node), ""))
+            else:
+                out += [(x, *span(i), node.name) for i in node.body
+                        if isinstance(i, fn) and not i.name.startswith("test") or isinstance(i, (ast.Assign, ast.AnnAssign))
+                        for x in names(i)]
+    return out
+
+
+def _body(lines, s, e) -> tuple:
+    """Lines s..e of a file as they read: trailing spaces, blank lines and comment-only lines left out."""
+    return tuple(x.rstrip() for x in lines[s - 1:e] if x.strip() and not x.strip().startswith(("#", "//")))
+
+
+def _keyed(units, lines) -> dict:
+    """(name, occurrence) -> body, for units that share a name (two describes with an 'adds' each)."""
+    out, seen = {}, {}
+    for n, s, e in units:
+        k = seen[n] = seen.get(n, -1) + 1
+        out[(n, k)] = _body(lines, s, e)
+    return out
+
+
 def _changed_units(top, base, f):
-    """Names of the tests in `f` that are new or changed since `base`; None when the whole file counts."""
-    if core.git(top, "cat-file", "-e", f"{base}:{f}")[0] != 0:
+    """Names of the tests in `f` that are new or changed since `base`; None when the whole file counts.
+
+    A test is changed when its own text differs from the same-named test's at `base` (so a test moved or with new
+    tests inserted around it stays unchanged, whatever lines git's diff puts it next to), or when it reaches a test
+    helper of the file that changed: a helper it calls, directly or through other helpers; setUp and its kind, a
+    beforeEach, a module-level setup or an autouse fixture reach every test they run for."""
+    p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
+    if p.returncode != 0:
         return None
+    old_text = p.stdout.decode("utf-8", "replace")
     text = _read(os.path.join(top, f))
     src = text.splitlines()
     lines = {ln for ln in _changed_lines(top, base, f)  # blank and comment-only lines change no test
@@ -3325,14 +3567,58 @@ def _changed_units(top, base, f):
     if not lines or not units:
         return None
     tests = [(n, s, e) for n, s, e in units if not n.endswith(".*")]
-    picked = {n for n, s, e in tests if any(s <= ln <= e for ln in lines)}
-    for n, s, e in units:  # a change inside a class but outside its tests (setUp, a helper): all its tests
-        if n.endswith(".*"):
-            inside = {ln for ln in lines if s <= ln <= e}
-            mine = [t for t in tests if t[0].startswith(n[:-1])]
-            if inside - {ln for _, ts, te in mine for ln in range(ts, te + 1)}:
-                picked |= {t[0] for t in mine}
+    old_lines = old_text.splitlines()
+    before = _keyed([u for u in _units(f, old_text) if not u[0].endswith(".*")], old_lines)
+    now = _keyed(tests, src)
+    picked = {k[0] for k, body in now.items() if before.get(k) != body}
+    outside = {ln for ln in lines if not any(s <= ln <= e for _, s, e in tests)}
+    if outside:
+        picked |= _helper_callers(f, text, old_text, units, tests, outside)
     return sorted(picked) or None
+
+
+def _helper_callers(f, text, old_text, units, tests, lines) -> set:
+    """The tests of `f` a change to its support reaches (see _changed_units); `lines`: the changed lines outside
+    every test."""
+    src, lang = text.splitlines(), _lang(f)
+    if lang == "py":
+        support = _py_support(text)
+        old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in _py_support(old_text)}
+    elif lang == "js":
+        support = [(n, s, e, "") for n, s, e in _js_support(text)]
+        old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in
+               [(n, s, e, "") for n, s, e in _js_support(old_text)]}
+    else:
+        return {n for n, _, _ in tests}  # no helpers read here: every test, as a change outside the tests was
+    every, picked, changed = {n for n, _, _ in tests}, set(), set()
+    covered = set()
+    for name, s, e, cls in support:
+        mine = {ln for ln in lines if s <= ln <= e}
+        if not mine:
+            continue
+        covered |= mine
+        if lang == "js" and not name:  # a hook: every test of the file
+            picked |= every
+        elif name in _SETUP_NAMES and cls:
+            picked |= {n for n in every if n.startswith(cls + ".")}
+        elif name in _MODULE_SETUP and not cls or "autouse" in "\n".join(src[s - 1:s + 1]):
+            picked |= every
+        elif (cls, name) in old and old[(cls, name)] != _body(src, s, e):
+            changed.add(name)  # a helper the change adds is called only by tests that change with it
+    for n, s, e in units:  # a change inside a test class outside its tests and named members: all its tests
+        if n.endswith(".*") and {ln for ln in lines - covered if s <= ln <= e}:
+            picked |= {t for t in every if t.startswith(n[:-1])}
+    reach, todo = set(changed), list(changed)
+    while todo:  # helpers that call a changed helper are changed too
+        rx = re.compile(r"(?<![\w$])" + re.escape(todo.pop()) + r"(?![\w$])")
+        for name, s, e, _ in support:
+            if name and name not in reach and rx.search("\n".join(src[s - 1:e])):
+                reach.add(name)
+                todo.append(name)
+    if reach:
+        rx = re.compile(r"(?<![\w$])(?:" + "|".join(map(re.escape, sorted(reach))) + r")(?![\w$])")
+        picked |= {n for n, s, e in tests if rx.search("\n".join(src[s - 1:e]))}
+    return picked
 
 
 def _ut_module(runner, rel) -> str:
@@ -3381,7 +3667,22 @@ def _member(case, f, units, ids):
                    for i in (_id(x) for x in ids))
     same = case.get("test_file", case["file"]) == f or (
         f.endswith(".go") and case["file"].startswith((os.path.dirname(f) or ".") + "/"))
-    return same and (units is None or any(case["name"].endswith(u) for u in units))
+    return same and (units is None or any(_title_matches(case["name"], u) for u in units))
+
+
+_TITLE_SLOT = re.compile(r"%[sdifjoOpc#]|\$[A-Za-z_$][\w$]*(?:\.[\w$]+)*")
+
+
+def _title_matches(name: str, unit: str) -> bool:
+    """Whether a result's name is the test `unit` names: it ends with the title, or, for a title template (it.each's
+    %i, %s, $a), with the title its case filled in."""
+    if name.endswith(unit):
+        return True
+    if not _TITLE_SLOT.search(unit):
+        return False
+    parts = _TITLE_SLOT.split(unit.replace("%%", "\0"))
+    rx = ".+?".join(re.escape(x).replace("\0", "%") for x in parts)
+    return re.search(r"(?:^|\W)" + rx + r"$", name) is not None
 
 
 def _copy_files(top) -> list:
