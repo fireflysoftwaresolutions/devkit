@@ -3725,6 +3725,61 @@ def _js_support(text: str) -> list:
     return out
 
 
+_JS_MEMBER = re.compile(r"^[ \t]*(?:(?:static|async|get|set)\s+)*\*?\s*([A-Za-z_$#][\w$]*)\s*\(", re.M)
+
+
+def _js_members(text: str) -> dict:
+    """The methods of the classes outside the tests of a JS/TS test file: {(class, method): (first line, last
+    line)}."""
+    masked = _js_mask(text)
+    tests = [(s, e) for _, s, e in _js_units(text)]
+    out = {}
+    for m in _JS_DECL.finditer(masked):
+        if not m.group(2) or any(s <= _line_of(text, m.start()) <= e for s, e in tests):
+            continue
+        brace = masked.find("{", m.end())
+        if brace < 0:
+            continue
+        end, at = _js_close(masked, brace), brace + 1
+        while True:
+            head = _JS_MEMBER.search(masked, at, end)
+            body = masked.find("{", head.end(), end) if head else -1
+            if body < 0:
+                break
+            close = _js_close(masked, body)
+            out[(m.group(2), head.group(1))] = (_line_of(text, head.start()), _line_of(text, close))
+            at = close + 1
+    return out
+
+
+def _py_members(text) -> dict:
+    """The members (methods, attributes) of the classes without tests of a Python test module: {(class, name):
+    (first line, last line)}."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return {}
+    fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+    out, plain = {}, set()
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        mine = [i for i in node.body if isinstance(i, fn)]
+        if _py_test_class(node, plain) and any(i.name.startswith("test") for i in mine):
+            continue
+        for i in node.body:
+            if isinstance(i, (ast.Assign, ast.AnnAssign)):
+                names = [t.id for t in (i.targets if isinstance(i, ast.Assign) else [i.target])
+                         if isinstance(t, ast.Name)]
+            else:
+                names = [i.name] if isinstance(i, fn + (ast.ClassDef,)) else []
+            first = min([i.lineno] + [d.lineno for d in getattr(i, "decorator_list", [])])
+            out.update({(node.name, x): (first, getattr(i, "end_lineno", i.lineno)) for x in names})
+    return out
+
+
 def _py_test_class(node, plain) -> bool:
     """Whether a runner can collect the tests of class `node` of a Python test module. unittest collects a TestCase,
     which always has a base; pytest a class named Test… (or …Test, …Tests where a project sets python_classes). A
@@ -3830,15 +3885,23 @@ def _support_text(top, base, f):
     old = p.stdout.decode("utf-8", "replace").splitlines(keepends=True)
     text = _read(os.path.join(top, f))
     new = text.splitlines(keepends=True)
+    # a class without tests is matched member by member, as a test class's methods are: a method the change adds
+    # to it stays, and only lines added inside a member that was there go
     if _lang(f) == "py":
         spans = _support_spans(text)
         had = {(c, x) for x, _, _, c in _py_support("".join(old))}
-        existing = [(s, e) for x, s, e, c in _py_support(text) if (c, x) in had]
+        members, had_members = _py_members(text), set(_py_members("".join(old)))
+        classes = {c for c, _ in members}
+        existing = [(s, e) for x, s, e, c in _py_support(text) if (c, x) in had and not (not c and x in classes)]
     else:
         js = _js_support(text)
         spans = [(a, b) for _, a, b in js]
         had = {x for x, _, _ in _js_support("".join(old)) if x}  # hooks have no name to match them by
-        existing = [(a, b) for x, a, b in js if x in had]
+        members, had_members = _js_members(text), set(_js_members("".join(old)))
+        classes = {c for c, _ in members}
+        existing = [(a, b) for x, a, b in js if x in had and x not in classes]
+    existing += [span for k, span in members.items() if k in had_members]
+    added = [span for k, span in members.items() if k not in had_members]  # a member the change adds stays whole
     edits = []  # (index in `new`, lines replaced, their text without the change)
     for m in re.finditer(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
                          _git(top, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--", f)):
@@ -3846,7 +3909,8 @@ def _support_text(top, base, f):
         lines = range(n, n + nc) if nc else (n, n + 1)  # -U0 writes a deletion as +<the line before it>,0
         said = [x for x in old[o - 1:o - 1 + oc] + new[n - 1:n - 1 + nc]
                 if x.strip() and not x.strip().startswith(("#", "//"))]
-        if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines):
+        if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines) and \
+                not any(s <= ln <= e for s, e in added for ln in lines):
             edits.append((n - 1 if nc else n, nc, old[o - 1:o - 1 + oc]))
         elif not oc:  # an addition: its lines inside a helper that was there at base go
             inside = [ln for ln in lines if any(s <= ln <= e for s, e in existing)]

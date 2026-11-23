@@ -159,6 +159,39 @@ class JsHelperTests(unittest.TestCase):
         self.assertIn("expect(2).toBe(2);", text)  # a test keeps its change
 
 
+class HelperClassTests(unittest.TestCase):
+    # a class without tests (a fake) is matched member by member: a method the change adds stays, as an added helper
+    # does, and only lines added inside a method that was there go with the change
+    def support_text(self, f, before, after):
+        with Env() as e:
+            r = e.repo({f: before})
+            edit(r, {f: after})
+            return testx._support_text(str(r), "main", f)
+
+    def test_a_method_added_to_a_python_helper_class_stays(self):
+        before = ("import unittest\n\n\nclass Fake:\n    def get(self):\n        y = 0\n        return 1 + y\n\n\n"
+                  "class T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(Fake().get(), 1)\n")
+        test = "Fake().get(), 1)\n\n    def test_close(self):\n        self.assertTrue(Fake().close())\n"
+        close = "        return 1 + y\n\n    def close(self):\n        return True\n"
+        separate = before.replace("y = 0", "y = 0 * 2").replace("        return 1 + y\n", close) \
+            .replace("Fake().get(), 1)\n", test)
+        text = self.support_text("tests/test_a.py", before, separate)
+        self.assertIn("    def close(self):\n        return True\n", text)
+        self.assertIn("        y = 0\n", text)  # the edit inside get goes with the change
+        mixed = before.replace("        return 1 + y\n", "        return 2 + y\n" + close[21:]) \
+            .replace("Fake().get(), 1)\n", test)  # one hunk: get's last line and the new method
+        self.assertIn("    def close(self):\n", self.support_text("tests/test_a.py", before, mixed) or mixed)
+
+    def test_a_method_added_to_a_javascript_helper_class_stays(self):
+        before = ("class Fake {\n  get() {\n    const y = 0;\n    return 1 + y;\n  }\n}\n\n"
+                  "test('a', () => { expect(new Fake().get()).toBe(1); });\n")
+        after = before.replace("const y = 0;", "const y = 0 * 2;").replace(
+            "    return 1 + y;\n  }\n", "    return 1 + y;\n  }\n  close() {\n    return true;\n  }\n") + \
+            "test('b', () => { expect(new Fake().close()).toBe(true); });\n"
+        text = self.support_text("tests/a.test.js", before, after)
+        self.assertIn("  close() {\n    return true;\n  }\n", text)
+        self.assertIn("    const y = 0;\n", text)
+
 PY_SHARED = """
 import unittest
 
