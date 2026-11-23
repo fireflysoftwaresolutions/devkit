@@ -1018,10 +1018,11 @@ def _list_failure(e, path, again: str) -> tuple:
     """(exit code, reason, fix) for a lock or acceptance list devkit could not write, shared by `dev ext update
     --apply` and `dev ext ack`, so the exit code tells a retry from a repair: another devkit process holding its lock
     is a retry (EX_TEMPFAIL, run `again` in a moment); a file that does not parse, is unsafe, too large or cannot be
-    written needs a repair first (2). `again` is the command to run again."""
+    written needs a repair first (2). The error's class tells them apart (state.StateHeld is the retry), never its
+    words. `again` is the command to run again."""
     from . import state
     name, text = core.tilde(path), str(e)
-    if isinstance(e, state.StateBusy) and not isinstance(e, state.StateCorrupt) and " is busy" in text:
+    if isinstance(e, state.StateHeld):
         return EX_TEMPFAIL, f"{name} is busy (another dev command writes it)", f"Run {again} again in a moment"
     if isinstance(e, state.StateCorrupt) or "does not parse" in text:
         return 2, f"{name} does not parse", (f"Look at it, repair it to a JSON object or move it aside (dev mv "

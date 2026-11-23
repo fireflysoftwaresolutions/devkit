@@ -1342,6 +1342,17 @@ class ApplyListFailureTests(unittest.TestCase):
             self.assertIn("move it aside", line)
             self.assertNotIn("again in a moment", line)
 
+    def test_the_error_class_tells_a_retry_from_a_repair_not_its_words(self):
+        from devkit import state
+        path = Path(self.tmp.name) / "ext-accepted.json"
+        code, reason, _ = ext._list_failure(state.StateBusy("unsafe state lock: replaced, so the record is busy"),
+                                            path, "dev ext ack")
+        self.assertEqual(code, 2, reason)  # an unsafe lock needs a repair, whatever its message says
+        held = getattr(state, "StateHeld", None)
+        self.assertIsNotNone(held, "state has no error for a lock another process held past the wait")
+        code, _, fix = ext._list_failure(held("another devkit process held the lock for 5 s"), path, "dev ext ack")
+        self.assertEqual((code, fix), (75, "Run dev ext ack again in a moment"))
+
 
 class OverlayValidationTests(unittest.TestCase):
     """The developer's own entries obey the same supply-chain rules as the team's (spec threats: user overlay)."""

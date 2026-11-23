@@ -619,6 +619,34 @@ class LockTests(Records):
         self.assertTrue(other_holds.is_set())
         self.assertFalse(both, "two holders of one record's lock")
 
+    def test_a_lock_held_past_the_wait_raises_its_own_error(self):
+        # callers tell a retry (another process holds the lock) from a repair (an unsafe or unparsable record) by
+        # the error's class, never by its words
+        from devkit import state
+        path, caught = self.root / "boxes" / "x.json", []
+        state.update(path, lambda d: d.update(v=1))
+
+        def other_thread():
+            try:
+                state.update(path, lambda d: d.update(other=1), wait=0.05)
+            except state.StateBusy as e:
+                caught.append(type(e).__name__)
+        with state.hold(path):
+            t = threading.Thread(target=other_thread)
+            t.start()
+            t.join(5)
+        with mock.patch.object(state, "_names", lambda lock, fd: False):  # a lock file that keeps changing
+            try:
+                with state.hold(path, wait=0):
+                    self.fail("held a lock file the path no longer names")
+            except state.StateBusy as e:
+                caught.append(type(e).__name__)
+        self.assertEqual(caught, ["StateHeld", "StateHeld"])
+        path.write_text("{not json")
+        with self.assertRaises(state.StateBusy) as cm:
+            state.update(path, lambda d: d.update(v=2))
+        self.assertNotEqual(type(cm.exception).__name__, "StateHeld")  # a record that does not parse is a repair
+
     def test_a_lock_file_that_keeps_changing_ends_the_wait_busy(self):
         # every flock lands on a file the path no longer names: the retries stop at the wait, as a busy lock does
         from devkit import state
