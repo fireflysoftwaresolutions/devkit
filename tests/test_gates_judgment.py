@@ -63,6 +63,24 @@ class ClaudeStopJudgmentTests(StopCase):
         self.assertEqual(out.get("decision"), "block", out)
         self.assertIn("the crew gates found 1 thing missing", out.get("reason", ""))
 
+    def test_a_resumed_reviewer_that_records_its_approval_passes_the_review(self):
+        # sent back in its first life and let through without its step; resumed, it records the review with
+        # --step review --approves api and a ✓ check, and reports ✓: that stop is judged again and approves the work
+        self.stop()
+        self.stop(stop_hook_active=True)
+        self.assert_review_approves_nothing()
+        pg.reopen("review", why="the reviewer is resumed to record its verdict", now=self.at(30))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a_seraph", "agent_type": "devkit:seraph"}, True,
+                       now=self.at(31))
+        pg.step("review done", which="review", check="✓ read the diff, 9 tests pass", from_agent="a_seraph",
+                approves="api", now=self.at(32))
+        tr = self.transcript('dev progress step "review done" --step review --approves api '
+                             '--check "✓ read the diff, 9 tests pass"')
+        self.assertEqual(self.stop(tr), "")
+        why = [h["why"] for h in self.run_()["history"] if h["step"] == "review"][-1]
+        self.assertEqual(self.plan()["review"]["state"], "done", why)
+        self.assertEqual(pg.approvals_owed(self.run_()), [])
+
     def test_a_judge_given_to_the_gates_decides_the_stop(self):
         # the seam a model-based test drives: the judge's findings, not the real gates, decide the verdict
         sess = {}
