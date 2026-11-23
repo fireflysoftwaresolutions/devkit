@@ -8,6 +8,7 @@ not fatal. Exit code 1 when any checker reports errors.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -16,8 +17,19 @@ from pathlib import Path
 from . import core, ui
 from .core import DEVKIT_HOME, HOME
 
-VALE_STYLES = HOME / ".local" / "share" / "devkit" / "vale" / "styles"
-VALE_INI = HOME / ".local" / "share" / "devkit" / "vale" / ".vale.ini"
+VALE_DIR = HOME / ".local" / "share" / "devkit" / "vale"
+VALE_STYLES = VALE_DIR / "styles"  # the style packages, downloaded once and shared by every devkit copy
+
+
+def vale_ini_of(home: Path) -> Path:
+    """The Vale config of the devkit copy in `home`, named after its folder. Each copy writes its own: a branch
+    checkout's docs check runs with that branch's rules and never rewrites the one the pinned copy's sessions read."""
+    home = Path(home).resolve()
+    name = "".join(c if c.isalnum() or c in "._-" else "-" for c in home.name) or "devkit"
+    return VALE_DIR / "configs" / f"{name}-{hashlib.sha256(str(home).encode()).hexdigest()[:10]}.vale.ini"
+
+
+VALE_INI = vale_ini_of(DEVKIT_HOME)
 MD_SKIP = ("node_modules", ".venv", "vendor", "dist", ".git", "build", "target", ".worktrees")
 # Folders of test fixtures: the images there are what a test loads, not a picture a reader sees, so the diagram rules
 # (a title, no scripts, readable type) do not apply to them.
@@ -26,7 +38,7 @@ VALE_WARNINGS_SHOWN = 40  # Vale's errors are all listed; its warnings up to thi
 
 
 def ensure_vale() -> bool:
-    """Write devkit's Vale config with its styles path and download the style packages (once)."""
+    """Write this copy's Vale config with the shared styles path and download the style packages (once)."""
     if not core.have("vale"):
         return False
     VALE_STYLES.mkdir(parents=True, exist_ok=True)

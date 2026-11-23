@@ -142,6 +142,52 @@ class ValeConfigTests(unittest.TestCase):
         self.assertFalse(ignored("title"))
 
 
+class ValeConfigPerCopyTests(unittest.TestCase):
+    # dev docs check run from a branch checkout rewrote the Vale config under ~/.local/share/devkit/vale with that
+    # branch's rules, and every session's docs check, which runs the pinned copy, read them until its next run. Each
+    # copy below is a real devkit library in its own folder, run as a child process with HOME in the test's folder.
+    SETUP = ("import sys; sys.path.insert(0, sys.argv[1]); from devkit import docs; "
+             "ok = docs.ensure_vale(); print(docs.VALE_INI if ok else 'no vale')")
+
+    def copy_of_devkit(self, home: Path, rule: str) -> Path:
+        shutil.copytree(core.DEVKIT_HOME / "lib", home / "lib",
+                        ignore=shutil.ignore_patterns("__pycache__", "visual", "web", "art"))
+        (home / "config" / "docs").mkdir(parents=True)
+        template = (core.DEVKIT_HOME / "config" / "docs" / "vale.ini").read_text()
+        (home / "config" / "docs" / "vale.ini").write_text(template + rule + "\n")
+        return home
+
+    def test_a_checkouts_docs_check_writes_its_own_vale_config_and_leaves_the_installed_copys(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _sandbox
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            user = root / "home"
+            styles = user / ".local" / "share" / "devkit" / "vale" / "styles"
+            for package in ("Google", "write-good"):  # already synced: no download
+                (styles / package).mkdir(parents=True)
+            stand_ins = root / "bin"
+            stand_ins.mkdir()
+            (stand_ins / "vale").write_text("#!/bin/sh\nexit 0\n")
+            (stand_ins / "vale").chmod(0o755)
+            installed = self.copy_of_devkit(root / "releases" / "26.11.27-b72ab90", "Google.Quotes = NO")
+            checkout = self.copy_of_devkit(root / "worktrees" / "fix-docs", "Google.Quotes = YES")
+            env = _sandbox.env(stubs=[stand_ins], HOME=user)
+
+            def setup(copy: Path) -> Path:
+                r = subprocess.run([sys.executable, "-I", "-c", self.SETUP, str(copy / "lib")], env=env, cwd=root,
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                return Path(r.stdout.strip().splitlines()[-1])
+
+            installed_ini = setup(installed)
+            checkout_ini = setup(checkout)
+            self.assertNotEqual(installed_ini, checkout_ini)
+            self.assertIn("Google.Quotes = NO", installed_ini.read_text())  # the installed copy's rules, as it wrote
+            self.assertIn("Google.Quotes = YES", checkout_ini.read_text())
+            self.assertIn(f"StylesPath = {styles}", checkout_ini.read_text())  # the style packages stay shared
+
+
 class SvgTests(unittest.TestCase):
     # The diagram rules (a title for people who cannot see the picture, no scripts) are for the images a reader sees.
     # A test fixture is a deliberately plain image a test loads, so the check fails a page's diagram without a title
