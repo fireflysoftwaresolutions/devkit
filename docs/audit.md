@@ -574,6 +574,14 @@ as one string instead of a list, a pattern that does not compile, or an unknown 
 Audit records go on being written, with lengths instead of text. Fix the file the `fix:` line or `dev audit config`
 names, and redaction with every pattern starts again at the next command.
 
+`dev sync` never publishes a team policy file (`policy/<name>.json`) that no Mac could load, and never stops for one.
+When this Mac's copy cannot be loaded, the sync moves its text out of the handoff repository to a private file under
+devkit's state (`policy-held/`, named with the time, a `.why` file beside it with the reason), and the repository keeps
+the version it last pulled, so the pull and the push go on. devkit records the hold as a critical, blocked
+`handoff.push`, tells the live sessions, and says it at every `dev sync` and every session start until you delete the
+held copy. To keep the change, repair it (`dev audit config` shows what is wrong), put it back into the handoff
+repository, and delete the held copy; to drop the change, delete the held copy.
+
 Because a key devkit does not know withholds text, add a top-level key that a newer devkit introduces to
 `policy/audit.json` only after every Mac on the team runs that version (`dev update`): a Mac on an older version
 reads the key as unknown and withholds text until it updates.

@@ -263,11 +263,14 @@ def _waiting(root: Path) -> bool:
 
 def _commit_handoff(root: Path, st: dict, quiet: bool) -> bool:
     """Stage and commit every change but a file over the size limit, which is left out (unstaged when someone staged
-    it) and recorded once: a critical, blocked `handoff.push` that names it. A record a running devkit command has
-    written and not committed yet (work.writing) is left out too: its writer commits it with its own message and
-    audit record. -> whether it committed."""
+    it) and recorded once: a critical, blocked `handoff.push` that names it. A team policy file no Mac could load is
+    moved out of the repository first (work.hold_broken_policies): the repository keeps the version it last pulled,
+    so nothing broken is committed and no pull waits for it. A record a running devkit command has written and not
+    committed yet (work.writing) is left out too: its writer commits it with its own message and audit record.
+    -> whether it committed."""
     from . import audit, identity, work
-    _, held = _handoff_changes(root)
+    paths, held = _handoff_changes(root)
+    work.hold_broken_policies(root, paths)
     skip = [p for p, _ in held] + sorted(work.writing(root) - {p for p, _ in held})
     if skip:
         core.git(root, "add", "-A", "--", ".", *(f":(exclude,literal){p}" for p in skip))
@@ -382,8 +385,10 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
     """Commit what changed in the handoff repository and push it, when the push is due: `urgent`, or no push from this
     Mac for sync.push_interval seconds. Otherwise the changes stay as they are and one detached flusher pushes them
     on time (`_defer`); nothing is recorded for a wait. A file over the size limit is never committed
-    (`_commit_handoff`). A rebase left stopped is aborted first, a pull settles every conflict in a private checkout
-    (work.rebase_fetched), and every failure is recorded in handoff-push-failed.json, which `dev status` shows until a
+    (`_commit_handoff`), and a team policy file no Mac could load is moved aside first, deferred or not
+    (work.hold_broken_policies), and named at every sync that is not quiet until the developer drops it. A rebase
+    left stopped is aborted first, a pull settles every conflict in a private checkout (work.rebase_fetched), and
+    every failure is recorded in handoff-push-failed.json, which `dev status` shows until a
     push succeeds. The commit, the fetch and the push hold work._repo_lock; the rebase holds the notes lock first, so
     it runs after that lock is released. `reason`: why it pushes (the audit record says it).
     -> "pushed" | "committed" (no remote, or push off) | "deferred" | "nothing" | "failed"."""
@@ -398,6 +403,10 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
                 ui.warn("handoff sync skipped: another devkit process is using the handoff repository")
             return "failed"
         work.recover_rebase("dev sync")
+        work.hold_broken_policies(root)  # before a push that waits too: a pull meanwhile never finds one
+        waiting = work.held_policy_line()
+        if waiting and not quiet:  # every sync says it until the developer drops the held copy
+            ui.warn(f"handoff repository: {waiting}")
         remote = bool(push) and bool(core.gitout(root, "remote"))
         st = _push_state(root)
         last = float(st.get("last_push") or 0)

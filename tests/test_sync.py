@@ -460,7 +460,8 @@ class HeldPolicyTests(unittest.TestCase):
             self.assertEqual(_git(m.here, "status", "--porcelain"), "")
             held = work.held_policies()
             self.assertEqual(sorted((h["path"], h["why"]) for h in held),
-                             [("policy/audit.json", "is not valid JSON"), ("policy/progress.json", "is not valid JSON")])
+                             [("policy/audit.json", "is not valid JSON"),
+                              ("policy/progress.json", "is not valid JSON")])
             for h in held:
                 saved = Path(h["saved"])
                 self.assertEqual(saved.read_text(), broken[h["path"]])  # this Mac's text, to repair
@@ -491,6 +492,59 @@ class HeldPolicyTests(unittest.TestCase):
             self.assertEqual(work.hold_broken_policies(m.here), [])
             self.assertEqual(len(_git(m.here, "status", "--porcelain", "--untracked-files=all").splitlines()), 2)
             self.assertEqual(work.held_policies(), [])
+
+
+class TeamPolicySyncTests(unittest.TestCase):
+    def test_a_sync_never_publishes_a_broken_team_policy_and_never_stops(self):
+        # A cut-off policy/audit.json once reached every Mac, where it withholds all audit text; left uncommitted
+        # instead, it stopped this Mac's pulls once the other Mac changed the same file. Each sync now moves this
+        # Mac's text aside, keeps origin's version, pulls and pushes the rest, and says where the text went, until
+        # the developer drops it; a repaired change is published like any other.
+        with TwoMacs() as m:
+            remote = m.base / "remote.git"
+            self.assertNotEqual(core.HANDOFF.resolve(), Path("~/Development/.handoff").expanduser().resolve())
+            policy = m.here / "policy" / "audit.json"
+            policy.parent.mkdir(parents=True)
+            policy.write_text(json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}"]}}))
+            sync()
+            _git(m.other, "pull", "-q")
+            theirs = json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}", "zulu-[a-z]+"]}})
+            (m.other / "policy" / "audit.json").write_text(theirs)
+            (m.other / "other.md").write_text("from the other Mac\n")
+            _git(m.other, "add", "-A")
+            _git(m.other, "commit", "-qm", "the team adds a pattern")
+            _git(m.other, "push", "-q")
+            for body, why in (('{"redact": ', "is not valid JSON"),
+                              (json.dumps({"audit.redact.extra": ["acmetok-[a-z0-9]{14}"]}), "has an unknown key")):
+                with self.subTest(policy=body):
+                    policy.write_text(body)
+                    (m.here / "policy" / "progress.json").write_text("{")  # a new file, broken too
+                    write_note(m.here, note_text("synced with " + why))
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        self.assertEqual(cli.commit_push(quiet=False, urgent=True), "pushed")
+                    self.assertEqual(_git(remote, "show", "main:policy/audit.json"), theirs)
+                    self.assertEqual(policy.read_text(), theirs)
+                    self.assertNotIn("policy/progress.json", _git(remote, "ls-tree", "-r", "--name-only", "main"))
+                    self.assertIn("synced with " + why, _git(remote, "show", f"main:projects/{PID}.md"))
+                    self.assertTrue((m.here / "other.md").exists())
+                    for said in ("policy/audit.json", why, "policy/progress.json", core.tilde(work.held_policy_dir())):
+                        self.assertIn(said, err.getvalue())
+            held = work.held_policies()
+            self.assertEqual(sorted(h["path"] for h in held), ["policy/audit.json"] * 2 + ["policy/progress.json"] * 2)
+            blocked = [r for r in audit.query() if r["action"] == "handoff.push" and r["outcome"] == "blocked"]
+            self.assertEqual(len(blocked), 4)
+            for h in held:  # dropped: no sync says it any more
+                Path(h["saved"]).unlink()
+            write_note(m.here, note_text("after the drop"))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.commit_push(quiet=False, urgent=True), "pushed")
+            self.assertNotIn("policy", err.getvalue())
+            repaired = json.dumps({"redact": {"extra": ["acmetok-[a-z0-9]{14}", "zulu-[a-z]+", "quebec-[a-z]+"]}})
+            policy.write_text(repaired)
+            sync()
+            self.assertEqual(_git(remote, "show", "main:policy/audit.json"), repaired)
 
 
 class WorkingTreeTests(unittest.TestCase):
