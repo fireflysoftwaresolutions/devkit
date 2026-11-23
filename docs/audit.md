@@ -79,7 +79,9 @@ values for every machine, never lower them. A team that must keep records longer
 or an external audit, raises `team_months` there and says why in the commit.
 
 Every prune is itself recorded as `audit.prune`, with the months and the number of records it removed. The manifest
-keeps the link of the last segment it removed as `start`, so the first segment kept still verifies. Each manifest
+keeps the link of the last segment it removed as `start`, so the first segment kept still verifies, and the
+`audit.prune` record names that start (`ref.start`, and `ref.team_start` for the handoff copy's). Verify accepts a
+`start` only where such a record names it, so removing the oldest segments and writing a `start` fails. Each manifest
 drops a segment before its file is removed, so a prune that stops halfway never leaves a manifest listing a file that
 is gone. A reseal map
 goes with the `audit.reseal` record that backs it: prune removes the map wherever it removes the segment that holds
@@ -124,7 +126,9 @@ audit/ana@m-s9jn9xnz/
   manifest that lists it, and never rewrites it. A segment holds at most about 16 MiB, so none is ever held. The open
   segment waits for the next run, so a record waits up to about 29 hours to be anchored: the rest of its UTC day,
   plus the time to the next 05:00 run. When the copy begins after the first segments, because they are older than
-  three months or were pruned before the first publish, its manifest records as `start` where its chain begins.
+  three months or were pruned before the first publish, its manifest records as `start` where its chain begins,
+  and a record names it: the `audit.publish` record of that first publish, or the `audit.prune` record. Until that
+  record is published, another machine's verify shows a note for the copy, and this Mac's verify checks it.
 - **A published segment that differs is never written over.** If this Mac's closed segment and the published one
   differ, the job leaves the published one as it is and records `audit.publish` as blocked and critical, and
   `dev audit verify` names the segment.
@@ -420,7 +424,7 @@ dev audit show 01M6SFPEZ2
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
 | `why` | for an override | The reason given with `--why`, redacted. At most 300 characters |
 | `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, `transcript_uuid`, and, for a question tool answer, `match` and `asked` |
-| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for [caller identity records](#caller-identity-records), `agent`, `ancestors`, `lane_var`, and `thread`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
+| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for [caller identity records](#caller-identity-records), `agent`, `ancestors`, `lane_var`, and `thread`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for `audit.prune` and `audit.publish`, `start` and `team_start` (where this Mac's trail and its handoff copy now start: the segment and its link, which `dev audit verify` checks a manifest's `start` against); for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
 The `flag` and `match` evidence, the `irreversible` reference, and the fields of the irreversible-action gate appear
@@ -564,6 +568,7 @@ record's id, and exits `1`:
 | does not link to the one before it | A record was removed, inserted, or changed before this one, or a segment or a day file before it is missing |
 | differs from its manifest entry | A closed segment's size, SHA-256, record count, time span, records per day or per action, chain head, or link is not what the manifest recorded when the job closed it: the segment or the manifest changed. The problem names the fields that differ |
 | is in the manifest, but its file is gone | A closed segment was removed |
+| the chain starts after a segment, and no record names that start | The manifest's `start` is not one an `audit.prune` record (or, for a handoff copy, the `audit.publish` record of its first publish) names: the oldest segments may have been removed and `start` written to hide it |
 | the first segment links to a month file as it was at byte N | The month file of an earlier devkit changed before the point where the segments start |
 | no audit.reseal record backs the reseal map | A reseal map was changed, or written by something other than `dev audit reseal` |
 | differs from the published copy | Records were changed or removed after they were published |

@@ -721,6 +721,53 @@ class ResealBeforePublishTests(SegmentCase):
         self.assertTrue(v["ok"], v["first"])
 
 
+class StartTests(SegmentCase):
+    # a manifest's `start`: where the chain begins once the segments before it were pruned or never published
+    def cut_head(self, folder: Path, published: bool):
+        # remove the oldest segment and its manifest entry, and name it as `start`, as a prune would have
+        mf = folder / "manifest.json"
+        m = json.loads(mf.read_text())
+        head = m["units"][0]
+        (folder / head["name"][:7] / (f"{head['name']}.jsonl" if published else f"{head['name']}.jsonl.gz")).unlink()
+        m["units"] = m["units"][1:]
+        m["start"] = {"unit": head["name"], "link": head["link"]}
+        mf.write_text(json.dumps(m))
+        return head["name"]
+
+    def test_verify_refuses_a_start_that_no_prune_record_names(self):
+        self.write(noon(4), 1)
+        self.write(noon(3), 1)
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        name = self.cut_head(audit.AUDIT, published=False)
+        res = audit.verify(team=False)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["first"]["kind"], "start")
+        self.assertIn(name, res["first"]["problem"])
+
+    def test_a_handoff_copy_begun_after_older_segments_verifies_until_its_head_is_cut(self):
+        old = noon(0, time.time() - 4 * 31 * DAY)  # older than the three months publish copies
+        self.write(old, 1)
+        self.write(noon(3), 1)
+        self.write(noon(2), 1)
+        audit.close(now=noon(0))
+        audit.publish()
+        self.assertEqual(json.loads((audit.team_dir() / "manifest.json").read_text())["start"]["unit"],
+                         f"{utc_day(old)}.01")
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        here, audit.AUDIT = audit.AUDIT, self.elsewhere  # another Mac, before this one published what backs it
+        with mock.patch.object(audit, "team_dir", return_value=core.HANDOFF / "audit" / "ana@m-another"):
+            res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertTrue(any("not published yet" in n["note"] for n in res["notes"]), res["notes"])
+        audit.AUDIT = here
+        self.cut_head(audit.team_dir(), published=True)
+        res = audit.verify()
+        self.assertFalse(res["ok"])
+        self.assertEqual([p["kind"] for p in res["problems"]], ["start"])
+
+
 class CommandTests(SegmentCase):
     def test_dev_audit_parses_reseal_and_apply(self):
         from devkit import cli

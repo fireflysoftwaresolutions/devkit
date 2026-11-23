@@ -1783,6 +1783,9 @@ EXTRAS = {
     # identity.py's records of a call's caller: the agent of the session, the command's parents up to its agent, and
     # the lane variable and Codex thread it carried
     "host_agent": "ref.agent", "ancestors": "ref.ancestors", "lane_var": "ref.lane_var", "thread": "ref.thread",
+    # where a chain starts once a prune or a late first publish leaves out the segments before it: "<unit> <link>",
+    # this Mac's trail (start) and its handoff copy (team_start); verify accepts a manifest's start only through one
+    "start": "ref.start", "team_start": "ref.team_start",
 }
 RAISE = {"tampered": "critical"}  # a caller's outcome word that makes the record more severe
 EVIDENCE_KEYS = {p.split(".", 1)[1] for p in EXTRAS.values() if p.startswith("evidence.")}
@@ -2141,7 +2144,7 @@ def _context(agent_id: str = "", *, native: bool = False) -> dict:
 # which any teammate can commit, and a pattern must not lift an embargo or unhook the chain's anchors. The built-in
 # rules still clean them when the record is written. None: every field of the record.
 _CONTROLS = {"git.embargo": ("branch", "target", "detail", "project", "evidence.commit"),
-             "audit.reseal": ("ref.id", "evidence.check"), "audit.prune": None}
+             "audit.reseal": ("ref.id", "evidence.check"), "audit.prune": None, "audit.publish": ("ref.team_start",)}
 
 
 def _rules_for(action: str, field: str, rx) -> list:
@@ -3286,7 +3289,7 @@ def verify_file(path: Path, chain: dict = None) -> dict:
     res["sha256"], res["bytes"] = hashlib.sha256(own).hexdigest(), len(own)
     data = c.get("carry", b"") + own
     last, tail, link = c.get("last", ""), c.get("tail", b""), c.get("link")
-    bridges, reseals = c.get("bridges") or {}, c.get("reseals")
+    bridges, reseals, starts = c.get("bridges") or {}, c.get("reseals"), c.get("starts")
     lines = data.splitlines(keepends=True)
     carry = lines.pop() if c.get("more") and lines and not lines[-1].endswith((b"\n", b"\r")) else b""
     for n, raw in enumerate(lines, 1):
@@ -3312,6 +3315,10 @@ def verify_file(path: Path, chain: dict = None) -> dict:
             else:
                 if reseals is not None and r.get("action") == "audit.reseal" and r.get("outcome") == "ok":
                     reseals[str((r.get("ref") or {}).get("id") or "")] = str((r.get("evidence") or {}).get("check"))
+                if starts is not None and r.get("action") in ("audit.prune", "audit.publish") and \
+                        r.get("outcome") == "ok" and isinstance(r.get("ref"), dict):
+                    starts.update((r["action"], k, r["ref"][k]) for k in ("start", "team_start")
+                                  if isinstance(r["ref"].get(k), str))
                 if want is None:
                     res["notes"].append({**where, "kind": "note", "note": "its link to the held day before it cannot "
                                          "be checked here: lines outside the chain come between them"})
@@ -3404,10 +3411,11 @@ def _team_segments(where: Path, man: dict) -> list:
     return sorted(out, key=lambda u: _unit_key(u["name"]))
 
 
-def _verify_team(root: Path) -> tuple:
+def _verify_team(root: Path, known: set = None) -> tuple:
     """Every copy in the handoff repository, in path order -> (a result per file, problems of no one file). A month
     published as daily files is one chain across its one-file copy (when it has one) and its days; each machine's
-    published segments are one chain, checked against its manifest and reseal maps."""
+    published segments are one chain, checked against its manifest and reseal maps. `known`: the starts this Mac's own
+    trail records (_verify_trail), which also back its own copy's start."""
     units, single, extra = {}, [], []
     for f in sorted(root.rglob("*.jsonl")) + sorted(root.rglob("*.held.json")):
         m = _DAY_PART.fullmatch(f.name)
@@ -3426,7 +3434,7 @@ def _verify_team(root: Path) -> tuple:
         man = _read_manifest(_manifest_file(where))
         segs = _team_segments(where, man)
         if segs or man["units"] or man.get("error"):
-            res, more = _verify_trail(segs, man, where)
+            res, more = _verify_trail(segs, man, where, known=known if where == team_dir() else None)
             out += res
             extra += more
     return out, extra
@@ -3473,17 +3481,18 @@ def _check_entry(res: dict, u: dict, chain: dict):
                                       f"({', '.join(off)}): the file or the manifest changed after it was closed"))
 
 
-def _verify_trail(units: list, man: dict, where: Path) -> tuple:
+def _verify_trail(units: list, man: dict, where: Path, known: set = None, seen: set = None) -> tuple:
     """One machine's trail: this Mac's units, or a machine's published segments -> (a result per unit, problems of
     no one unit). Month files are each their own chain; segments are one chain across, from the manifest's `start`
     (the units before it were pruned or not published), else its `origin`, else nothing. A closed unit must match its
     manifest entry, and a listed unit must exist. A link to a resealed unit's old end holds only through a reseal map
-    (`where`/reseal/) that an audit.reseal record backs."""
+    (`where`/reseal/) that an audit.reseal record backs, and `start` only where a record names it (_check_start).
+    `known`: starts recorded outside these units that back this one's too; `seen`: filled with the starts read."""
     extra = []
     if man.get("error"):
         extra.append(_problem(_manifest_file(where), "unreadable", f"the manifest cannot be read: {man['error']}"))
     bridges, maps = _load_maps(where / "reseal")
-    reseals, results, chain = {}, [], None
+    reseals, starts, results, chain = {}, set() if seen is None else seen, [], None
     start = man.get("start") if isinstance(man.get("start"), dict) else man.get("origin")
     for u in units:
         if u["kind"] == "day" and chain is None:
@@ -3496,7 +3505,7 @@ def _verify_trail(units: list, man: dict, where: Path) -> tuple:
                 chain = {"last": "", "tail": b"", "link": str(u["entry"].get("link") or "")}
             continue
         c = chain if u["kind"] == "day" else {}
-        c.update(bridges=bridges, reseals=reseals, more=False)
+        c.update(bridges=bridges, reseals=reseals, starts=starts, more=False)
         res = verify_file(u["path"], c)
         _check_entry(res, u, c)
         if u["closed"] and not u["entry"] and not res["first"]:
@@ -3519,7 +3528,40 @@ def _verify_trail(units: list, man: dict, where: Path) -> tuple:
         if not rid or reseals.get(rid) != f"sha256:{sha}":
             extra.append(_problem(f, "reseal", f"no audit.reseal record backs the reseal map {f.name}: it was changed, "
                                                "or written by something other than dev audit reseal"))
+    if isinstance(man.get("start"), dict):
+        _check_start(man["start"], starts | (known or set()), where, results, extra)
     return results, extra
+
+
+# the records that back a manifest's `start`, by whose trail it is: a prune names where this Mac's trail starts after
+# it (ref.start) and where its handoff copy does (ref.team_start); a copy's first publish, when older segments stay
+# out of it, names where that copy starts (ref.team_start); a copy begun after a local prune starts at ref.start
+_BACKS_START = {"trail": {("audit.prune", "start")},
+                "copy": {("audit.prune", "start"), ("audit.prune", "team_start"), ("audit.publish", "team_start")}}
+
+
+def _start_ref(start: dict) -> str:
+    """A manifest's `start` as the records that back it name it: "<unit> <link>"."""
+    return f"{start.get('unit') or ''} {start.get('link') or ''}"
+
+
+def _check_start(start: dict, starts: set, where: Path, results: list, extra: list):
+    """A manifest's `start` holds only where a record of the chain names it (_BACKS_START): else the segments before
+    it may have been removed and `start` written to hide that. Another machine's handoff copy may start before the
+    record that backs it is published (the next day): there a missing record is a note, and that machine's own
+    verify, which reads its local trail too, reports it."""
+    ref, trail = _start_ref(start), where == AUDIT
+    if any((a, k) in _BACKS_START["trail" if trail else "copy"] for a, k, v in starts if v == ref):
+        return
+    unit = str(start.get("unit") or "")
+    if trail or where == team_dir():
+        extra.append(_problem(_manifest_file(where), "start", f"the chain starts after {unit}, and no "
+                              f"{'audit.prune' if trail else 'audit.prune or audit.publish'} record names that start: "
+                              "segments before it may have been removed"))
+    elif results:
+        results[0]["notes"].append({"path": str(_manifest_file(where)), "line": 0, "id": "", "kind": "note",
+                                    "note": f"the copy starts after {unit}, and the record that names that start is "
+                                            "not published yet: its machine's dev audit verify checks it"})
 
 
 def _v2_count(data: bytes) -> int:
@@ -3605,9 +3647,10 @@ def verify(team: bool = True) -> dict:
     out = {"ok": True, "first": None, "files": [], "records": 0, "unpublished": 0 if team else None}
     man = _read_manifest(_manifest_file())
     local = _units(man=man)
-    results, extra = _verify_trail(local, man, AUDIT)
+    mine = set()  # the starts this Mac's trail records: they back its handoff copy's start before they are published
+    results, extra = _verify_trail(local, man, AUDIT, seen=mine)
     if team and (core.HANDOFF / "audit").exists():
-        more, team_extra = _verify_team(core.HANDOFF / "audit")
+        more, team_extra = _verify_team(core.HANDOFF / "audit", known=mine)
         results += more
         extra += team_extra
     problems = []
@@ -3865,7 +3908,7 @@ def _publish_segments(dest: Path, now: float) -> list:
         record("audit.publish", core.tilde(mf), f"not published: {tm['error']}; run dev audit verify", "blocked",
                severity="critical")
         return []
-    keep, pub, changed = months_back(now, 2), {e["name"]: e for e in tm["units"]}, []
+    keep, pub, changed, begun = months_back(now, 2), {e["name"]: e for e in tm["units"]}, [], None
     order = [e for e in man["units"] if _SEGMENT.fullmatch(e["name"])]
     for i, e in enumerate(order):
         name = e["name"]
@@ -3890,9 +3933,9 @@ def _publish_segments(dest: Path, now: float) -> list:
             _write(target, data)
             changed.append(target)
         if not pub and not tm.get("start"):  # the segments before this one are not in the handoff copy
-            if i:
-                tm["start"] = {"unit": order[i - 1]["name"], "link": str(order[i - 1].get("link") or "")}
-            elif isinstance(man.get("start"), dict):  # nor here: prune removed them before the first publish
+            if i:  # older than three months: the record of this publish backs the copy's start (_check_start)
+                tm["start"] = begun = {"unit": order[i - 1]["name"], "link": str(order[i - 1].get("link") or "")}
+            elif isinstance(man.get("start"), dict):  # nor here: prune removed them, and its record names the start
                 tm["start"] = {"unit": str(man["start"].get("unit") or ""), "link": str(man["start"].get("link") or "")}
         pub[name] = {**e, "file": rel}
     if not pub:
@@ -3903,6 +3946,10 @@ def _publish_segments(dest: Path, now: float) -> list:
     if _manifest_bytes(new) != (mf.read_bytes() if mf.is_file() else b""):
         _write(mf, _manifest_bytes(new))
         changed.append(mf)
+    if begun:
+        record("audit.publish", core.tilde(mf), f"the handoff copy starts after {begun['unit']}: the segments before "
+               "it are older than the three months publish copies", "ok", severity="info",
+               team_start=_start_ref(begun))
     if any(f != mf for f in changed):
         changed += _publish_maps(dest, pub)
     return changed
@@ -4008,6 +4055,7 @@ def prune(now: float = None) -> dict:
     cfg = settings()
     r = cfg["retention"]
     out = {"removed": [], "team": [], "records": 0, "held": cfg["hold"], "maps": []}
+    start = team_start = None
     if cfg["hold"]:
         record("audit.prune", "local and team copies", "audit.hold is on (a legal hold): nothing pruned", "ok")
         return out
@@ -4043,7 +4091,7 @@ def prune(now: float = None) -> dict:
                 continue
             planned.append((u, link, n))
         with _lock():  # a writer's first segment writes the manifest's origin under it
-            _forget(_manifest_file(), [(u["name"], link) for u, link, _ in planned], private=True)
+            start = _forget(_manifest_file(), [(u["name"], link) for u, link, _ in planned], private=True)
         gone = []
         for u, link, n in planned:
             try:
@@ -4057,7 +4105,8 @@ def prune(now: float = None) -> dict:
         names = {f.name[:-6] for f in plan["team"] if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
         if names and mf.is_file():
             tm = _read_manifest(mf)
-            _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names], private=False)
+            team_start = _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names],
+                                 private=False)
         pruned = []
         for f in plan["team"]:
             try:
@@ -4070,7 +4119,7 @@ def prune(now: float = None) -> dict:
                         | {u["path"].parent for u, _ in gone if _MONTH.fullmatch(u["path"].parent.name)}):
             with contextlib.suppress(OSError):
                 d.rmdir()  # a month's folder, once its days are gone
-    if out["removed"] or out["team"] or out["maps"]:
+    if out["removed"] or out["team"] or out["maps"] or start or team_start:
         parts = []
         if out["removed"]:
             parts.append(f"removed {len(gone)} file(s), {out['records']} record(s) here: "
@@ -4082,7 +4131,11 @@ def prune(now: float = None) -> dict:
         if out["maps"]:
             parts.append(f"retired reseal map(s) {', '.join(out['maps'])}: the audit.reseal record that backs each one "
                          "was pruned")
-        record("audit.prune", "local and team copies", "; ".join(parts), "ok", count=out["records"])
+        if start or team_start:
+            parts.append("the chain now starts after " + " and ".join(
+                f"{s['unit']} {where}" for s, where in ((start, "here"), (team_start, "in the handoff copy")) if s))
+        record("audit.prune", "local and team copies", "; ".join(parts), "ok", count=out["records"],
+               start=_start_ref(start) if start else "", team_start=_start_ref(team_start) if team_start else "")
     return out
 
 
@@ -4120,19 +4173,21 @@ def _reseal_checks(files) -> dict:
 
 def _forget(mf: Path, gone: list, private: bool):
     """Drop the pruned units [(name, link)] from a manifest, and keep as its `start` the last pruned segment and its
-    link, which the first segment kept links to."""
+    link, which the first segment kept links to. -> the new `start`, which the audit.prune record names, or None."""
     if not gone or not mf.is_file():
-        return
+        return None
     m = _read_manifest(mf)
     if m.get("error"):
-        return
+        return None
     names = {n for n, _ in gone}
     m["units"] = [e for e in m["units"] if e["name"] not in names]
     segs = sorted(((n, link) for n, link in gone if _SEGMENT.fullmatch(n)), key=lambda p: _unit_key(p[0]))
     old = m.get("start") if isinstance(m.get("start"), dict) else {}
+    start = None
     if segs and _unit_key(segs[-1][0]) > _unit_key(str(old.get("unit") or "0")):
-        m["start"] = {"unit": segs[-1][0], "link": str(segs[-1][1] or "")}
+        m["start"] = start = {"unit": segs[-1][0], "link": str(segs[-1][1] or "")}
     _write_manifest(mf, m, private)
+    return start
 
 
 def _size(files) -> int:
