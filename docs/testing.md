@@ -233,9 +233,19 @@ in another letter case is still the checkout. `dev test prove` says "proves the 
   imported the checkout's `<file>`."
 - A run that left no record, or that started a Python child that skips the record (`-I`, `-E` or `-S`, or an
   environment whose `PYTHONPATH` leaves out devkit's recorder), is "cannot be proven: no record of what the run
-  imported," and the output names the child's command.
-- A failing test whose run imported none of the changed Python files from the copy is "cannot be proven: imported none
-  of the changed files from the copy": nothing shows that it ran the code without your change.
+  imported," and the output names the child's command. The recorder finds such a child behind `/usr/bin/env` (with
+  its options, `-i` and `NAME=value` words), behind leading `NAME=value` words in a shell line, inside `sh -c`,
+  `bash -lc` or `sh -ec`, through `subprocess`'s `executable=`, and after a separate `-W` or `-X` value. When the
+  proof spans more than one test file, each file runs once more with a record of its own, so only the files that start
+  such a child lose their proof.
+- A failing test whose run imported none of the changed Python files from the copy, and read none of the changed data
+  files there, is "cannot be proven: imported none of the changed files from the copy": nothing shows that it ran the
+  code without your change.
+
+The record has limits. It cannot see a Python that a program other than Python starts (a shebang script with `-I`, a
+`"$PY" -I` shell line, `make`, `tox`, or devkit's own `bin/dev`), a module run from a sourceless `.pyc` compiled under
+another filename, or a plain copy of the source inside the checkout (`build/lib`). Such a test may show "does not
+test the change" when it does; prove it with a test that imports the module directly.
 
 For JavaScript, the only evidence checked is a workspace package that the linked `node_modules` resolves into the
 checkout, which also makes its tests "cannot be proven: imported the checkout's `<file>`." A proven JavaScript test
