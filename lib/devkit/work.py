@@ -635,7 +635,9 @@ def find(selector: str, scope: str = None, titles: bool = False) -> dict:
         return by_number(int(sel), scope, items)
     hits = [i for i in items if sel.lower() in i["meta"].get("title", "").lower()]
     if titles and not hits:
-        hits = [i for i in everything if i not in items and sel.lower() in i["meta"].get("title", "").lower()]
+        searched = {i["meta"]["id"] for i in items}
+        hits = [i for i in everything if i["meta"]["id"] not in searched and
+                sel.lower() in i["meta"].get("title", "").lower()]
     if len(hits) == 1:
         return hits[0]
     if titles and hits:
