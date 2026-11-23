@@ -717,7 +717,7 @@ class DriftWiringTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIsNone(ext.accepted_line())
 
-    def test_an_agent_acknowledges_an_acceptance_made_in_a_terminal(self):
+    def test_an_agent_acknowledges_an_acceptance_too(self):
         self.install(developer=True)
         rc, out = self.ack(developer=False)
         self.assertEqual(rc, 0, out)
