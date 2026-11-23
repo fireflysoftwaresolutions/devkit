@@ -354,6 +354,7 @@ class TextPinForgeryTests(TextPinCase):
         for shell in (lead_shell, member_shell):
             rc, out = self.in_shell(shell, "progress", "add", "extra")
             self.assertEqual(rc, 2, out)
+            self.assertIn("An earlier one may still run, wait for approval, or have been denied at its prompt", out)
         self.assertFalse(self.added())
         self.assertEqual(len(self.records("calls.text-ambiguous")), 2)
 

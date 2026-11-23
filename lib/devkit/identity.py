@@ -1199,8 +1199,8 @@ def _pinned(sid: str, tid: str, entry: dict, below: list, above: tuple):
 # (calls.text-use-without-result).
 BACKGROUND_KEEP_S = 60.0
 AMBIGUOUS = ("{n} open calls of this session run this very command, so devkit cannot tell whose it is. An earlier one "
-             "may still wait for approval, or was denied at its prompt, which devkit is not told: it stays open until "
-             "its time runs out, in about {m} minute(s). Run the command again then, or run a different one")
+             "may still run, wait for approval, or have been denied at its prompt, which devkit is not told: it stays "
+             "open until its time runs out, in about {m} minute(s). Run the command again then, or run a different one")
 NOT_THE_CALL = ("devkit could not tie this command to its call (it does not run as that call's own dev command): run "
                 "it again as a command of its own")
 CONTESTED = "another process claimed this call's command first, so it names nobody: run it again in your own call"
