@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+import dashfixture as fx  # noqa: E402  (the Now fixture's facts the goldens do not carry)
 import now_contract  # noqa: E402  (the contract check the server's tests share)
 import test_dashboard as T  # noqa: E402  (the browser harness, the fixture and the stand-in server)
 from devkit import dashboard, dashserver, progress as pg  # noqa: E402
@@ -57,9 +58,8 @@ def with_doc(data: dict, name: str) -> dict:
     d["since"] = dict(d.get("since") or {}, **now.pop("since"))
     d.update(now, generated=CLOCK)
     if any(r.get("id") == "claude-7f3a" for r in d.get("runs") or []):
-        # a run file has no branch: this Mac's registry knows its session's (as the live page has it, tools/dashboard_shots.py)
-        me = next(x for x in d["people"] if x["host"] == d["host"])
-        me["sessions"].append({"agent": "claude", "session": "7f3a", "branch": "feat/invoice-export", "project": "acme/lending-core"})
+        # a run file has no branch: the page takes its session's, which this Mac's registry knows
+        next(x for x in d["people"] if x["host"] == d["host"])["sessions"] += fx.this_macs_sessions()
     return d
 
 

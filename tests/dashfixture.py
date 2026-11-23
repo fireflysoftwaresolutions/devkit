@@ -135,6 +135,13 @@ def docs_run() -> dict:
                    updates=[{"ts": at(13, 0), "kind": "done", "text": "docs refreshed", "next": ""}])
 
 
+def this_macs_sessions() -> list:
+    """This Mac's sessions as its registry knows them in the example: the session of Invoice export, with its branch. A
+    run file carries no branch, so the page takes it from the session (tools/dashboard_shots.py lays out the same)."""
+    return [{"agent": "claude", "session": "7f3a", "project": "acme/lending-core", "branch": "feat/invoice-export",
+             "started": at(14, 0), "status": "", "last_seen": at(15, 14), "active": True}]
+
+
 def remote_presence(updated: int = None, summary: bool = True) -> dict:
     """bob@studio's presence: one Codex session runs Rules engine migration (2 of 4 steps, 42-55 minutes left), with
     two crew members at work. Its run is the summary presence publishes (work.run_summary): the step counts, the steps
