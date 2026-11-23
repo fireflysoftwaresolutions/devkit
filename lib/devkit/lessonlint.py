@@ -603,21 +603,21 @@ def screen(fields: dict) -> str:
     explain what ran; download-and-run and a pipe into a shell hold in every field on their own. Text is compared as
     _normal reads it (NFKC, combining marks dropped, Unicode dashes read as "-", Cyrillic and Greek look-alikes read as
     Latin), and override phrasing casefolded. The reason never quotes the text it found, so a secret is never copied
-    into the lesson's front matter. While the redaction patterns cannot load, the secret screen holds every text, and
-    the reason says so (UNCHECKED) instead of claiming a secret."""
+    into the lesson's front matter. While the redaction patterns cannot load, the secret screen asks the built-in rules
+    and the patterns that did load, every other screen runs on every field as usual, and only when none of them finds
+    anything does the reason say that the text could not be checked (UNCHECKED), naming the first field: a definite
+    finding is written into the lesson (lessons._hold), and UNCHECKED is not."""
     texts = [(key, s, _normal(s)) for key, value in (fields or {}).items() for s in _strings(value) if s]
     from . import audit
     rules = audit.screen_rules() if texts else []
-    unloaded = any(rx is audit.WITHHOLD for rx in rules)
+    definite = [rx for rx in rules if rx is not audit.WITHHOLD]
     for what, test in SCREENS:
         for key, raw, normal in texts:
             if test in _ACTING_ONLY and _explains(key):
                 continue
-            if test(raw if test is _HIDDEN.search else normal) if test else _secret(normal, rules):
-                if test is None and unloaded and not audit.SECRET.search(normal):
-                    return f"{_field(key)} {UNCHECKED}"
+            if test(raw if test is _HIDDEN.search else normal) if test else _secret(normal, definite):
                 return f"{_field(key)} {what}"
-    return ""
+    return f"{_field(texts[0][0])} {UNCHECKED}" if len(definite) < len(rules) else ""
 
 
 # --------------------------------------------------------------------------- lint
