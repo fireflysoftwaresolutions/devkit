@@ -33,6 +33,12 @@ class OneWordListTests(unittest.TestCase):
         self.assertEqual(["tests/test_other.py", one, "tests/test_calc.py::test_sub[a b c]"],
                          testx._split_lists([f"tests/test_other.py {one}\ttests/test_calc.py::test_sub[a b c]"]))
 
+    # a [ that never closes holds no parameters: the words after it are still a list
+    def test_a_bracket_that_never_closes_does_not_join_the_words_after_it(self):
+        self.assertEqual(["tests/test_calc.py::test_add[one", "tests/test_other.py", "tests/test_calc.py::t[a b]"],
+                         testx._words_outside_brackets("tests/test_calc.py::test_add[one tests/test_other.py "
+                                                       "tests/test_calc.py::t[a b]"))
+
     def test_prove_takes_a_list_in_one_word_as_its_tests(self):
         with Env() as e:
             r = e.repo(CALC)

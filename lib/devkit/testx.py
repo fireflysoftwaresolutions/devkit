@@ -3357,16 +3357,22 @@ def _split_lists(paths) -> list:
 
 
 def _words_outside_brackets(text) -> list:
-    """`text` split at the white space outside square brackets."""
-    words, word, depth = [], "", 0
-    for ch in text:
+    """`text` split at the white space outside square brackets. A [ that never closes holds no parameters: the word
+    ends at the next white space, and the rest is split again."""
+    words, word, depth, opened = [], "", 0, 0
+    for i, ch in enumerate(text):
         if ch.isspace() and depth == 0:
             if word:
                 words.append(word)
             word = ""
             continue
+        if ch == "[" and depth == 0:
+            opened = i - len(word)  # where the word with this bracket starts
         depth += (ch == "[") - (ch == "]" and depth > 0)
         word += ch
+    if depth:
+        head, _, rest = text[opened:].partition(next((c for c in text[opened:] if c.isspace()), "\0"))
+        return words + [head] + _words_outside_brackets(rest)
     return words + ([word] if word else [])
 
 
