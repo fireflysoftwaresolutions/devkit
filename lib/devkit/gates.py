@@ -875,13 +875,23 @@ def _verification_eligible(receipt, proof):
     return True
 
 
+# progress writes a step's time in whole seconds (round), so the step a call recorded can read up to half a second
+# before the call's own start, which the transcript gives in milliseconds
+STEP_TS_SLACK = 1
+
+
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="", recorded=()):
     """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
     (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
     member's repository (`_member_checkout`), where a proof counts too. `recorded`: the steps the member's lane
     recorded in its run (`_lane_steps`), which a `dev progress step` piped into a filter proves by: the pipe hides its
-    exit code, not the step devkit keeps. Only a recorded step with the piped call's own text counts, so an earlier
-    step of the lane never stands in for a later call that recorded nothing."""
+    exit code, not the step devkit keeps. Only a step recorded with the piped call's own text since the call started
+    (the receipt's `ts`) counts, so an earlier step of the lane, even one with the same text, never stands in for a
+    later call that recorded nothing; a call whose start no record gives is never proven this way."""
     relevant, missed, said = [], None, []
     for receipt in receipts:
         words = _receipt_words(receipt, cwd, agent, repo)
@@ -898,8 +908,9 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="",
     if relevant and (not successful or _verification_eligible(*relevant[-1])):
         return True
     if proof == "dev progress step" and relevant and relevant[-1][0].get("piped"):
-        text = _step_text(said)
-        if text and any(str(u.get("text") or "").strip() == text for u in recorded):
+        text, since = _step_text(said), relevant[-1][0].get("ts")
+        if text and _number(since) and any(str(u.get("text") or "").strip() == text and _number(u.get("ts"))
+                                           and u["ts"] >= since - STEP_TS_SLACK for u in recorded):
             return True
     if why is not None:
         run = f"`{proof}{PROOF_ARGS.get(proof, '')}`"
