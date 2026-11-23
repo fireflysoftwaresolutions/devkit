@@ -32,13 +32,16 @@ full-run duration, the tree and the time. Python 3.9 compatible, stdlib only.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import contextlib
 import fcntl
 import fnmatch
+import glob
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -46,6 +49,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import warnings
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -63,8 +67,8 @@ JS_EXT = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".vue", 
 JVM_EXT = {".java", ".kt", ".groovy", ".scala"}
 LANGS = {**{e: "py" for e in PY_EXT}, **{e: "js" for e in JS_EXT}, **{e: "jvm" for e in JVM_EXT},
          ".go": "go", ".php": "php"}
-RUNNER_LANG = {"pytest": "py", "unittest": "py", "jest": "js", "vitest": "js", "node": "js", "maven": "jvm",
-               "gradle": "jvm", "go": "go", "phpunit": "php", "pest": "php"}
+RUNNER_LANG = {"pytest": "py", "unittest": "py", "jest": "js", "vitest": "js", "node": "js", "playwright": "js",
+               "ng": "js", "maven": "jvm", "gradle": "jvm", "go": "go", "phpunit": "php", "pest": "php"}
 SKIP_SEGMENTS = {"node_modules", "vendor", ".venv", "venv", "site-packages", ".git"}
 DEP_DIRS = ("node_modules", ".venv", "venv", "vendor")
 
@@ -102,11 +106,13 @@ def is_test_file(path) -> bool:
     p = str(path).replace("\\", "/")
     if p.startswith("./"):
         p = p[2:]
-    if _runnable(p):
-        return True
-    if any(seg in _TEST_DIRS for seg in p.split("/")[:-1]):
-        return True
-    return bool(re.search(r"(^|/)src/[A-Za-z]*[tT]est[A-Za-z]*/", p))
+    return _runnable(p) or _in_test_folder(p)
+
+
+def _in_test_folder(p: str) -> bool:
+    """In a folder of tests (tests/, __tests__/, src/test/, …): test code, helpers or data, whatever the name."""
+    return any(seg in _TEST_DIRS for seg in p.split("/")[:-1]) or \
+        bool(re.search(r"(^|/)src/[A-Za-z]*[tT]est[A-Za-z]*/", p))
 
 
 _GLOBAL_NAMES = {
@@ -233,9 +239,32 @@ class _Repo:
         self.existing = [f for f in dict.fromkeys(listed) if f not in deleted]
         self.ex = set(self.existing)
         self.all = self.ex | set(extra)
-        self.tests = sorted(f for f in self.existing if _runnable(f))
         self._text, self._graphs = {}, {}
         self._runners = None
+        self._pytest = {}  # folder -> the pytest collection rules that govern it (_pytest_rules)
+        self.tests = sorted(f for f in self.existing if self.runnable(f))
+
+    def runnable(self, f) -> bool:
+        """A file a runner here executes as tests: named as one (_runnable) and, for Python, one pytest's own
+        configuration collects. pytest collects any file named on its command line, so devkit applies its testpaths
+        and python_files itself: a production module named test_… outside them is no test."""
+        if not _runnable(f):
+            return False
+        if not f.endswith(".py"):
+            return True
+        return _pytest_collects(self._pytest_rules(f.rpartition("/")[0]), f)
+
+    def is_test(self, f) -> bool:
+        """Test code, helpers or data (is_test_file), except a module named as a test that no runner here collects
+        outside a folder of tests: that is production code."""
+        return (self.runnable(f) or _in_test_folder(f)) if _runnable(f) else is_test_file(f)
+
+    def _pytest_rules(self, d):
+        """The pytest configuration nearest to folder `d`, from `d` up to the top (_pytest_config)."""
+        if d not in self._pytest:
+            here = _pytest_config(self.top, d)
+            self._pytest[d] = here if here or not d else self._pytest_rules(d.rpartition("/")[0])
+        return self._pytest[d]
 
     def text(self, rel) -> str:
         if rel not in self._text:
@@ -343,20 +372,20 @@ def changed_files(top, since=None) -> list:
 
 def _lane_layers(top):
     """The scope of the crew lane that runs this command -> (layers of globs, the folder they count from), as
-    `dev commit` finds it (gitx._commit_lane): DEVKIT_FROM_AGENT or the member the call ledger names, its globs and
-    those of the open steps it owns, inside its parents'. ([], "") in the main session, a developer's shell, or a lane
-    without a scope."""
-    from . import lanescope, progress
-    aid = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None, top)
-    if not aid:
+    `dev commit` finds and counts it (gitx._commit_lane): DEVKIT_FROM_AGENT or the member the call ledger names, its
+    globs and those of the open steps it owns, inside its parents', counted from the checkout the scope was given in.
+    ([], "") in the main session, a developer's shell, or a lane without a scope."""
+    from types import SimpleNamespace
+    from . import gitx, lanescope
+    lane = gitx._commit_lane(SimpleNamespace(top=str(top)))
+    if not lane or not lane[1]:
         return [], ""
-    agent, sid = progress.current_session(top)
-    run, lane = progress.lane_of(agent, sid, aid)
-    layers = progress.lane_scope(run, aid) if lane else []
-    base = lanescope.scope_base((run or {}).get("project"), top) if layers else ""
-    # the globs name files of the run's repository; in another one (dev test -p, a suite's temporary repositories)
-    # they say nothing about what changed
-    if layers and os.path.realpath(base) != os.path.realpath(str(top)):
+    _, layers, base = lane
+    # the globs name files of the run's repository: in another one (dev test -p, a suite's temporary repositories)
+    # they say nothing about what changed. Another checkout of the same repository is the lane's, and this one's
+    # changes are not
+    if os.path.realpath(base) != os.path.realpath(str(top)) and \
+            lanescope._common_dir(base) != lanescope._common_dir(str(top)):
         return [], ""
     return layers, base
 
@@ -577,6 +606,14 @@ def detect(top, repo=None) -> list:
                           "python": py, "start": start,
                           "package": start != "." and os.path.isfile(os.path.join(absd(d), start, "__init__.py"))})
 
+    # A Python project nested in a pytest runner's folder has a runner of its own: pytest run there for the whole suite
+    # (no file arguments) would walk into it and collect its tests in the outer process
+    py_roots = [x["root"] for x in found if x["lang"] == "py"]
+    for x in found:
+        if x["name"] == "pytest":
+            x["nested"] = sorted(r if x["root"] == "." else r[len(x["root"]) + 1:] for r in py_roots
+                                 if r != x["root"] and _under(r, x["root"]))
+
     # Node: jest or vitest per package.json
     for d in sorted(d for d in by_dir if has(d, "package.json")):
         pkg = core.read_json(os.path.join(absd(d), "package.json"), {}) or {}
@@ -600,6 +637,41 @@ def detect(top, repo=None) -> list:
         elif node:
             found.append({"name": "node", "root": rel(d), "lang": "js", "exec": ["node"] + node[0] + ["--test"],
                           "suite": node[1]})
+
+    # Playwright: the specs of a playwright.config's testDir folders run with Playwright, not with the package's unit
+    # runner, which excludes them. A config without testDir finds specs from its own folder: there, only the specs that
+    # import @playwright/test are Playwright's.
+    for d in sorted(d for d in by_dir if any(n in by_dir[d] for n in _PW_CONFIGS)):
+        text = _js_code(_read(os.path.join(absd(d), next(n for n in _PW_CONFIGS if n in by_dir[d]))))
+        named = ["/".join(re.findall(r"""['"`]([^'"`]+)['"`]""", m.group(1))) for m in _PW_TESTDIR.finditer(text)]
+        # a testDir held in a variable names no folder; one that is the config's own folder searches as none does
+        dirs = sorted({_folder(d, x) for x in named if x} - {None, d})
+        pw = {"name": "playwright", "root": rel(d), "lang": "js", "exec": _pm_exec(top, d, "playwright") + ["test"],
+              "claims": dirs}
+        if not dirs:
+            pw["specs"] = sorted(f for f in repo.tests if _lang(f) == "js" and _under(f, rel(d)) and
+                                 _uses_playwright(repo, f))
+        found.append(pw)
+
+    # Angular: a project whose test target is the unit-test builder with its Vitest runner runs through `ng test`, which
+    # builds the specs with the workspace's TypeScript paths, setup files and providers (bare vitest loses them). It
+    # runs the specs under its source root and those its include option names elsewhere.
+    for d in sorted(d for d in by_dir if has(d, "angular.json")):
+        ws = _json_loose(_read(os.path.join(absd(d), "angular.json")))
+        projects = ws.get("projects") if isinstance(ws, dict) else None
+        for name, proj in sorted(projects.items() if isinstance(projects, dict) else ()):
+            targets = (proj.get("architect") or proj.get("targets")) if isinstance(proj, dict) else None
+            target = targets.get("test") if isinstance(targets, dict) else None
+            opts = target.get("options") if isinstance(target, dict) else None
+            opts = opts if isinstance(opts, dict) else {}
+            if not isinstance(target, dict) or target.get("builder") != "@angular/build:unit-test" or \
+                    (opts.get("runner") or "vitest") != "vitest":
+                continue
+            src = str(proj.get("sourceRoot") or posixpath.join(str(proj.get("root") or ""), "src"))
+            include = [p for p in opts.get("include") or ("**/*.spec.ts", "**/*.test.ts") if isinstance(p, str)]
+            claims = sorted({_folder(d, posixpath.join(src, p)) for p in include} - {None})  # file patterns
+            found.append({"name": "ng", "root": rel(d), "lang": "js", "project": name, "claims": claims,
+                          "exec": _pm_exec(top, d, "ng") + ["test", name]})
 
     # Maven and Gradle: the outermost build of each tree
     for d in _outermost([d for d in by_dir if has(d, "pom.xml")]):
@@ -632,11 +704,127 @@ def _under(path: str, root: str) -> bool:
     return root in (".", "") or path == root or path.startswith(root.rstrip("/") + "/")
 
 
+def _claim(r, path):
+    """How closely runner `r` claims test file `path` -> (depth, specific) or None. A runner runs the tests under its
+    root, as deep as that root; a runner that names its own folders (Playwright's testDir, an Angular project's
+    source root) runs only the tests under them, as deep as the folder, and wins a tie over its package's runner. A
+    claim with a wildcard (an Angular include pattern) holds the files it matches, as deep as its literal folder."""
+    if not _under(path, r["root"]):
+        return None
+    if "claims" not in r:
+        return len(r["root"]) if r["root"] != "." else 0, 0
+    hits = [len(c) for c in r["claims"] if not _GLOB_HEAD.search(c) and _under(path, c)]
+    hits += [len(_glob_dir(c)) for c in r["claims"] if _GLOB_HEAD.search(c) and _glob_re(c).fullmatch(path)]
+    hits += [len(path)] if path in r.get("specs", ()) else []
+    return (max(hits), 1) if hits else None
+
+
 def owner(runners, path):
-    """The runner that runs test file `path`: same language, deepest root."""
+    """The runner that runs test file `path`: same language, the one that claims it most closely (_claim)."""
     lang = _lang(path)
-    cands = [r for r in runners if r["lang"] == lang and _under(path, r["root"])]
-    return max(cands, key=lambda r: len(r["root"]) if r["root"] != "." else 0) if cands else None
+    cands = [(c, r) for r in runners if r["lang"] == lang for c in [_claim(r, path)] if c is not None]
+    return max(cands, key=lambda x: x[0])[1] if cands else None
+
+
+_PW_CONFIGS = tuple(f"playwright.config.{e}" for e in ("ts", "js", "mjs", "cjs", "mts", "cts"))
+_PW_TESTDIR = re.compile(r"""\btestDir\s*:\s*([^,\n}]*)""")
+_GLOB_HEAD = re.compile(r"[*?\[{]")
+
+
+def _glob_dir(g: str) -> str:
+    """The literal folder a file pattern starts with ('' when its first segment has a wildcard)."""
+    return _GLOB_HEAD.split(g)[0].rpartition("/")[0]
+
+
+def _glob_re(g: str):
+    """A file pattern as tools such as Angular's include read it -> a regex for paths: `*` and `?` stay inside one
+    segment, `**` spans any number of them (none too), `{a,b}` is either, `[…]` one character of a set."""
+    out, i, n = [], 0, len(g)
+    while i < n:
+        ch = g[i]
+        if g.startswith("**/", i):
+            out.append("(?:[^/]*/)*")
+            i += 3
+            continue
+        if g.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        if ch == "*":
+            out.append("[^/]*")
+        elif ch == "?":
+            out.append("[^/]")
+        elif ch == "{" and "}" in g[i:]:
+            j = g.index("}", i)
+            out.append("(?:" + "|".join(re.escape(x) for x in g[i + 1:j].split(",")) + ")")
+            i = j + 1
+            continue
+        elif ch == "[" and "]" in g[i + 1:]:
+            j = g.index("]", i + 1)
+            body = g[i + 1:j]
+            out.append("[" + ("^" + body[1:] if body.startswith("!") else body) + "]")
+            i = j + 1
+            continue
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    return re.compile("".join(out))
+
+
+def _js_code(text: str) -> str:
+    """JavaScript or TypeScript source without its comments (line and block), strings kept: a commented-out setting
+    or import is no setting. A comment's line breaks stay, so line numbers and line-anchored patterns hold."""
+    out, i, n, quote = [], 0, len(text), None
+    while i < n:
+        ch = text[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 1
+            elif ch == quote or (ch == "\n" and quote != "`"):
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+            out.append(ch)
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            end = n if j < 0 else j + 2
+            out.append("\n" * text.count("\n", i, end) or " ")
+            i = end
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _uses_playwright(repo, f, seen=None) -> bool:
+    """Does JavaScript file `f` import @playwright/test, itself or through the local modules it imports (a fixtures
+    file that extends Playwright's test)?"""
+    seen = set() if seen is None else seen
+    if f in seen:
+        return False
+    seen.add(f)
+    specs = _JS_SPEC.findall(_js_code(repo.text(f)))
+    if any(s == "@playwright/test" or s.startswith("@playwright/test/") for s in specs):
+        return True
+    d = f.rpartition("/")[0]
+    return any(_uses_playwright(repo, t, seen) for s in specs if s.startswith(".")
+               for t in _js_candidates(repo, posixpath.join(d, s)))
+
+
+def _folder(base, path):
+    """`path`, relative to folder `base` of the top, as a folder relative to the top ('' for the top itself; None
+    outside the top or for an absolute path)."""
+    if path.startswith("/"):
+        return None
+    p = posixpath.normpath(posixpath.join(base or ".", path))
+    return None if p == ".." or p.startswith("../") else "" if p == "." else p
 
 
 # --------------------------------------------------------------------------- Python import graph
@@ -1053,8 +1241,8 @@ def _one(repo, p):
         g = None  # setup.py, noxfile.py inside a package: a module like any other
     if g:
         return "all", set(), f"{g}: every test can depend on it", _root_of(repo, p)
-    if is_test_file(p):
-        if _runnable(p):
+    if repo.is_test(p):
+        if repo.runnable(p):
             return ("some", {p}, "test file", None) if p in repo.ex else ("some", set(), "deleted test file", None)
         if p in repo.ex and _node_script(repo, repo.runners(), p):  # a plain script node --test runs as a test
             return "some", {p}, "test script", None
@@ -1115,6 +1303,74 @@ def blast_radius(top, changed) -> dict:
 # --------------------------------------------------------------------------- commands
 
 
+def _toml_strings(text, sections, key):
+    """The string or array of strings of `key` in the first of TOML `sections` of `text` that has it, or None. Enough
+    TOML for pytest's testpaths and python_files on every Python devkit runs on (tomllib needs 3.11)."""
+    for section in sections:
+        m = re.search(r"(?m)^\[" + re.escape(section) + r"\][ \t]*(?:#.*)?$", text)
+        if not m:
+            continue
+        body = re.split(r"(?m)^\[", text[m.end():], maxsplit=1)[0]
+        v = re.search(r"(?m)^[ \t]*" + re.escape(key) + r"""[ \t]*=[ \t]*(\[(?:[^]"'#]|"[^"\n]*"|'[^'\n]*'|#[^\n]*)*\]"""
+                      r"""|"[^"\n]*"|'[^'\n]*')""", body)
+        if v:
+            return [a or b for a, b, comment in re.findall(r"""("[^"\n]*")|('[^'\n]*')|(#[^\n]*)""", v.group(1))
+                    if not comment for a, b in [(a[1:-1], b[1:-1])]]
+    return None
+
+
+def _ini_strings(text, section, key):
+    """The whitespace-separated values of `key` in INI `section` of `text` (pytest.ini, tox.ini, setup.cfg), or
+    None."""
+    import configparser
+    cp = configparser.RawConfigParser(strict=False)
+    try:
+        cp.read_string(text)
+    except configparser.Error:
+        return None
+    return cp.get(section, key).split() if cp.has_option(section, key) else None
+
+
+def _pytest_config(top, d):
+    """The pytest configuration in folder `d` (relative to `top`), from the first file pytest reads there ->
+    (d, [testpaths that exist] or None, [python_files] or None), or None when `d` has none. pytest collects from its
+    folder when no testpath exists, so testpaths that match nothing count as none."""
+    here = os.path.join(top, d) if d else top
+    for name, section in _PYTEST_CONFIGS:
+        path = os.path.join(here, name)
+        text = _read(path)
+        if not (os.path.isfile(path) and (not section or section in text)):  # pytest.ini counts even when empty
+            continue
+        if name == "pyproject.toml":
+            pick = lambda k: _toml_strings(text, ("tool.pytest.ini_options", "tool.pytest"), k)  # noqa: E731
+        else:
+            ini = "tool:pytest" if name == "setup.cfg" else "pytest"
+            pick = lambda k: _ini_strings(text, ini, k)  # noqa: E731
+        testpaths = [re.sub(r"^(?:\./)+", "", t.replace("\\", "/")).strip("/") for t in pick("testpaths") or ()]
+        if "" in testpaths or "." in testpaths or not any(glob.glob(os.path.join(here, t)) for t in testpaths):
+            testpaths = None
+        return d, testpaths, pick("python_files")
+    return None
+
+
+def _pytest_collects(rules, f) -> bool:
+    """Whether pytest, run with no file arguments, collects test file `f` (relative to the top) under `rules`
+    (_pytest_config): inside one of its testpaths (shell patterns allowed), named as one of its python_files."""
+    if not rules:
+        return True
+    base, testpaths, python_files = rules
+    rel = f[len(base) + 1:] if base else f
+    name = rel.rpartition("/")[2]
+    if python_files and not any(fnmatch.fnmatch(name, pat) if "/" not in pat else
+                                fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, "*/" + pat) for pat in python_files):
+        return False
+    if testpaths:
+        parts = rel.split("/")
+        heads = ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]  # app, app/x, app/x/test_y.py
+        return any(fnmatch.fnmatch(h, t) for t in testpaths for h in heads)
+    return True
+
+
 def _rootdir(top, runner) -> str:
     return top if runner["root"] in (".", "") else os.path.join(top, runner["root"])
 
@@ -1154,9 +1410,9 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
     files, ids, related = list(files), list(ids), list(related)
     rel = [_rel(top, runner, f) for f in files]
     env, names, only = {}, [], ""
-    if name == "pytest":
+    if name == "pytest":  # the whole suite leaves out the nested Python projects, which their own runners run
         argv = ex + ["-q"] + ([f"--junitxml={report}"] if report else []) + \
-            ([] if all_ else rel + [_id(i) for i in ids])
+            ([f"--ignore={n}" for n in runner.get("nested", ())] if all_ else rel + [_id(i) for i in ids])
     elif name == "unittest":
         start = runner.get("start") or "."
         sdir = os.path.join(_rootdir(top, runner), start)
@@ -1186,6 +1442,25 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
         argv = ex + out + (list(runner.get("suite") or []) if all_ else picked)
         if len(picked) == 1:  # Node before 24 names no file in its JUnit cases: the one file run is theirs
             only = os.path.join(_rootdir(top, runner), picked[0])
+    elif name == "playwright":  # file arguments filter the specs; the JUnit report goes to the file its variable names
+        if report:
+            env["PLAYWRIGHT_JUNIT_OUTPUT_FILE"] = env["PLAYWRIGHT_JUNIT_OUTPUT_NAME"] = report
+        argv = ex + ["--reporter=list,junit" if report else "--reporter=list"]
+        if not all_:
+            argv += rel + sorted({_rel(top, runner, _id(i).split("::")[0]) for i in ids} - set(rel))
+            titles = [_id(i).split("::", 1)[1].rsplit(" › ", 1)[-1] for i in ids if "::" in _id(i)]
+            if titles and not rel:  # a recorded failure reruns by its title
+                argv += ["--grep", "|".join(_js_regex(t) for t in dict.fromkeys(titles))]
+    elif name == "ng":  # the Angular unit-test builder, its Vitest runner's JSON report in a file
+        env["NG_CLI_ANALYTICS"] = "false"
+        argv = ex + ["--watch=false"] + (["--reporters=default", "--reporters=json", f"--output-file={report}"]
+                                         if report else [])
+        if not all_:
+            for f in rel + sorted({_rel(top, runner, _id(i).split("::")[0]) for i in ids} - set(rel)):
+                argv += ["--include", f]
+            full = [_id(i).split("::", 1)[1] for i in ids if "::" in _id(i)]
+            if full and not rel:  # a recorded failure reruns by its full name
+                argv += ["--filter", "|".join(_js_regex(n) for n in dict.fromkeys(full))]
     elif name == "maven":
         if runner.get("argv"):  # a CI step's own command: keep its goals and flags, add the selection
             ex = list(runner["argv"])
@@ -1250,6 +1525,11 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
 
 
 # --------------------------------------------------------------------------- results
+
+
+def _js_regex(text: str) -> str:
+    """`text` as a JavaScript regular expression that matches it literally."""
+    return re.sub(r"[.*+?^${}()|[\]\\/]", lambda m: "\\" + m.group(0), text)
 
 
 def _pytest_module(rootdir, rel) -> str:
@@ -1418,6 +1698,30 @@ def parse_junit(text, top, base, runner) -> list:
         if bad is not None and not msg:
             msg = _first_line(body)
         out.append(_case(id_, file, line, status, msg, tc.get("time") or 0, name))
+    return out
+
+
+def parse_playwright_junit(text, top, base, runner) -> list:
+    """Playwright's JUnit report -> cases. A case's classname is its file relative to the testDir it was found in, its
+    name the describe titles and the test's title joined by ' › '; the file is the one of the runner's test folders
+    (`base`, the config's folder, without one) that holds it."""
+    root = _junit_root(text)
+    if root is None:
+        return []
+    dirs = [os.path.join(top, c) for c in runner.get("claims") or ()] or [base]
+    out = []
+    for tc in root.iter("testcase"):
+        name, cls = tc.get("name") or "", tc.get("classname") or ""
+        fabs = next((p for p in (os.path.join(d, cls) for d in dirs) if os.path.isfile(p)), os.path.join(dirs[0], cls))
+        file = _relto(top, fabs)
+        bad = tc.find("failure")
+        bad = bad if bad is not None else tc.find("error")
+        status = "failed" if bad is not None else "skipped" if tc.find("skipped") is not None else "passed"
+        body = (bad.text or "") if bad is not None else ""
+        hits = re.findall(re.escape(fabs) + r":(\d+):\d+", body)
+        msg = _first_line(bad.get("message") or body) if bad is not None else ""
+        out.append(_case(f"{file}::{name}", file, int(hits[-1]) if hits else None, status, msg,
+                         tc.get("time") or 0, name))
     return out
 
 
@@ -1712,8 +2016,11 @@ def _collect(top, runner, cmd, output, t0) -> list:
     name, report = runner["name"], cmd.get("report")
     if name in ("pytest", "phpunit", "pest"):
         return parse_junit(_read(report), top, cmd["cwd"], name) if report and os.path.exists(report) else []
-    if name in ("jest", "vitest"):
+    if name in ("jest", "vitest", "ng"):
         return parse_jest_json(_read(report), top) if report and os.path.exists(report) else []
+    if name == "playwright":
+        return parse_playwright_junit(_read(report), top, cmd["cwd"], runner) if report and os.path.exists(report) \
+            else []
     if name == "node":
         return parse_node_junit(_read(report), top, cmd["cwd"], cmd.get("only") or "") \
             if report and os.path.exists(report) else []
@@ -1967,9 +2274,9 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     sweep_run_folders(tmpd)  # those of killed runs: a run removes its own when it ends
     work = Path(tempfile.mkdtemp(prefix=f"{RUN_WORK}{os.getpid()}-", dir=str(tmpd)))
     report = None
-    if runner["name"] in ("pytest", "phpunit", "pest", "node"):
+    if runner["name"] in ("pytest", "phpunit", "pest", "node", "playwright"):
         report = str(work / "junit.xml")
-    elif runner["name"] in ("jest", "vitest"):
+    elif runner["name"] in ("jest", "vitest", "ng"):
         report = str(work / "report.json")
     cmd = build_command(top, runner, files, ids, report, related, all_)
     from . import identity
@@ -2390,8 +2697,9 @@ def _failed_groups(top, runners, st):
              if (not f.get("file") or os.path.exists(os.path.join(top, f["file"])))
              and _loadable(f.get("runner"), f.get("root"), f.get("id"))]
     out = []
-    for r in runners:
-        mine = [f for f in fails if f.get("runner") == r["name"] and f.get("root") == r["root"]]
+    for r in runners:  # runners that share a root (an Angular workspace's projects) take the failures of their files
+        mine = [f for f in fails if f.get("runner") == r["name"] and f.get("root") == r["root"] and
+                ("claims" not in r or not f.get("file") or owner(runners, f["file"]) is r)]
         if mine:
             out.append((r, mine))
     return out
@@ -2821,6 +3129,19 @@ _PHP_UNIT = re.compile(r"(?:(?:@test|#\[Test\])[^\n]*\n(?:[^\n]*\n){0,3}?\s*(?:p
                        r"|function\s+(test\w*)\s*\()", re.M)
 
 
+def _py_test_class(node, plain) -> bool:
+    """Whether a runner can collect the tests of class `node` of a Python test module. unittest collects a TestCase,
+    which always has a base; pytest a class named Test… (or …Test, …Tests where a project sets python_classes). A
+    plain class (no base, or only object and the module's other plain classes) named otherwise is a fake or a helper
+    whose test_… methods no runner collects. `plain`: the module's plain classes so far, which this one joins."""
+    bases = [b.id if isinstance(b, ast.Name) else "" for b in node.bases]
+    if all(b == "object" or b in plain for b in bases) and not node.keywords:
+        if not (node.name.startswith("Test") or node.name.endswith(("Test", "Tests"))):
+            plain.add(node.name)
+            return False
+    return True
+
+
 def _units(f, text) -> list:
     """Test units of a test file: [(name, first line, last line)]; Python classes add ('Class.*', …) for setUp."""
     lang = _lang(f)
@@ -2836,11 +3157,11 @@ def _units(f, text) -> list:
         def span(n):
             return min([n.lineno] + [d.lineno for d in n.decorator_list]), getattr(n, "end_lineno", n.lineno)
 
-        out = []
+        out, plain = [], set()
         for node in tree.body:
             if isinstance(node, fn) and node.name.startswith("test"):
                 out.append((node.name,) + span(node))
-            elif isinstance(node, ast.ClassDef):
+            elif isinstance(node, ast.ClassDef) and _py_test_class(node, plain):
                 mine = [(f"{node.name}.{i.name}",) + span(i) for i in node.body
                         if isinstance(i, fn) and i.name.startswith("test")]
                 if mine:
@@ -2882,13 +3203,13 @@ def _support_spans(text) -> list:
     def span(n):
         return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]), getattr(n, "end_lineno", n.lineno)
 
-    out = []
+    out, plain = [], set()
     for node in tree.body:
         if isinstance(node, fn) and not node.name.startswith("test") or isinstance(node, (ast.Assign, ast.AnnAssign)):
             out.append(span(node))
         elif isinstance(node, ast.ClassDef):
             mine = [i for i in node.body if isinstance(i, fn)]
-            if not any(i.name.startswith("test") for i in mine):
+            if not _py_test_class(node, plain) or not any(i.name.startswith("test") for i in mine):
                 out.append(span(node))
             else:
                 out += [span(i) for i in mine if not i.name.startswith("test")]
@@ -3102,6 +3423,58 @@ def _copy_mapped_packages(real_top, dest, venv) -> list:
             os.symlink(src, at)
             made = True
     return [str(links)] if made else []
+
+
+def _built_installs(top, dest, linked, listed) -> tuple:
+    """The checkout's own packages that a linked virtual environment holds as a built copy (not editable: `uv sync
+    --no-editable`, `pip install .`): site-packages holds the files built from the changed source, and no .pth leads
+    Python back to a source folder, so the copy's Python imports that build and the restored code is never run. A
+    dist-info whose direct_url.json names a folder of the checkout is one; its RECORD lists the files it installed.
+    For each top-level name, the copy's folder that holds the same file (`src` for `src/pkg/mod.py`) goes first on
+    PYTHONPATH. -> ([those folders], [(package, environment) no folder of the copy holds])."""
+    real_top = os.path.realpath(top)
+    have = set(listed)
+    out, stuck = [], []
+    for link in linked:
+        if os.path.basename(link) not in (".venv", "venv"):
+            continue
+        for info in sorted(Path(link).glob("lib/python*/site-packages/*.dist-info")) + \
+                sorted(Path(link).glob("Lib/site-packages/*.dist-info")):
+            origin = core.read_json(info / "direct_url.json", {}) or {}
+            url = str(origin.get("url") or "") if isinstance(origin, dict) else ""
+            if not url.startswith("file://") or (origin.get("dir_info") or {}).get("editable"):
+                continue
+            src = os.path.realpath(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+            if os.path.isfile(src):  # a wheel built into the checkout (dist/…whl): its sources are the project's
+                src = os.path.dirname(os.path.dirname(src))
+            if src != real_top and not src.startswith(real_top + os.sep):
+                continue
+            project = os.path.relpath(src, real_top).replace(os.sep, "/")
+            project = "" if project == "." else project + "/"
+            entries = {}  # top-level name -> its shortest installed module path
+            for line in _read(info / "RECORD").splitlines():
+                f = line.rsplit(",", 2)[0] if line.count(",") >= 2 else line
+                head = f.split("/", 1)[0]
+                if not f.endswith(".py") or f.startswith("../") or head.endswith((".dist-info", ".data")) or \
+                        "__pycache__" in f.split("/"):
+                    continue
+                name = head[:-3] if head.endswith(".py") else head
+                if name not in entries or len(f) < len(entries[name]):
+                    entries[name] = f
+            env = os.path.relpath(link, str(dest)).replace(os.sep, "/")
+            for name, f in sorted(entries.items()):
+                # the copy's file at <project><prefix><f>, the shallowest prefix
+                prefixes = sorted((h[len(project):-len(f)] for h in have
+                                   if h.startswith(project) and (h[len(project):] == f or
+                                                                 h[len(project):].endswith("/" + f))),
+                                  key=lambda p: (p.count("/"), p))
+                if not prefixes:
+                    stuck.append({"package": name, "environment": env})
+                    continue
+                mine = os.path.normpath(os.path.join(str(dest), project + prefixes[0]))
+                if mine not in out:
+                    out.append(mine)
+    return out, stuck
 
 
 def _restore_base(top, base, dest, files) -> None:
@@ -3407,25 +3780,25 @@ def _prove(a, top, runners) -> int:
         return _refuse("nothing to compare with: no origin/<default> and no --since", "dev test prove --since <ref>")
     changed = changed_files(top, a.since)
     repo = _Repo(top)
-    prod = [f for f in changed if not is_test_file(f)]
+    prod = [f for f in changed if not repo.is_test(f)]
     every = repo.runners()  # a script is a test by the runners found here, whatever --runner leaves out
-    scripts = {f for f in changed if f in repo.ex and not _runnable(f) and _node_script(repo, every, f)}
+    scripts = {f for f in changed if f in repo.ex and not repo.runnable(f) and _node_script(repo, every, f)}
     skipped = []  # (file, why): files named that are no test, and tests no runner here can run
     outside = []  # changed tests outside the scope of the crew lane that runs this
     if a.tests:
         tests = []
         for t in a.tests:
             rel = os.path.relpath(os.path.abspath(t), top).replace("\\", "/")
-            if rel in repo.ex and (_runnable(rel) or _node_script(repo, every, rel, named=True)):
+            if rel in repo.ex and (repo.runnable(rel) or _node_script(repo, every, rel, named=True)):
                 tests.append(rel)
             else:
                 skipped.append((rel, "not a test file here"))
     else:
         # in a crew lane, the changed tests of its own scope; the whole change is still undone, so they run against
         # a consistent base
-        tests, outside = lane_files(top, [f for f in changed if f in repo.ex and (_runnable(f) or f in scripts)])
+        tests, outside = lane_files(top, [f for f in changed if f in repo.ex and (repo.runnable(f) or f in scripts)])
     # test helpers, conftest.py, fixtures: part of the change, restored with it
-    helpers = [f for f in changed if is_test_file(f) and not _runnable(f) and f not in scripts and f not in tests]
+    helpers = [f for f in changed if repo.is_test(f) and not repo.runnable(f) and f not in scripts and f not in tests]
     # helpers defined inside the changed test modules (outside every test): their fixes are part of the change too
     inner = {f: text for f in tests for text in [_support_text(top, base, f)] if text is not None}
     if not prod and not helpers and not inner:
@@ -3475,7 +3848,7 @@ def _prove(a, top, runners) -> int:
                      f"({', '.join(swept[:3])}{' …' if len(swept) > 3 else ''})"), file=sys.stderr)
     dest = tempfile.mkdtemp(prefix=f"{PROVE_COPY}{os.getpid()}-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
-    found, problem, gitless = {}, None, ""
+    found, problem, gitless, built_stuck = {}, None, "", []
     # Ordinary proof execution is unchanged, but its import environment is not attested for lesson suppression.
     listed = _copy_files(top)  # one list: what the copy holds is what the evidence names, on both sides
     proof_hashes = _proof_snapshot(top, listed) if isolated else {}
@@ -3491,7 +3864,10 @@ def _prove(a, top, runners) -> int:
         return hits
 
     try:
-        own = _copy_source_paths(top, dest, _copy_worktree(top, dest, listed))
+        linked = _copy_worktree(top, dest, listed)
+        own = _copy_source_paths(top, dest, linked)
+        built, built_stuck = _built_installs(top, dest, linked, listed)
+        own += [p for p in built if p not in own]
         if _proof_snapshot(dest, listed) != proof_hashes:
             proof_hashes = {}  # concurrent edits cannot attest to a different snapshot
         if own:  # the copy's src before the editable install's path to the checkout's src
@@ -3579,6 +3955,7 @@ def _prove(a, top, runners) -> int:
                           "base": label, "production": prod, "helpers": helpers,
                           **({"test_module_helpers": sorted(inner)} if inner else {}),
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
+                          **({"built_installs": built_stuck} if built_stuck else {}),
                           "skipped": [{"file": f, "why": why} for f, why in skipped],
                           **({"outside_lane": outside} if outside else {}), "exit": rc}, indent=1))
         return rc
@@ -3589,6 +3966,10 @@ def _prove(a, top, runners) -> int:
                      f"(restored from {label} for the last run)"))
     if gitless:
         print(f"  {ui.WARN} the copy has no git repository ({gitless}): a test that runs git on its checkout fails there")
+    for b in built_stuck:
+        print(f"  {ui.WARN} {b['environment']} holds a built copy of {b['package']} (not an editable install) that the "
+              f"proof copy cannot replace, so its tests run the built code with or without the change and cannot "
+              f"prove it: install it editable (uv sync, pip install -e .) or put its source folder on PYTHONPATH")
     ran = [x for x in rows if x["verdict"] not in ("skipped", "expected failure")]
     green = sum(1 for x in ran if x["with_change"] == f"{runs}/{runs}")
     omitted = "".join(f" · {sum(x['verdict'] == v for x in rows)} {label}" for v, label in
@@ -3664,18 +4045,24 @@ def _audit(a) -> int:
 # --------------------------------------------------------------------------- CLI
 
 
-def _options(p, paths=False):
+# A subcommand's copy of an option of `dev test` sets it only when written after the subcommand: with a default of its
+# own, argparse would reset what `dev test --since REF prove` set before it.
+_KEEP = {"default": argparse.SUPPRESS}
+
+
+def _options(p, paths=False, sub=False):
+    keep = _KEEP if sub else {}
     if paths:
         p.add_argument("paths", nargs="*", help="test files, directories or runner ids of this repository (default: "
                                                 "failed, then affected)")
-    p.add_argument("--failed", action="store_true", help="only the tests that failed last time")
-    p.add_argument("--affected", action="store_true", help="only the tests your changes can affect")
-    p.add_argument("--all", action="store_true", help="the full suite (once, before the push)")
+    p.add_argument("--failed", action="store_true", help="only the tests that failed last time", **keep)
+    p.add_argument("--affected", action="store_true", help="only the tests your changes can affect", **keep)
+    p.add_argument("--all", action="store_true", help="the full suite (once, before the push)", **keep)
     p.add_argument("--since", metavar="REF", help="compare with REF instead of the merge-base with origin/<default> "
-                   "(or with the release or integration branch this one was cut from)")
-    p.add_argument("--runner", metavar="NAME", help="only this runner: " + ", ".join(RUNNER_LANG))
-    p.add_argument("--json", action="store_true")
-    p.add_argument("-v", "--verbose", action="store_true", help="stream the runner's full output")
+                   "(or with the release or integration branch this one was cut from)", **keep)
+    p.add_argument("--runner", metavar="NAME", help="only this runner: " + ", ".join(RUNNER_LANG), **keep)
+    p.add_argument("--json", action="store_true", **keep)
+    p.add_argument("-v", "--verbose", action="store_true", help="stream the runner's full output", **keep)
 
 
 def register(add):
@@ -3686,23 +4073,24 @@ def register(add):
                                            "subcommand: dev test -p acme/api plan")
     sp = p.add_subparsers(dest="test_cmd", metavar="run|plan|prove|audit")
     q = sp.add_parser("run", help="run tests: paths, --failed, --affected or --all")
-    _options(q, paths=True)
+    _options(q, paths=True, sub=True)
     q = sp.add_parser("plan", help="what would run and why (changed file → tests), with the estimate; runs nothing")
-    q.add_argument("--all", action="store_true", help="the whole suite: test files, full-run time, slowest files")
-    q.add_argument("--since", metavar="REF")
-    q.add_argument("--runner", metavar="NAME")
-    q.add_argument("--json", action="store_true")
+    q.add_argument("--all", action="store_true", help="the whole suite: test files, full-run time, slowest files",
+                   **_KEEP)
+    q.add_argument("--since", metavar="REF", **_KEEP)
+    q.add_argument("--runner", metavar="NAME", **_KEEP)
+    q.add_argument("--json", action="store_true", **_KEEP)
     q = sp.add_parser("prove", help="each new or changed test passes N times with the change and fails without it")
     q.add_argument("tests", nargs="*", help="test files (default: the new or changed ones)")
     q.add_argument("--since", metavar="REF", help="the base without your change (default: merge-base with origin, or "
-                   "with the release or integration branch this one was cut from)")
+                   "with the release or integration branch this one was cut from)", **_KEEP)
     q.add_argument("--runs", type=int, default=RUNS, metavar="N", help=f"green runs required with the change "
                                                                      f"(default {RUNS})")
     q.add_argument("--isolated-imports", action="store_true",
                    help="unittest only: disable site and inherited Python paths; attest checkout/stdlib imports "
                         "for lesson prevention receipts (checkout root, src and test folders)")
-    q.add_argument("--runner", metavar="NAME")
-    q.add_argument("--json", action="store_true")
+    q.add_argument("--runner", metavar="NAME", **_KEEP)
+    q.add_argument("--json", action="store_true", **_KEEP)
     try:
         mod = _audit_module()
         q = sp.add_parser("audit", help="tests that cannot fail: no or trivial assertions, skips, sleeps")
@@ -3718,7 +4106,7 @@ def cmd_test(a) -> int:
     sub = getattr(a, "test_cmd", None)
     if getattr(a, "project", None):  # another project (id or a unique part of its name): run from its folder
         from . import cli
-        os.chdir(cli._resolve(cli._reg(prs=False), a.project)["path"])
+        os.chdir(cli._resolve(None, a.project)["path"])
     if sub == "audit":
         return _audit(a)
     top = _top()

@@ -16,12 +16,34 @@ dev test run --all        # the full suite
 dev test run tests/test_parser.py   # these tests
 ```
 
-`dev test` finds the project's test runner (pytest, unittest, Jest, Vitest, Node's `node --test`, Maven, Gradle, Go,
-PHPUnit, or Pest), runs the selection with it, and prints a compact result: each failure with `file:line` and its first
-error line, and the path to the full log. The raw output streams only to a terminal, or with `-v`. A package gets the
-Node runner when its `package.json` test script runs `node --test`, or runs its test scripts with `node`, and `node`
-is on the `PATH`. A path you name must be inside the repository: `dev test run ../other/a.test.js`, an absolute path
-outside it, or a symlink that leads out of it is refused with `no test runner for:` and runs nothing.
+`dev test` finds the project's test runner (pytest, unittest, Jest, Vitest, Node's `node --test`, Playwright, the
+Angular CLI's `ng test`, Maven, Gradle, Go, PHPUnit, or Pest), runs the selection with it, and prints a compact result:
+each failure with `file:line` and its first error line, and the path to the full log. The raw output streams only to a
+terminal, or with `-v`. A package gets the Node runner when its `package.json` test script runs `node --test`, or runs
+its test scripts with `node`, and `node` is on the `PATH`. A path you name must be inside the repository:
+`dev test run ../other/a.test.js`, an absolute path outside it, or a symlink that leads out of it is refused with
+`no test runner for:` and runs nothing.
+
+Some test files belong to a more specific runner than their package's Jest or Vitest:
+
+- **Browser specs.** The specs in the `testDir` folders of a `playwright.config.*` run with Playwright
+  (`npx playwright test <files>`); Vitest and Jest leave them out. A config without `testDir`, or whose `testDir` is
+  its own folder (`'.'`), gives Playwright the specs of its folder that import `@playwright/test`, directly or
+  through a local fixtures file, and the unit tests beside them keep their runner. A commented-out `testDir` counts
+  as none.
+- **Angular unit tests.** A project in `angular.json` whose `test` target uses the unit-test builder
+  (`@angular/build:unit-test`) with its Vitest runner runs its specs through `ng test <project> --include <file>`, so
+  they build with the workspace's TypeScript paths, setup files, and providers, which a bare Vitest run lacks. Its specs
+  are the files its `include` patterns match (by default `**/*.spec.ts` and `**/*.test.ts` under its source root); a
+  test file under the same folder that no pattern matches keeps the package's runner.
+
+pytest's own configuration decides which Python files are tests. A file named like a test (`test_*.py`, `*_test.py`)
+is one only inside the `testpaths` of the nearest pytest configuration (`pytest.ini`, `pyproject.toml`, `tox.ini`,
+`setup.cfg`) and when its name matches that configuration's `python_files`. A production module such as
+`app/test_probe.py` outside them is source code: a change to it selects the tests that import it, and
+`dev test prove` undoes it as part of your change. A Python project nested inside another, with its own
+`pyproject.toml` and tests (a worker package), has its own runner: the outer project's full pytest run leaves its
+folder out, so the two suites never share one process.
 
 devkit runs `node` itself, not `npm test`, so it gives no runner to a script it cannot reproduce exactly: one that
 builds before its tests (a `pretest` script, `tsc && node --test dist/test/`, `npm run build && node --test`), which
@@ -178,6 +200,13 @@ checkout works there. The dependency folders (`node_modules`, `.venv`, `vendor`)
 copied. A Python project installed in editable mode with a `src` layout would import the checkout's code, with your
 change, through the linked environment's `.pth` file, so devkit puts the copy's own source folders that those files
 name first on `PYTHONPATH`, and the run without the change really runs the old code.
+
+A project installed as a built copy instead (`uv sync --no-editable`, `pip install .`) leaves no such file:
+site-packages holds the build of your changed code. devkit finds the install by its `direct_url.json`, which names
+the checkout, and puts the copy's folder that holds the same files first, so the old code runs there too. When the copy
+has no such folder (the package is built from a folder of another name), `dev test prove` names the package and says
+that its tests cannot be proven this way: install it in editable mode (`uv sync`, `pip install -e .`), or put its
+source folder on `PYTHONPATH`.
 
 The copy lives in devkit's scratch folder (`~/Development/.tmp/devkit-prove-<process id>-…`) and is removed when the
 run ends. A run that crashed or was killed leaves its copy behind: the next `dev test prove` removes the copies older

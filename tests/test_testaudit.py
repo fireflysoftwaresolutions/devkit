@@ -1697,6 +1697,9 @@ class CliTests(AuditCase):
 # --------------------------------------------------------------------------- speed
 
 class SpeedTests(AuditCase):
+    # The budget is the processor time the audit itself spends, not the time on the clock: on a busy Mac or CI runner
+    # the clock also counts the time other processes hold the processor (3.6 s for 0.6 s of work at load average 57),
+    # while a real slowdown of the audit spends more of its own. About 0.5 s on this suite's Macs, under load too
     def test_two_hundred_files_audit_quickly(self):
         py = PY_GOOD_PYTEST + "".join(f"\n\ndef test_case_{i}_reads_digits():\n    assert parse_qty('{i}') == {i}\n"
                                       for i in range(30))
@@ -1710,10 +1713,10 @@ class SpeedTests(AuditCase):
             self.write(f"calc/calc_{i}_test.go", GO_GOOD)
         for i in range(10):
             self.write(f"tests/Unit/Invoice{i}Test.php", PHP_GOOD)
-        start = time.perf_counter()
+        start = time.process_time()
         findings = testaudit.audit(["tests", "web", "src", "calc"], top=self.top)
-        elapsed = time.perf_counter() - start
-        self.assertLess(elapsed, 3.0, f"{elapsed:.2f}s for 200 files")
+        spent = time.process_time() - start
+        self.assertLess(spent, 1.5, f"{spent:.2f}s of processor time for 200 files")
         self.assertEqual(findings, [], _show(findings[:5]))
 
 
