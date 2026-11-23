@@ -262,12 +262,19 @@ def _where():
 def taken_here(c: dict) -> bool:
     """Did this Mac take capture `c`? Then a picture or description of it missing from the local store was pruned
     here, not left on another Mac. The picture's `where` names the Mac: this Mac's machine id, or, for a capture from
-    before the machine id, a hostname this Mac carried when the capture was taken (identity.was_this_mac at its
-    `taken` time, as work.mine reads an older record): another Mac may carry that name now."""
+    before the machine id (or from a Mac without one, which identity.machine names by its hostname), a hostname this
+    Mac carried when the capture was taken (identity.was_this_mac at its `taken` time, as work.mine reads an older
+    record). Another Mac may carry that name, now or at the same time, so a hostname names this Mac only when the
+    record's user is this user too, as work.mine requires."""
     on = str((c.get("image") or {}).get("where") or "").removeprefix("local:")
     if not on:
         return False
     m = identity.machine()
+    if identity.MACHINE_ID.fullmatch(on):
+        return on == m.id
+    user = _user()
+    if not user or str((c.get("by") or {}).get("user") or "") != user:
+        return False
     try:
         at = calendar.timegm(time.strptime(str(c.get("taken")), "%Y-%m-%dT%H:%M:%SZ"))
     except ValueError:

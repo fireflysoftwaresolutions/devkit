@@ -861,6 +861,32 @@ class SharePrunedHereTest(StoreCase):
         self.assertFalse((self.records / "media").exists())
 
 
+class TakenHereByUserTest(StoreCase):
+    # A record from before the machine id, or written while this Mac had none (identity.machine falls back to the
+    # hostname), names its Mac by a hostname, and two Macs can carry one short hostname at the same time (a default
+    # or a DHCP name). Such a capture is this Mac's only when its user is this user too, as work.mine reads an older
+    # record: another person's capture in the same period reads as taken on that Mac, never as pruned from this
+    # Mac's store. A machine id names one Mac, whoever took the capture on it
+    def test_a_hostname_names_this_mac_only_for_this_user_and_a_machine_id_for_anyone(self):
+        renamed = calendar.timegm((2026, 6, 1, 0, 0, 0))
+        renamed_mac = identity.Machine("m-test0001", "ana-studio", {
+            "mac-55": [[calendar.timegm((2026, 1, 1, 0, 0, 0)), renamed]], "ana-studio": [[renamed, 4e9]]})
+        no_id = identity.Machine("mac-55", "mac-55", {"mac-55": [[0, 4e9]]})
+        said = {}
+        for mac, where in ((renamed_mac, "mac-55"), (no_id, "mac-55"), (renamed_mac, "m-test0001")):
+            self.patched(identity, "machine", new=lambda now=None, m=mac: m)
+            for user in ("devuser", "bob"):
+                c = {"id": "VC-g33z1a8k0e", "image": {"where": f"local:{where}"}, "taken": "2026-03-01T00:00:00Z",
+                     "by": {"member": None, "user": user, "host": where, "session": None}}
+                said[(mac.id, where, user)] = (store.taken_here(c), store.not_here(c, "picture"))
+        here = (True, "The picture of VC-g33z1a8k0e is no longer in this Mac's store")
+        away = (False, "The picture of VC-g33z1a8k0e is not on this Mac: it was taken on mac-55")
+        self.assertEqual(said, {("m-test0001", "mac-55", "devuser"): here, ("m-test0001", "mac-55", "bob"): away,
+                                ("mac-55", "mac-55", "devuser"): here, ("mac-55", "mac-55", "bob"): away,
+                                ("m-test0001", "m-test0001", "devuser"): here,
+                                ("m-test0001", "m-test0001", "bob"): here})
+
+
 # --------------------------------------------------------------------------- records read, replays, the driver
 
 ESC = "\x1b]52;c;cHduZWQ=\x07\u202e"
