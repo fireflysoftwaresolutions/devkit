@@ -1327,6 +1327,91 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
 
+    # A fresh mktemp path counted for its variable after every other assignment of the same command, so
+    # `LOG=$(mktemp) LOG=$(echo ~/.bashrc)` left LOG in the temporary folder and `pytest > "$LOG"` ran into the
+    # developer's shell settings. The words decide in their order, and a mktemp inside a subshell stays there.
+    def test_the_last_assignment_of_a_variable_names_the_file_its_log_goes_to(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Reassigned": 'LOG=$(mktemp) LOG=$(echo ~/.bashrc)\npytest > "$LOG"',
+                                      "Exported": 'export LOG=$(mktemp) LOG=$(echo ~/.bashrc)\npytest > "$LOG"',
+                                      "Subshell": 'LOG=$(echo ~/.bashrc)\n(LOG=$(mktemp))\npytest > "$LOG"',
+                                      "Temp last": 'LOG=$(echo ~/.bashrc) LOG=$(mktemp)\npytest > "$LOG"',
+                                      "Quoted": 'export LOG="$(mktemp -d)" OUT=1\npytest > "$LOG/out.log"'})
+        for name in ("Reassigned", "Exported", "Subshell"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"writes \$LOG, a path this Mac cannot tell next to a check")
+        for name in ("Temp last", "Quoted"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
+    # `${VAR:-word}` and `${VAR-word}` read as unknown, so `pytest > "${TMPDIR:-/tmp}/pytest.log"` blocked the
+    # evidence. They name the variable's value, or the word when it is unset (or empty, with the colon), as the
+    # shell expands them; a default this Mac cannot tell still blocks.
+    def test_a_default_value_names_the_file_a_log_goes_to(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root), "TMPDIR": tempfile.gettempdir()}):
+            os.environ.pop("NO_LOG_DIR", None)
+            got = self.plan_steps(s, {"Temp": 'pytest > "${TMPDIR:-/tmp}/pytest.log"',
+                                      "Unset": 'pytest > "${NO_LOG_DIR:-/tmp}/pytest.log"',
+                                      "Set": 'OUT=reports\npytest > "${OUT:-$HOME}/.bashrc"',
+                                      "Empty, no colon": 'OUT=\npytest > "${OUT-$HOME/.bashrc}"',
+                                      "Home": 'pytest > "${NO_LOG_DIR:-$HOME}/.bashrc"',
+                                      "Home, no colon": 'pytest | tee "${NO_LOG_DIR-~/.zshrc}"',
+                                      "Empty, colon": 'OUT=\npytest > "${OUT:-$HOME/.bashrc}"',
+                                      "Nested": 'pytest > "${NO_LOG_DIR:-${NO_LOG_DIR-$HOME}/.npmrc}"',
+                                      "Unknown": 'pytest > "${NO_LOG_DIR:-$(echo ~)}/.bashrc"'})
+        for name in ("Temp", "Unset", "Set", "Empty, no colon"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+        for name in ("Home", "Home, no colon", "Empty, colon", "Nested"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"into a dotfile of the home folder next to a check")
+        self.assertTrue(got["Unknown"]["blocking"], got["Unknown"]["skip"])
+        self.assertRegex(got["Unknown"]["skip"] or "", r"a path this Mac cannot tell next to a check")
+
+    # A variable set by read, mapfile, for or printf -v read as empty, so `read LOG <<< "$HOME/.bashrc"; pytest >
+    # "$LOG"` wrote the log into the checkout as far as devkit could tell, and ran. Its value is not known here.
+    def test_a_variable_set_by_read_for_or_printf_is_a_path_this_mac_cannot_tell(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Read": 'read LOG <<< "$HOME/.bashrc"\npytest > "$LOG"',
+                                      "Read after mktemp": 'LOG=$(mktemp)\nread -r LOG <<< "$HOME/.bashrc"\n'
+                                                           'pytest > "$LOG"',
+                                      "Mapfile": 'mapfile -t LOG < paths.txt\npytest | tee "$LOG"',
+                                      "For": 'for LOG in $(echo ~/.bashrc); do :; done\npytest > "$LOG"',
+                                      "Printf": 'LOG=$(mktemp)\nprintf -v LOG %s ~/.bashrc\npytest > "$LOG"',
+                                      "Printf glued": 'printf -vLOG %s ~/.bashrc\npytest > "$LOG"'})
+        for name in got:
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"writes \$LOG, a path this Mac cannot tell next to a check")
+
+    # cp, mv, dd, ln, install, rsync, mkdir and touch to a target this Mac cannot tell ran as written: only tee and
+    # the shell's redirects were checked. Next to a check such a write blocks the evidence; alone it is left out.
+    def test_every_writing_command_to_a_target_this_mac_cannot_tell_is_held(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Copy": 'pytest\ncp out.log "$(echo ~/.bashrc)"',
+                                      "Move": 'pytest && mv out.log "$(echo ~)/.zshrc"',
+                                      "Disk dump": 'pytest; dd if=out.log of="$(echo ~/.bashrc)"',
+                                      "Folder": 'mkdir -p "$(echo ~/.config)/tool"',
+                                      "Copied by the check": 'pytest | cp /dev/stdin "$(echo ~/.bashrc)"',
+                                      "Linked by the check": 'pytest | ln -sf out.log "$(echo ~/.bashrc)"',
+                                      "Into the checkout": 'pytest > out.log\ncp out.log reports/'})
+        for name, written in (("Copy", "cp out.log"), ("Move", "mv out.log"), ("Disk dump", "dd if=out.log")):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+                self.assertNotIn(written, got[name]["run"])
+                self.assertIn("pytest", got[name]["run"])
+                self.assertTrue(any(d.startswith(written) for d in got[name]["dropped"]), got[name]["dropped"])
+        self.assertRegex(got["Folder"]["skip"] or "", r"^runner prep \(writes .*, a path this Mac cannot tell\)")
+        self.assertFalse(got["Folder"]["blocking"])
+        for name in ("Copied by the check", "Linked by the check"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"a path this Mac cannot tell next to a check")
+        self.assertEqual((got["Into the checkout"]["skip"], got["Into the checkout"]["blocking"],
+                          got["Into the checkout"]["dropped"]), (None, False, []))
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""
