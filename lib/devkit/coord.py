@@ -9,9 +9,9 @@ progress.py, so every path that gives, takes, blocks or closes a step reads the 
 - A lane is *busy* while it holds a step that is not a review; review steps share a lane.
 - A review is *independent* of its author: no lane of a member that ran a step the review follows, directly or
   through other work, takes it (`independent`), so nobody reviews, and approves, their own work. Members are
-  compared as the member each lane works as (`lane_member`: its persona, else its launch description, else its
-  step's label), named by the caller's `who` (progress passes the roster's ids); a reviewer devkit cannot name is
-  independent of nobody. A step keeps the lanes that ran it (`authors`), so a reopen that gives it back to the tech
+  compared as the member each lane works as (`lane_member`: its persona, else its launch description, else, for an
+  author, the label of the step it ran), named by the caller's `who` (progress passes the roster's ids); a reviewer
+  devkit cannot name by its own persona or description is independent of nobody. A step keeps the lanes that ran it (`authors`), so a reopen that gives it back to the tech
   lead never makes its author independent of it.
 - An *intent* says who the tech lead gave a pending step to: a member (any of its lanes may take it) or one lane.
   It lives on the step, so a lane's end, stop or resume never loses it, and only a claim, a new assignment, the step
@@ -93,8 +93,8 @@ def _plain(name) -> str | None:
 
 
 def lane_member(lane, label: str = "", who=None):
-    """The member lane `lane` works as -> `who` of its persona, else of its launch description, else of `label` (its
-    step's), as approvals.doer reads it; None when that names no member."""
+    """The member lane `lane` works as -> `who` of its persona, else of its launch description, else of `label` (the
+    step an author ran, as approvals.doer reads it; a reviewer passes none); None when that names no member."""
     lane = lane if isinstance(lane, dict) else {}
     return (who or _plain)(lane.get("persona") or lane.get("label") or label or "")
 
@@ -114,9 +114,10 @@ def add_author(step: dict, aid: str):
 
 
 def _reviewer(step: dict, reviewer, who):
-    """The member `reviewer` is: a lane (lane_member, with the review's label) or a member's name."""
+    """The member `reviewer` is: a lane, by its own persona or launch description (lane_member), never by the label of
+    the review it would take, which says whom the review is for, not who the lane is; or a member's name."""
     if isinstance(reviewer, dict):
-        return lane_member(reviewer, step.get("label") or "", who)
+        return lane_member(reviewer, "", who)
     return who(str(reviewer or ""))
 
 

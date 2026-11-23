@@ -39,6 +39,14 @@ class KernelTests(unittest.TestCase):
                "agents": {"L": {"persona": "Tank", "state": "done"}}}
         self.assertFalse(coord.independent(run, run["plan"][1], ""))
 
+    def test_a_reviewer_lane_is_never_named_by_the_label_of_the_review_it_would_take(self):
+        # a lane with no persona and no launch description read as the member the review is assigned to, so it was
+        # independent of the work it follows and could take that review
+        review = dict(kstep("review-x", after=["x"], activity="review", state="pending"), label="Seraph")
+        run = {"plan": [kstep("x", "L"), review], "agents": {"L": {"persona": "Tank", "state": "done"}}}
+        anonymous = {"persona": "", "label": "", "type": "general-purpose", "state": "running"}
+        self.assertFalse(coord.independent(run, review, anonymous))
+
     def test_the_chain_counts_the_work_a_review_follows_through_other_work_but_not_through_reviews(self):
         # Tank built api, Neo integrated it, Seraph reviewed api and Tank fixed what the review found: neither Tank
         # nor Neo reviews the integration or the fix, while Seraph, who only reviewed, reviews the fix
