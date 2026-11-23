@@ -132,6 +132,10 @@ audit/ana@m-s9jn9xnz/
 - **A published segment that differs is never written over.** If this Mac's closed segment and the published one
   differ, the job leaves the published one as it is and records `audit.publish` as blocked and critical, and
   `dev audit verify` names the segment.
+- **Nothing goes through a symbolic link.** The handoff repository is one any teammate can commit to, so a link in
+  `audit/` or in this machine's copy could send a write or a removal outside it. When any part of the copy is a
+  link, the job publishes nothing and records `audit.publish` as blocked and critical, `dev audit reseal --apply`
+  refuses, and prune leaves the copy's old files as they are, naming the link. Remove the link with `git rm`.
 - **Month files of an earlier devkit, one file per closed day.** A day is closed once a record of a later UTC day
   follows it in the local month file, once that month has ended on the machine, or, for the last day of this month's
   file, once this devkit writes segments. The job publishes each closed day once; a record that a session still on

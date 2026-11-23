@@ -3784,10 +3784,56 @@ def _held_day(data: bytes, day: str, begin: int, end: int, records: int) -> dict
             "tail_bytes": len(tail), "limit": PUBLISH_LIMIT}
 
 
+class LinkRefused(OSError):
+    """A write or a removal in the handoff copy that would go through a symbolic link."""
+
+
+# what publish, reseal and prune say of a symbolic link in the handoff copy
+LINK_WHY = ("is a symbolic link in the handoff copy, which any teammate can commit: devkit writes and removes nothing "
+            "through it. Remove the link (git rm), then run dev audit verify")
+
+
+def _linked(path: Path):
+    """The first part of `path` that is a symbolic link, from HANDOFF/audit (itself included) down to `path`, or None;
+    None for a path outside HANDOFF/audit. The handoff copy is a git working tree any teammate can commit to, and a
+    committed link would send a write or a removal outside it."""
+    root = core.HANDOFF / "audit"
+    try:
+        rel = Path(path).relative_to(root)
+    except ValueError:
+        return None
+    return next((p for p in [root] + [root.joinpath(*rel.parts[:i]) for i in range(1, len(rel.parts) + 1)]
+                 if p.is_symlink()), None)
+
+
+def _link_in(folder: Path):
+    """The first symbolic link on the way to `folder` from HANDOFF/audit, or in it at any depth, or None."""
+    hit = _linked(folder)
+    if hit is not None or not folder.is_dir():
+        return hit
+    for top, dirs, files in os.walk(folder):  # a link to a folder is listed here, never entered
+        for n in sorted(dirs + files):
+            if os.path.islink(os.path.join(top, n)):
+                return Path(top) / n
+    return None
+
+
 def _write(target: Path, data: bytes):
+    """Write a file of the handoff copy whole or not at all, and never through a symbolic link: no part of its path
+    may be one (_linked), and its temporary file is created new (O_EXCL), not through a link (O_NOFOLLOW)."""
+    hit = _linked(target)
+    if hit is not None:
+        raise LinkRefused(f"{core.tilde(hit)} {LINK_WHY}")
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    tmp.write_bytes(data)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(tmp, flags, 0o644)
+    except FileExistsError:
+        os.unlink(tmp)  # left by a write of this process id that stopped; unlink removes a link, not what it names
+        fd = os.open(tmp, flags, 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
     os.replace(tmp, target)
 
 
@@ -3986,10 +4032,18 @@ def publish(now: float = None) -> list:
     now = time.time() if now is None else now
     with _lock(".job.lock"):
         dest, changed = team_dir(), []
-        segments = any(u["kind"] == "day" for u in _units())
-        for u in _to_publish():
-            changed += _publish_days(u, dest, segments)
-        changed += _publish_segments(dest, now)
+        hit = _link_in(dest)
+        if hit is not None:
+            record("audit.publish", core.tilde(hit), f"not published: {core.tilde(hit)} {LINK_WHY}", "blocked",
+                   severity="critical")
+            return []
+        try:
+            segments = any(u["kind"] == "day" for u in _units())
+            for u in _to_publish():
+                changed += _publish_days(u, dest, segments)
+            changed += _publish_segments(dest, now)
+        except LinkRefused as e:  # a link that appeared while the job ran
+            record("audit.publish", core.tilde(dest), f"not published further: {e}", "blocked", severity="critical")
     return changed
 
 
@@ -4061,10 +4115,15 @@ def prune(now: float = None) -> dict:
         return out
     with _lock(".job.lock"):
         plan = _plan_prune(now, cfg)
+        linked = [h for h in (_linked(f) for f in plan["team"]) if h is not None]
+        plan["team"] = [f for f in plan["team"] if _linked(f) is None]  # nothing removed through a link
         retired, team_maps = set(), []
         for where, files in ((AUDIT, [u["path"] for u in plan["local"]]), (team_dir(), plan["team"])):
             for rid in _reseal_ids(files):
                 f = where / "reseal" / f"{rid}.json"
+                if _linked(f) is not None:
+                    linked.append(_linked(f))
+                    continue
                 try:
                     f.unlink()
                 except OSError:
@@ -4103,7 +4162,7 @@ def prune(now: float = None) -> dict:
         out["removed"] = sorted({u["name"][:7] for u, _ in gone})
         mf = _manifest_file(team_dir())
         names = {f.name[:-6] for f in plan["team"] if f.name.endswith(".jsonl") and _SEGMENT.fullmatch(f.name[:-6])}
-        if names and mf.is_file():
+        if names and mf.is_file() and _linked(mf) is None:
             tm = _read_manifest(mf)
             team_start = _forget(mf, [(e["name"], e.get("link")) for e in tm["units"] if e["name"] in names],
                                  private=False)
@@ -4114,12 +4173,12 @@ def prune(now: float = None) -> dict:
             except OSError:
                 continue
             pruned.append(f)
-        out["team"] = pruned + team_maps + ([mf] if names and mf.is_file() else [])
+        out["team"] = pruned + team_maps + ([mf] if names and mf.is_file() and _linked(mf) is None else [])
         for d in sorted({f.parent for f in pruned if _MONTH.fullmatch(f.parent.name)}
                         | {u["path"].parent for u, _ in gone if _MONTH.fullmatch(u["path"].parent.name)}):
             with contextlib.suppress(OSError):
                 d.rmdir()  # a month's folder, once its days are gone
-    if out["removed"] or out["team"] or out["maps"] or start or team_start:
+    if out["removed"] or out["team"] or out["maps"] or start or team_start or linked:
         parts = []
         if out["removed"]:
             parts.append(f"removed {len(gone)} file(s), {out['records']} record(s) here: "
@@ -4131,6 +4190,8 @@ def prune(now: float = None) -> dict:
         if out["maps"]:
             parts.append(f"retired reseal map(s) {', '.join(out['maps'])}: the audit.reseal record that backs each one "
                          "was pruned")
+        if linked:
+            parts.append(f"left the handoff copy's old files as they are: {core.tilde(linked[0])} {LINK_WHY}")
         if start or team_start:
             parts.append("the chain now starts after " + " and ".join(
                 f"{s['unit']} {where}" for s, where in ((start, "here"), (team_start, "in the handoff copy")) if s))
@@ -4429,6 +4490,12 @@ def reseal(apply: bool = False, now: float = None) -> dict:
             why = (f"the chain does not verify ({p['kind']} at {core.tilde(p['path'])}"
                    + (f":{p['line']}" if p.get("line") else "") + "): a reseal would hide it; run dev audit verify "
                    "and settle what it reports first")
+            if apply:
+                record("audit.reseal", "local trail", why, "blocked", severity="critical")
+            return {**out, "ok": False, "refused": why}
+        hit = _link_in(dest)
+        if hit is not None:  # a reseal rewrites this Mac's handoff copy
+            why = f"{core.tilde(hit)} {LINK_WHY}"
             if apply:
                 record("audit.reseal", "local trail", why, "blocked", severity="critical")
             return {**out, "ok": False, "refused": why}

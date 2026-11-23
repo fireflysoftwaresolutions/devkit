@@ -768,6 +768,58 @@ class StartTests(SegmentCase):
         self.assertEqual([p["kind"] for p in res["problems"]], ["start"])
 
 
+class LinkTests(SegmentCase):
+    # a symbolic link committed to the handoff repository, in this Mac's copy, pointing outside it
+    sealed_record = ResealTests.sealed_record
+    scene = ResealTests.scene
+
+    def outside(self) -> Path:
+        d = self.root / "outside"
+        d.mkdir(exist_ok=True)
+        return d
+
+    def files_of(self, folder: Path) -> dict:
+        return {p.name: p.read_bytes() for p in folder.iterdir()}
+
+    def test_publish_writes_nothing_through_a_symbolic_link_and_records_why(self):
+        self.write(noon(1), 1)
+        audit.close(now=noon(0))
+        audit.team_dir().mkdir(parents=True)
+        (audit.team_dir() / utc_day(noon(1))[:7]).symlink_to(self.outside())
+        self.assertEqual(audit.publish(now=noon(0)), [])
+        self.assertEqual(self.files_of(self.outside()), {})
+        rec = audit.query(action="audit.publish")[-1]
+        self.assertEqual((rec["outcome"], rec["severity"]), ("blocked", "critical"))
+        self.assertIn("symbolic link", rec["detail"])
+
+    def test_a_reseal_refuses_a_handoff_copy_with_a_symbolic_link(self):
+        self.scene()
+        month = audit.team_dir() / utc_day(noon(2))[:7]
+        outside = self.outside()
+        for p in month.iterdir():
+            (outside / p.name).write_bytes(p.read_bytes())
+            p.unlink()
+        month.rmdir()
+        month.symlink_to(outside)
+        before = self.files_of(outside)
+        with self.as_developer():
+            res = audit.reseal(apply=True)
+        self.assertFalse(res["ok"])
+        self.assertIn("symbolic link", res["refused"])
+        self.assertEqual(self.files_of(outside), before)
+        self.assertFalse((audit.AUDIT / "reseal").exists())
+
+    def test_prune_removes_nothing_through_a_symbolic_link(self):
+        old = audit.months_back(time.time(), 16)
+        outside = self.outside()
+        (outside / f"{old}-14.jsonl").write_text("{}\n")
+        audit.team_dir().mkdir(parents=True)
+        (audit.team_dir() / old).symlink_to(outside)
+        out = audit.prune()
+        self.assertEqual(list(self.files_of(outside)), [f"{old}-14.jsonl"])
+        self.assertEqual(out["team"], [])
+
+
 class CommandTests(SegmentCase):
     def test_dev_audit_parses_reseal_and_apply(self):
         from devkit import cli
