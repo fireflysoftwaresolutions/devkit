@@ -1387,10 +1387,11 @@ def config_change(agent: str):
     data = _stdin_json()
     from . import policy
     path = data.get("file_path") or str(core.CLAUDE_HOME / "settings.json")
+    project = data.get("source") in ("project_settings", "local_settings")
     settings = core.read_json(path, None)
     if settings is None:
+        _refuse_unparsed_env(path, project)
         return
-    project = data.get("source") in ("project_settings", "local_settings")
     drift = [] if project else [d for d in policy.diff_claude(settings)
                                 if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
     env_keys = _devkit_env_change(path, settings, managed=not project)
@@ -1425,6 +1426,30 @@ def config_change(agent: str):
     _spawn(["config", "repair", "--quiet"])
     print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
           f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`.",
+          file=sys.stderr)
+    sys.exit(2)
+
+
+def _refuse_unparsed_env(path: str, project: bool):
+    """A settings file devkit cannot parse (not JSON, or nested deeper than core.JSON_MAX_DEPTH, which Claude Code
+    still reads) that sets DEVKIT_* variables in its text (policy.devkit_env): refused with exit 2 and recorded, as
+    config_change refuses them in a file it can parse. devkit cannot rewrite such a file, so it names the keys to
+    remove. A project's or local settings may set none; the user settings only devkit's own values."""
+    from . import audit, policy
+    try:
+        have = policy.devkit_env(Path(path).read_text())
+    except OSError:  # gone or unreadable: no agent reads it either
+        return
+    want = {} if project else {p[1]: json.dumps(v) for p, v in policy.claude_desired()[0].items()
+                               if len(p) == 2 and p[0] == "env" and str(p[1]).startswith("DEVKIT_")}
+    keys = ", ".join(f"env.{k}" for k in sorted(k for k, v in have.items() if want.get(k) != v))
+    if not keys:
+        return
+    _log(f"config-change blocked, settings devkit cannot parse: {keys}")
+    audit.record("config.blocked", path, keys, "blocked")
+    print(f"devkit cannot parse {tilde(path)} (it is not JSON, or it nests deeper than {core.JSON_MAX_DEPTH} "
+          f"levels), and it sets devkit's DEVKIT_* variables, which say who calls devkit and where its state lives: "
+          f"refused {keys}. Remove them from the file; change devkit's configuration with dev config.",
           file=sys.stderr)
     sys.exit(2)
 

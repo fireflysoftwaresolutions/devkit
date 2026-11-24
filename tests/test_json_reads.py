@@ -568,6 +568,31 @@ class HookInputTests(acceptance.Sandbox):
                     self.assertEqual(self.dev_hook(event, head + deep(d) + close), malformed)
                     self.assertEqual(self.failures(), [])
 
+    def test_config_change_refuses_an_unparsable_settings_file_that_sets_a_devkit_variable(self):
+        local = self.repo / ".claude" / "settings.local.json"
+        local.parent.mkdir()
+        user = self.home / ".claude" / "settings.json"
+        user.parent.mkdir(exist_ok=True)
+        for d in DEPTHS:
+            for f, source, key in ((local, "local_settings", "DEVKIT_HOME"), (user, "user_settings", "DEVKIT_GUARD")):
+                with self.subTest(source=source, depth=d):
+                    text = '{"env": {"' + key + '": "/var/tmp/x"}, "x": ' + deep(d) + "}"
+                    f.write_text(text)
+                    code, _, err = self.dev_hook("config-change", json.dumps(
+                        {"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange", "source": source,
+                         "file_path": str(f), "cwd": str(self.repo)}))
+                    self.assertEqual(code, 2)
+                    self.assertIn(f"env.{key}", err)
+                    self.assertEqual(f.read_text(), text)  # a file devkit cannot parse it cannot rewrite either
+                    self.assertIn(f"env.{key}", self.audit("config.blocked")[-1]["detail"])
+            with self.subTest(source="local_settings, no DEVKIT_* variable", depth=d):
+                local.write_text('{"env": {"NODE_ENV": "test"}, "x": ' + deep(d) + "}")
+                code, _, err = self.dev_hook("config-change", json.dumps(
+                    {"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange",
+                     "source": "local_settings", "file_path": str(local), "cwd": str(self.repo)}))
+                self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.failures(), [])
+
 
 @unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
 class HookInputPython39Tests(HookInputTests):
@@ -590,7 +615,7 @@ COMMAND = ("a file or value the developer names to an interactive command (the p
            "cursor): a deep one fails that command only, never a hook")
 CONFIG = "the developer's own devkit configuration, which dev config validates on every write"
 # Exposed readers outside the files this guard came with; each leaves the list when it is routed through load_json.
-HELD = "OPEN: routed through core.load_json by the change that owns progress.py, hooks.py and codexlaunch.py"
+HELD = "OPEN: routed through core.load_json by the change that owns progress.py"
 AUDIT = "OPEN: the team's published audit files; audit.py's readers move to core.load_json with the audit depth guard"
 
 # (module below lib/devkit, enclosing function) -> (raw parses there, why). core.load_json is the one parse of JSON
@@ -663,7 +688,7 @@ REVIEWED = {
     ("gitx", "_only_skipped"): (1, TOOL),
     ("gitx", "ctx"): (1, TOOL),
     ("gitx", "gh_json"): (2, TOOL),
-    ("hooks", "_devkit_env_change"): (1, HELD),
+    ("hooks", "_devkit_env_change"): (1, COPY + " (the DEVKIT_* values of devkit's own configuration)"),
     ("identity", "_read_kept"): (1, OWN),
     ("identity", "_read_used"): (1, OWN),
     ("identity", "read_uses"): (1, OWN),
