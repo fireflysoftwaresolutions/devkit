@@ -904,13 +904,15 @@ def call_limit(entry: dict) -> float:
     return ttl + (APPROVAL_S if entry.get("pin_by") == "text" else 0)
 
 
-def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> list:
+def open_calls(sid: str, now: float | None = None, closed_too: bool = False, budget: list | None = None) -> list:
     """The session's open calls, oldest first. An entry past its time (call_limit) got no result (the tool was cut
     off, another hook refused it, or the developer denied it): it is removed and audited as calls.unclosed, and its
     call's identity ends (identity.note_closed; a contested one is audited, identity.audit_contested). `closed_too`:
     with the entries of closed calls whose record could not be written (call_closed), kept as later calls for the text
     pin until SHELL_KEEP after they closed, then removed without an audit (their call ended, and its drop was audited).
-    The folder is opened once, never through a link, and every entry is read and removed through it (dir_fd)."""
+    The folder is opened once, never through a link, and every entry is read and removed through it (dir_fd).
+    `budget` ([count], a sweep's): the names listed and entries read take one each, and the listing stops when it is
+    spent (the calls found by then)."""
     now = now or time.time()
     try:  # the session's folder, never through a link: what a link points to is never read or removed
         fd = os.open(CALLS / _safe_name(sid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -919,7 +921,7 @@ def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> 
     try:
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             return []
-        return _open_calls_at(fd, sid, now, closed_too)
+        return _open_calls_at(fd, sid, now, closed_too, budget)
     except OSError:
         return []
     finally:
@@ -945,7 +947,7 @@ def _read_entry_at(fd: int, name: str):
 def _open_calls_at(fd: int, sid: str, now: float, closed_too: bool, budget: list | None = None) -> list:
     """open_calls in the session folder open at `fd`: every name is read and removed from that folder (dir_fd)."""
     out = []
-    for name in os.listdir(fd):
+    for name in (os.listdir(fd) if budget is None else _listed(fd, budget)):
         if not name.endswith(".json") or name.startswith("."):
             continue
         e = _read_entry_at(fd, name)
@@ -988,6 +990,16 @@ def _open_calls_at(fd: int, sid: str, now: float, closed_too: bool, budget: list
             continue
         out.append(e)
     return sorted(out, key=lambda e: e.get("ts") or 0)
+
+
+def _listed(fd: int, budget: list):
+    """The names of the open folder `fd`, each taking one of `budget` ([count]); the listing stops when it is spent."""
+    with os.scandir(fd) as found:
+        for d in found:
+            if budget[0] <= 0:
+                return
+            budget[0] -= 1
+            yield d.name
 
 
 def _names_args(entry: dict, args: list) -> bool:

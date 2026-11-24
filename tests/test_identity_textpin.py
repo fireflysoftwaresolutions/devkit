@@ -1507,14 +1507,14 @@ class TextPinRecordFailureTests(TextPinCase):
         outside.mkdir()
         (outside / ".toolu_z.contested").write_text("")
         moved = self.root / "moved"
-        real = os.listdir
+        real = os.scandir
 
         def swap(p):
             if not os.path.islink(folder):
                 os.rename(folder, moved)
                 os.symlink(outside, folder)
             return real(p)
-        with mock.patch.object(os, "listdir", swap):
+        with mock.patch.object(os, "scandir", swap):  # the listing, once the folder is open
             identity._sweep_flags(folder, time.time() + identity.FLAG_GRACE_S + 1)
         self.assertTrue(os.path.islink(folder))  # the swap happened
         self.assertEqual(os.listdir(outside), [".toolu_z.contested"])
@@ -1987,6 +1987,58 @@ class LedgerFolderTests(TextPinCase):
         self.assertEqual(len(found), 1)
         self.assertIn("session-ended", found[0]["detail"])
 
+    # two processes that end one call (its PostToolUse and a SessionEnd, or two sweeps) write one contest audit
+    def test_two_ends_of_one_contested_call_write_one_audit(self):
+        self.plan_with_link()
+        data, _, _ = self.hook(LEAD)
+        entry = pg.call_entry(data)
+        identity._contest(entry)
+        mark = identity._contest_mark(entry)
+        identity.audit_contested(entry, "s1", data["tool_use_id"], mark)
+        identity._drop_marks("s1", data["tool_use_id"])  # the first end's marks go before the second end audits
+        identity.audit_contested(entry, "s1", data["tool_use_id"], mark, "session-ended")
+        self.assertEqual(len([r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"]), 1)
+
+    # an audit that cannot be written is recorded as a swallowed devkit error, never lost silently
+    def test_a_contest_audit_that_fails_is_reported(self):
+        from devkit import audit, bugs
+        seen = []
+        entry = {"pin": "/x/toolu_e.pin", "agent": "claude", "cmd": "dev progress add extra"}
+        with mock.patch.object(audit, "record", side_effect=OSError("disk full")), \
+                mock.patch.object(bugs, "swallowed", lambda c, e: seen.append(str(e))):
+            identity.audit_contested(entry, "s1", "toolu_e", "pin")
+        self.assertEqual(seen, ["disk full"])
+
+    # 1,000 flags in the first folder never starve the others: each sweep starts at another folder
+    def test_a_flood_of_flags_in_one_folder_never_starves_the_others(self):
+        old = time.time() - 10 * identity.FLAG_GRACE_S
+        for sid, n in (("s-a", 8), ("s-b", 1)):
+            folder = pg.CALLS / sid
+            folder.mkdir(parents=True)
+            for i in range(n):
+                flag = folder / f".toolu_{i}.contested"
+                flag.mkdir()  # a planted folder: each takes its entry and its own removal
+                (flag / "x").write_text("")
+                os.utime(flag, (old, old))
+        with mock.patch.object(identity, "_SWEEP_MAX", 2), mock.patch.object(identity, "_sweep_start", lambda n: 1):
+            identity.sweep_gone()
+        self.assertEqual(os.listdir(pg.CALLS / "s-b"), [])
+
+    # the sweep reads at most a bounded number of ledger entries and names, however many a folder holds
+    def test_the_sweep_reads_a_bounded_number_of_entries(self):
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        for i in range(40):
+            (folder / f"toolu_{i:02d}.json").write_text(json.dumps({"ts": time.time(), "agent_pid": 1}))
+        real, reads = pg._read_entry_at, []
+
+        def counted(fd, name):
+            reads.append(name)
+            return real(fd, name)
+        with mock.patch.object(identity, "_LIST_MAX", 10), mock.patch.object(pg, "_read_entry_at", counted), \
+                mock.patch.object(pg, "_pid_running", lambda pid: True):
+            identity.sweep_gone()
+        self.assertLessEqual(len(reads), 10)
 
 
 if __name__ == "__main__":

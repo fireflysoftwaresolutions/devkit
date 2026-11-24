@@ -686,8 +686,10 @@ def audit_contested(entry: dict, sid: str, tid: str, mark: str, ended: str = "")
     """A stamped call that ends marked contested (`mark`, _contest_mark) is audited (calls.pin-contested, flagged): at
     its PostToolUse (hooks._pin_audits), and when it ends with no result: its session ended, its time ran out, or its
     agent went without its SessionEnd (`ended`, named in the record). The caller reads the mark before the call's
-    ledger entry goes, and again after."""
-    if not mark or not entry.get("pin"):
+    ledger entry goes, and again after. Two processes that end one call (its PostToolUse and a SessionEnd, two
+    sweeps) write one audit: the first to make the call's audit claim (audit_claim_path) writes it. An audit that
+    fails is recorded as a swallowed devkit error (bugs.swallowed), never lost silently."""
+    if not mark or not entry.get("pin") or not _claim_audit(sid, tid):
         return
     why = ("another process wrote this call's pin before its shell did" if mark == "pin"
            else "this call is marked contested: its contest flag is in the ledger")
@@ -698,8 +700,43 @@ def audit_contested(entry: dict, sid: str, tid: str, mark: str, ended: str = "")
         audit.record("calls.pin-contested", tid[:80] or "-", why, "flagged", tool_use_id=tid[:80],
                      session=str(sid)[:80], host_agent=str(entry.get("agent") or ""),
                      command=str(entry.get("cmd") or "")[:300])
-    except Exception:  # noqa: BLE001 - the audit never stops a call's end
-        pass
+    except Exception as e:  # noqa: BLE001 - the audit never stops a call's end
+        try:
+            from . import bugs
+            bugs.swallowed({"": "post-tool", "session-ended": "session-end"}.get(ended, "identity"), e)
+        except Exception:  # noqa: BLE001 - nor does the record of its failure
+            pass
+
+
+def audit_claim_path(sid: str, tid: str):
+    """Call `tid`'s audit claim: CALLS/<sid>/.<tid>.audited (a dot-file: no reader of the ledger takes it for an
+    entry), made by the first process that audits the call's contest. It outlives the call's other marks, so a second
+    end that read the call before the first removed it finds the claim; the sweep removes it like a contest flag
+    (_sweep_flags)."""
+    from . import progress
+    return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.audited"
+
+
+def _claim_audit(sid: str, tid: str) -> bool:
+    """True when this process is the first to audit call `tid`'s contest: it made the claim (O_EXCL), in the session's
+    folder opened without following a link. True too when no claim can be made there (no folder, a link, a full
+    disk): an audit written twice is better than none."""
+    if not tid:
+        return True
+    try:
+        folder = ledger_folder(sid)
+    except OSError:
+        return True
+    try:
+        os.close(os.open(audit_claim_path("-", tid).name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=folder))
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(folder)
 
 
 def sweep_gone(now: float | None = None) -> int:
@@ -710,29 +747,49 @@ def sweep_gone(now: float | None = None) -> int:
     waits for its time. Then the contest flags the ended calls left behind go (_sweep_flags). Run at every session
     start and by `dev sync`. -> the calls it ended"""
     from . import progress
+    reads = [_LIST_MAX]  # the names a sweep lists and the ledger entries it reads, shared by all its folders
+    sids = []
     try:  # a session folder that is a link is never one: nothing it points to is read or removed
         with os.scandir(progress.CALLS) as found:
-            sids = sorted(d.name for d in found if d.is_dir(follow_symlinks=False) and not d.name.startswith("."))
+            for d in found:
+                if reads[0] <= 0:
+                    break
+                reads[0] -= 1
+                if d.is_dir(follow_symlinks=False) and not d.name.startswith("."):
+                    sids.append(d.name)
     except OSError:
         return 0
+    sids.sort()
+    if sids:  # each sweep starts at another folder, so one flooded folder never starves the ones after it
+        at = _sweep_start(len(sids)) % len(sids)
+        sids = sids[at:] + sids[:at]
     n, budget = 0, [_SWEEP_MAX]
     for sid in sids:
-        for e in progress.open_calls(sid, now):
+        if reads[0] <= 0:
+            break
+        for e in progress.open_calls(sid, now, budget=reads):
             pid = e.get("agent_pid")
             if isinstance(pid, int) and not progress._pid_running(pid):
                 _end_call(str(e.get("agent") or ""), sid, e, "session-gone")
                 n += 1
         if budget[0] > 0:
-            _sweep_flags(progress.CALLS / sid, now, budget)
+            _sweep_flags(progress.CALLS / sid, now, budget, reads)
     return n
+
+
+def _sweep_start(n: int) -> int:
+    """Where a sweep of `n` session folders starts (sweep_gone): a random one."""
+    import random
+    return random.randrange(n)  # nosemgrep: python.lang.security.audit.insecure-random  (an order, no secret)
 
 
 FLAG_GRACE_S = 60  # seconds a sweep leaves a contest flag after it was made and after its call closed
 _TREE_DEPTH = 16  # levels of a folder planted at a flag's name the sweep removes; a deeper one stays
 _SWEEP_MAX = 1000  # flags a sweep looks at and entries of planted folders it removes, at most: the rest waits
+_LIST_MAX = 10 * _SWEEP_MAX  # names a sweep lists and ledger entries it reads, at most: the rest waits
 
 
-def _sweep_flags(folder, now: float | None = None, budget: list | None = None):
+def _sweep_flags(folder, now: float | None = None, budget: list | None = None, reads: list | None = None):
     """The contest flags (contest_path) a session's ledger folder kept after their calls ended: each `.<tid>.contested`
     whose call has no ledger entry and no kept record goes, whatever is there: a file, a link (never followed), or a
     folder planted at its name, which the call's end cannot unlink (_drop_marks). A flag made, or whose call closed
@@ -742,11 +799,13 @@ def _sweep_flags(folder, now: float | None = None, budget: list | None = None):
     The folder is opened once, never through a link (O_NOFOLLOW), and every name in it is reached from that open
     folder (dir_fd): a folder that is a link is left, and one swapped for a link meanwhile is never followed. `budget`
     ([count], shared by the sweep's folders): the flags looked at and planted entries removed, at most _SWEEP_MAX;
-    what is left past it waits for the next sweep."""
+    `reads` ([count], shared too): the names listed, at most _LIST_MAX; what is left past either waits for the next
+    sweep. A call's audit claim (audit_claim_path) goes by the same rules."""
     import stat
     now = now or time.time()
     budget = budget if budget is not None else [_SWEEP_MAX]
-    suffix = ".contested"
+    reads = reads if reads is not None else [_LIST_MAX]
+    suffixes = (".contested", ".audited")
     try:
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
@@ -754,9 +813,17 @@ def _sweep_flags(folder, now: float | None = None, budget: list | None = None):
     try:
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             return
-        names = [n for n in os.listdir(fd) if n.startswith(".") and n.endswith(suffix) and len(n) > len(suffix) + 1]
+        names = []
+        with os.scandir(fd) as listed:
+            for d in listed:
+                if reads[0] <= 0:
+                    break
+                reads[0] -= 1
+                suffix = next((x for x in suffixes if d.name.endswith(x)), "")
+                if suffix and d.name.startswith(".") and len(d.name) > len(suffix) + 1:
+                    names.append((d.name, suffix))
         closed = unread = object()
-        for name in names:
+        for name, suffix in names:
             if budget[0] <= 0:
                 break
             budget[0] -= 1
