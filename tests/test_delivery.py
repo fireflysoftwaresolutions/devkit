@@ -88,6 +88,29 @@ class DetectTests(unittest.TestCase):
             with self.subTest(tags=tags):
                 self.assertEqual(delivery.detect(repo_with({"README.md": "x"}, tags=tags))["versioning"], "semver")
 
+    # git's version sort lists every v tag before every tag that starts with a digit, and the spelling came from the
+    # first tag it listed: wherever both spellings were in use the v won, and the 60 tags read could all be old v tags
+    def test_the_tag_spelling_is_the_newest_version_tags_whichever_spelling_git_lists_first(self):
+        pep = delivery.PEP440_FORMAT
+        cases = (("calver without the v since November", ["v26.9.0", "v26.10.0", "26.11.0", "26.11.1", "26.11.2"],
+                  "26.11.3", ("calver", "YY.MM.PATCH", "26.11.2"), "26.11.3"),
+                 ("semver with one old v tag", ["1.0.0", "1.1.0", "1.2.0", "v0.9.0"],
+                  "1.3.0", ("semver", "MAJOR.MINOR.PATCH", "1.2.0"), "1.3.0"),
+                 ("70 old v tags, then newer ones without it", [f"v25.1.{n}" for n in range(70)] + ["26.11.0", "26.11.1"],
+                  "26.11.2", ("calver", "YY.MM.PATCH", "26.11.1"), "26.11.2"),
+                 ("calver back to the v", ["26.9.0", "26.10.0", "v26.11.0"],
+                  "26.11.1", ("calver", "vYY.MM.PATCH", "v26.11.0"), "v26.11.1"),
+                 ("pep440 without the v since a2", ["v0.1.0a1", "0.1.0a2"],
+                  "0.1.0a3", ("pep440", pep, "0.1.0a2"), "0.1.0a3"),
+                 ("pep440, a final release without the v", ["v0.1.0a1", "v0.1.0rc1", "0.1.0"],
+                  "0.1.1", ("pep440", pep, "0.1.0"), "0.1.1"))
+        for name, tags, version, found, tag in cases:
+            with self.subTest(name):
+                r = repo_with({"README.md": "x"}, tags=tags)
+                d = delivery.detect(r)
+                self.assertEqual((d["versioning"], d["tag_format"], d["latest_tag"]), found)
+                self.assertEqual(delivery.release_tag(r, version, policy={}), tag)
+
     def test_the_test_gate_leaves_out_runner_only_setup(self):
         wf = ("on: [pull_request]\njobs:\n  t:\n    runs-on: ubuntu-24.04\n    steps:\n"
               "      - run: sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache/CodeQL\n"

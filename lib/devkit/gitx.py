@@ -4994,19 +4994,6 @@ def delivery_policy(top) -> dict:
         return {}
 
 
-_PEP440_PARTS = re.compile(r"^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?(?:\.dev(\d+))?$")
-
-
-def _pep440_key(tag: str) -> tuple:
-    """PEP 440's order of a version tag: 1.0.dev1 < 1.0a1 < 1.0b1.dev1 < 1.0b1 < 1.0rc1 < 1.0 < 1.0.post1."""
-    epoch, release, pre, n, post, dev = _PEP440_PARTS.match(tag).groups()
-    parts = [int(x) for x in release.split(".")]
-    while len(parts) > 1 and parts[-1] == 0:
-        parts.pop()  # 1.0 is 1.0.0
-    stage = ({"a": 0, "b": 1, "rc": 2}[pre], int(n)) if pre else (-1, 0) if dev and not post else (3, 0)
-    return (int(epoch or 0), tuple(parts), stage, int(post) if post else -1, (0, int(dev)) if dev else (1, 0))
-
-
 def version_scheme(top):
     """-> (scheme 'calver'|'semver'|'pep440', latest version tag or None, next CalVer). The recorded policy wins;
     without one, version tags that use PEP 440's pre, post or dev releases (v0.1.0a16) make it pep440, as `dev
@@ -5022,8 +5009,8 @@ def version_scheme(top):
     if recorded == "calver":
         return "calver", cur, nxt
     if recorded == "pep440" or (not recorded and delivery._scheme_from_tags(every)[0] == "pep440"):
-        pep = [t for t in every if delivery.PEP440_RE.match(t) and _PEP440_PARTS.match(t)]
-        return "pep440", (max(pep, key=_pep440_key) if pep else None), nxt
+        pep = [t for t in every if delivery.PEP440_RE.match(t) and delivery.PEP440_PARTS.match(t)]
+        return "pep440", (max(pep, key=delivery.version_key) if pep else None), nxt
     files = version_files(top)
     if recorded == "semver" or other or any(not _plausible_calver(v) for v in files.values()):
         return "semver", (sorted(other or tags, key=key)[-1] if (other or tags) else None), nxt
@@ -5287,7 +5274,7 @@ def release_version_refusal(top, version: str, scheme: str, nxt: str):
     so a project that changed its format cannot release a shipped version twice. `scheme`, `nxt`: version_scheme's."""
     from . import delivery
     if scheme == "pep440":
-        if not (delivery.PEP440_RE.match(version) and _PEP440_PARTS.match(version)):
+        if not (delivery.PEP440_RE.match(version) and delivery.PEP440_PARTS.match(version)):
             return f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)", None
     elif not _VERSION_RE.match(version):
         return f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)", None
