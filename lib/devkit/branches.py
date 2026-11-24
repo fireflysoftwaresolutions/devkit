@@ -190,7 +190,7 @@ def _embargo_records(f: Path):
             if b'"git.embargo"' not in ln:
                 continue
             try:
-                r = json.loads(ln)
+                r = core.load_json(ln)
             except ValueError:
                 continue
             if isinstance(r, dict) and r.get("action") == "git.embargo" and r.get("outcome") == "ok":

@@ -30,8 +30,8 @@ import test_acceptance_hooks as acceptance  # noqa: E402  (the hook entry run as
 import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extension runs it)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import (audit, bugs, canary, ciwatch, continuity, core, gates, language, lessonlint,  # noqa: E402
-                    lessons, mcp, policy, scope, shellparse, skillguard, state)
+from devkit import (audit, branches, bugs, canary, ciwatch, continuity, core, gates, language,  # noqa: E402
+                    lessonlint, lessons, mcp, policy, scope, shellparse, skillguard, state)
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
 # inside every reader's window (canary reads the last 400 KB of a transcript).
@@ -317,6 +317,27 @@ class ForeignTextReaderTests(TempFolder):
                 self.assertEqual(shellparse._run_target(pkg, "node"), pkg / "index.js")
 
 
+class TeamRecordReaderTests(TempFolder):
+    """Records that sync from teammates through the handoff repository: the published audit trails and the visual
+    diagnosis records."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(core, "HANDOFF", self.root / "handoff")
+        p.start()
+        self.addCleanup(p.stop)
+        self.records = self.root / "handoff" / "visual" / "acme" / "api"
+
+    def test_embargo_records_skip_a_deep_line(self):
+        rec = {"action": "git.embargo", "outcome": "ok", "id": "A-1", "project": "acme/api", "branch": "fix/a",
+               "detail": "set"}
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                f = self.write(f"audit/{d}.jsonl", lines(rec, json.dumps(dict(rec, id="A-2", branch="fix/b"))[:-1]
+                                                         + ', "x": ' + deep(d) + "}"))
+                self.assertEqual([r["branch"] for r in branches._embargo_records(f)], ["fix/a"])
+
+
 class PreToolHookTests(acceptance.Sandbox):
     """The PreToolUse hook end to end: a command that runs node on a folder outside the repository whose package.json
     is deep, then `dev watch --wait`. The hook's readers of the command (the speaker stamp, the crew-lane advice) read
@@ -408,7 +429,6 @@ REVIEWED = {
     ("audit", "verify_file"): (1, AUDIT),
     ("backup", "scan"): (1, TOOL),
     ("branches", "_backup_records"): (1, OWN + " (this Mac's audit trail)"),
-    ("branches", "_embargo_records"): (1, AUDIT),
     ("bugs", "GhClient._json"): (1, TOOL),
     ("bugs", "GhClient._lines"): (1, TOOL),
     ("bugs", "UrlClient._get"): (1, TOOL),
