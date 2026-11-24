@@ -2061,6 +2061,26 @@ class LedgerFolderTests(TextPinCase):
         identity.audit_contested(entry, "s1", data["tool_use_id"], mark, "session-ended")
         self.assertEqual(len([r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"]), 1)
 
+    # a dangling link or a folder at a call's use mark is no use mark: the PostToolUse hook flags no unexplained use
+    # of the tech lead's token for it, while a regular file there is one
+    def test_only_a_regular_file_counts_as_a_use_mark(self):
+        from devkit import hooks
+        for sid, kind in (("s-link", "dangling-link"), ("s-dir", "folder"), ("s-file", "file")):
+            folder = pg.CALLS / sid
+            folder.mkdir(parents=True)
+            mark = folder / ".toolu_u.used"
+            if kind == "dangling-link":
+                os.symlink(self.root / "nowhere", mark)
+            elif kind == "folder":
+                mark.mkdir()
+            else:
+                mark.write_text(json.dumps({"pid": 1, "start": 1.0, "inode": 1}))
+            entry = {"pin": str(self.root / "no-pin"), "caller": "main", "cmd": "git status", "agent": "claude",
+                     "ts": time.time(), "session": sid, "tool_use_id": "toolu_u"}
+            hooks._pin_audits(entry, {"session_id": sid, "tool_use_id": "toolu_u", "hook_event_name": "PostToolUse"},
+                              "")
+        self.assertEqual([r["ref"]["session"] for r in self.records("caller.token-unexplained-use")], ["s-file"])
+
     # an audit that cannot be written is recorded as a swallowed devkit error, never lost silently
     def test_a_contest_audit_that_fails_is_reported(self):
         from devkit import audit, bugs
