@@ -229,13 +229,14 @@ REVIEWED_DISPOSITIONS = (
      "expressions": (r'''folder''', r'''profile'''),
      "reason": "the capture's private TMPDIR folder and the Playwright profile folder found in it by its fixed prefix"},
     {"rule": CHILD_PROCESS_RULE, "path": "lib/devkit/visual/capture.cjs",
-     "context": r'''      child = spawn(command, args, { cwd: req.cwd, env: process.env, stdio: ['ignore', 'pipe', 'ignore'] });
+     "context": r'''      child = spawn(command, args, { cwd: req.cwd, env: process.env, stdio: ['ignore', 'pipe', 'ignore'],
+        detached: true });
 ''',
      "required_contexts": (r'''  const [command, ...rest] = req.impeccable.command;
 ''',),
      "expressions": (r'''command''',),
      "reason": "an argument list with no shell; the command is devkit's own `dev impeccable` (store._impeccable, a "
-               "verified engine)"},
+               "verified engine), detached in a process group of its own so the capture's bound stops what it starts"},
     {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
      "context": r'''  const final = path.join(folder, name);
 ''',
