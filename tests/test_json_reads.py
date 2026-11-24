@@ -30,8 +30,9 @@ import test_acceptance_hooks as acceptance  # noqa: E402  (the hook entry run as
 import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extension runs it)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import (audit, branches, bugs, canary, ciwatch, continuity, core, gates, language,  # noqa: E402
+from devkit import (audit, branches, bugs, canary, ciwatch, continuity, core, gates, gc, language,  # noqa: E402
                     lessonlint, lessons, mcp, policy, scope, shellparse, skillguard, state)
+from devkit.visual import compare as vcompare, map as vmap, report as vreport, store as vstore, walk as vwalk  # noqa: E402,E501
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
 # inside every reader's window (canary reads the last 400 KB of a transcript).
@@ -337,6 +338,49 @@ class TeamRecordReaderTests(TempFolder):
                                                          + ', "x": ' + deep(d) + "}"))
                 self.assertEqual([r["branch"] for r in branches._embargo_records(f)], ["fix/a"])
 
+    def test_a_deep_visual_record_is_unreadable_to_gc_which_then_prunes_nothing(self):
+        self.write("handoff/visual/acme/api/captures/VC-abcd.json", json.dumps({"id": "VC-abcd"}))
+        self.assertIsNotNone(gc._visual_in_use(self.records))
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                f = self.write("handoff/visual/acme/api/findings/VF-abcd.json",
+                               '{"id": "VF-abcd", "status": "open", "x": ' + deep(d) + "}")
+                self.assertIsNone(gc._visual_json(f))
+                self.assertIsNone(gc._visual_in_use(self.records))
+
+    def test_a_deep_capture_record_cannot_be_compared(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                self.write("handoff/visual/acme/api/captures/VC-abcd.json", '{"id": "VC-abcd", "x": ' + deep(d) + "}")
+                with self.assertRaises(vcompare.CompareError):
+                    vcompare._capture(self.records, "VC-abcd")
+
+    def test_a_deep_map_or_record_is_unreadable(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                f = self.write("handoff/visual/acme/api/map/current.json", '{"version": 1, "x": ' + deep(d) + "}")
+                with self.assertRaises(vmap.MapError):
+                    vmap._read(f)
+                self.assertIsNone(vmap._record(f))
+                self.assertIsNone(vreport._read(f))
+
+    def test_a_deep_store_record_is_skipped_in_lists_and_unreadable_alone(self):
+        self.write("handoff/visual/acme/api/captures/VC-good.json", json.dumps({"id": "VC-good"}))
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                self.write("handoff/visual/acme/api/captures/VC-deep.json", '{"id": "VC-deep", "x": ' + deep(d) + "}")
+                self.assertEqual([r["id"] for r in vstore._all("acme/api", "VC")], ["VC-good"])
+                with self.assertRaises(vstore.VisualError):
+                    vstore.load("acme/api", "VC-deep")
+
+    def test_a_deep_walk_record_is_skipped(self):
+        self.write("handoff/visual/acme/api/walks/VA-abcd/j1.json", json.dumps({"journey": "J:j1"}))
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                self.write("handoff/visual/acme/api/walks/VA-abcd/j2.json", '{"journey": "J:j2", "x": ' + deep(d)
+                           + "}")
+                self.assertEqual([r["journey"] for r in vwalk.load("acme/api", "VA-abcd")], ["J:j1"])
+
 
 class PreToolHookTests(acceptance.Sandbox):
     """The PreToolUse hook end to end: a command that runs node on a folder outside the repository whose package.json
@@ -414,7 +458,6 @@ CONFIG = "the developer's own devkit configuration, which dev config validates o
 # Exposed readers outside the files this guard came with; each leaves the list when it is routed through load_json.
 HELD = "OPEN: routed through core.load_json by the change that owns progress.py, hooks.py and codexlaunch.py"
 AUDIT = "OPEN: the team's published audit files; audit.py's readers move to core.load_json with the audit depth guard"
-SYNCED = "OPEN: visual records synced from teammates through the handoff repository"
 
 # (module below lib/devkit, enclosing function) -> (raw parses there, why). core.load_json is the one parse of JSON
 # that comes from outside; nothing else may call json.load, json.loads or json.JSONDecoder without an entry here.
@@ -484,7 +527,6 @@ REVIEWED = {
     ("fs", "_grep_ast"): (1, TOOL),
     ("fs", "_history"): (1, OWN),
     ("fs", "_rg_events"): (1, TOOL),
-    ("gc", "_visual_json"): (1, SYNCED),
     ("gitx", "_dependabot_update_run"): (1, TOOL),
     ("gitx", "_docker_contexts"): (1, TOOL + " (the Docker CLI's context store)"),
     ("gitx", "_only_skipped"): (1, TOOL),
@@ -547,23 +589,16 @@ REVIEWED = {
     ("updatecheck", "read_cache"): (1, OWN),
     ("visual.capture_checks", "_probe"): (1, OWN + " (a capture's description, which stays on the Mac that took it)"),
     ("visual.commands", "cmd_map_apply"): (1, COMMAND),
-    ("visual.compare", "_capture"): (1, SYNCED),
     ("visual.compare", "_description"): (1, OWN + " (a capture's description, which stays on the Mac that took it)"),
     ("visual.compare", "compare_pictures"): (1, TOOL),
     ("visual.docmap", "read"): (1, TOOL),
     ("visual.judge", "_draw"): (1, TOOL),
     ("visual.map", "_node_json"): (1, TOOL),
-    ("visual.map", "_read"): (1, SYNCED),
-    ("visual.map", "_record"): (1, SYNCED),
     ("visual.map", "run_crawler"): (1, TOOL),
     ("visual.report", "_description"): (1, OWN + " (a capture's description, which stays on the Mac that took it)"),
-    ("visual.report", "_read"): (1, SYNCED),
-    ("visual.store", "_all"): (1, SYNCED),
     ("visual.store", "_run_capture"): (1, TOOL),
     ("visual.store", "description"): (1, OWN + " (a capture's description, which stays on the Mac that took it)"),
-    ("visual.store", "load"): (1, SYNCED),
     ("visual.store", "open_audit"): (1, OWN),
-    ("visual.walk", "load"): (1, SYNCED),
     ("wizard", "_Wizard._interactive"): (1, COPY),
     ("wizard", "_Wizard.reopen"): (1, COPY),
     ("wizard", "_npm_package"): (1, COMMAND),

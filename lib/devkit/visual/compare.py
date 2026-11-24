@@ -56,6 +56,7 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
+from .. import core
 from . import noderun
 
 HERE = Path(__file__).resolve().parent
@@ -480,7 +481,7 @@ def _capture(records: Path, cid: str) -> dict:
     if not ID.match(cid or ""):
         raise CompareError(f"{cid!r} is not a capture id (VC-…).")
     try:
-        rec = json.loads((records / "captures" / f"{cid}.json").read_text(encoding="utf-8"))
+        rec = core.load_json((records / "captures" / f"{cid}.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise CompareError(f"No capture {cid} in {records / 'captures'}.") from None
     except ValueError:

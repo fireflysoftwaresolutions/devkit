@@ -31,6 +31,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from .. import core
 from .map import clean_record, mac_name
 
 ID = re.compile(r"^V[ACF]-[0-9a-z]{4,40}$")
@@ -88,7 +89,7 @@ ROOT = Path(__file__).resolve().parents[3]
 def _read(path: Path):
     # a record as read, without control or bidirectional characters, whatever a sync brought in (R71)
     try:
-        return clean_record(json.loads(Path(path).read_text(encoding="utf-8")))
+        return clean_record(core.load_json(Path(path).read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return None
 
