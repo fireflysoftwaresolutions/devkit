@@ -315,7 +315,8 @@ it, and `0` otherwise.
 Every generated pipeline:
 
 - runs on pull requests (merge requests), on pushes to the default branch, and on release tags in the policy's
-  format (`vYY.MM.PATCH` by default);
+  format (`vYY.MM.PATCH` by default), SemVer and PEP 440 pre-releases included (see
+  [Delivery › What the policy does](delivery.md#what-the-policy-does));
 - cancels runs that a newer push makes redundant (Bitbucket cannot);
 - caches dependencies and installs them from the lockfile when the project has one;
 - runs lint, the type checker the project configures, unit tests with a JUnit report, integration tests when the
