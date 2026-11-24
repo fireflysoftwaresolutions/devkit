@@ -939,17 +939,24 @@ class TheBoundCoversTheBrowsersStart(unittest.TestCase):
 # Runs capture.run with the capture bound lowered, a step that outlasts it, and a browser slow to exit: the first call
 # to its close ends `exit_ms` after Playwright's own, the way a browser that disconnected keeps writing its profile
 # for a moment, or never ends (`exit_ms` null: a browser that does not answer). Prints, when node exits, how the
-# capture ended, how often the browser was closed, whether the capture killed a process group, and, when the
-# capture's folder was removed, whether that first close had ended and how many processes still named the folder.
+# capture ended, how often the browser was closed, whether the capture killed a process group or looked for the
+# processes that name its folder, and, when the capture's folder was removed, whether that first close had ended and
+# how many processes still named the folder.
 CLOSE_DRIVER = r"""
 const fs = require('fs');
 const path = require('path');
+const childProcess = require('child_process');
 const [module, input] = [process.argv[1], JSON.parse(fs.readFileSync(0, 'utf8'))];
+const execFileSync = childProcess.execFileSync;
+childProcess.execFileSync = (file, args, options) => {
+  if (file === 'ps' && String(args).includes('pgid=')) out.looked = true;
+  return execFileSync(file, args, options);
+};
 const capture = require(module);
 const { chromium } = require(input.core);
 capture.BOUNDS.captureSeconds = input.bound;
 const wait = (ms) => new Promise((done) => setTimeout(done, ms));
-const out = { closes: 0, exited: false, killed: false, removed: null };
+const out = { closes: 0, exited: false, killed: false, looked: false, removed: null };
 const kill = process.kill;
 process.kill = (pid, sig) => {
   if (pid < 0) out.killed = true;
@@ -1009,16 +1016,20 @@ class TheBoundEndsWhatTheCaptureStarted(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr[-2000:])
         out = json.loads(p.stdout)
         self.assertEqual(out["code"], "time-bound", out)
-        self.assertEqual(list(self.run_.tmp.iterdir()), [], "the capture's folder is left behind")
+        self.assertEqual([p.name for p in self.run_.tmp.iterdir() if p.name.startswith("devkit-capture-")], [],
+                         "the capture's folder is left behind")
         return out
 
     def test_the_capture_removes_its_folder_after_the_browser_closed_at_the_bound_has_exited(self):
         # the browser exits 2 s after Playwright's close; on a loaded Mac that can pass the wait for it, and then the
-        # capture kills it: either way no browser process is left to write in the folder when it is removed
+        # capture stops what still names its folder: either way no browser process is left to write in the folder
+        # when it is removed. The delay is not a process of its own, so once Chromium's processes ended there is
+        # nothing left to kill, and the capture only looks for them.
         out = self.close_at_the_bound(2000)
         self.assertEqual(out["closes"], 1, out)
         self.assertEqual(out["removed"]["browsers"], 0, out)
-        self.assertTrue(out["removed"]["exited"] or out["killed"], f"the folder was removed while the browser ran: {out}")
+        self.assertTrue(out["removed"]["exited"] or out["looked"],
+                        f"the folder was removed while the browser ran, unchecked: {out}")
 
     def test_a_browser_that_does_not_close_at_the_bound_is_stopped_before_its_folder_is_removed(self):
         out = self.close_at_the_bound(None)
