@@ -3536,9 +3536,12 @@ class CalcTests(unittest.TestCase):
                 ("test/page.mjs", "2/2", "failed"),
                 ("test/slug.test.mjs::joins words with dashes", "2/2", "failed"),
                 ("test_calc.CalcTests.test_mul", "2/2", "failed")])
+            # a plain script fails by its exit code, never on an assertion: one that reaches a changed helper file
+            # cannot be proven, as the rerun proves only by an assertion failure
             rc, out, err = dev(r, "prove", "--json", "--runs", "1", "test/page.mjs")
-            self.assertEqual(rc, 0, out + err)
-            self.assertEqual([t["id"] for t in json.loads(out)["tests"]], ["test/page.mjs"])
+            self.assertEqual([("test/page.mjs", "cannot be proven: without the change it fails on exit code 1, not on "
+                                                "an assertion")],
+                             [(t["id"], t["verdict"]) for t in json.loads(out)["tests"]], out + err)
             # --runner leaves the node tests out: they are listed, and the plain script is no helper for that
             rc, out, err = dev(r, "prove", "--json", "--runs", "1", "--runner", "unittest")
             self.assertEqual(rc, 0, out + err)

@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 import unittest
 import venv
@@ -672,16 +673,21 @@ CROSS_NEW = "\n    def test_x(self):\n        self.assertEqual(make().extra(), 1
 class SupportRerunTests(unittest.TestCase):
     # a test whose run without the change undid test support (its own module rebuilt, or a rebuilt module or a test
     # helper file it imports) and failed there on an error, not on an assertion, runs once more with that support as
-    # it is now: a failure there proves the production change (here a function the change adds), a pass leaves it
-    # unproven, named by what it raised (a member only the support's edit gives)
-    def test_an_error_under_a_rebuild_proves_only_when_the_support_as_it_is_now_fails_too(self):
+    # it is now: only an assertion failure there proves the production change, as in the run without the change; an
+    # error there (here a function only the change adds) or a pass leaves it unproven, named by what it raised in the
+    # run without the change (a member only the support's edit gives)
+    def test_an_error_under_a_rebuild_proves_only_when_the_support_as_it_is_now_fails_on_an_assertion(self):
         before = fake_module("def make():\n    return [0]\n\n\n")
         after = before.replace("return [0]", "return {'k': 1}") + TEST_MUL + \
-            "\n    def test_key(self):\n        self.assertEqual(make()['k'], 1)\n"
+            "\n    def test_key(self):\n        self.assertEqual(make()['k'], 1)\n" \
+            "\n    def test_tripled(self):\n        k = make()['k']\n" \
+            "        self.assertEqual(getattr(calc, 'mul', lambda a, b: 0)(2, 3 * k), 6)\n"
         rc, rows, text = prove_rows(before, after)
         self.assertEqual([("test_calc.CalcTests.test_key", "cannot be proven: without the change it fails on "
                                                             "TypeError, not on an assertion"),
-                          ("test_calc.CalcTests.test_mul", "proves the change")], rows, text)
+                          ("test_calc.CalcTests.test_mul", "cannot be proven: without the change it fails on "
+                                                            "AttributeError, not on an assertion"),
+                          ("test_calc.CalcTests.test_tripled", "proves the change")], rows, text)
         self.assertEqual(0, rc, text)
 
     def test_a_test_that_imports_another_rebuilt_module_proves_only_by_an_assertion_or_the_rerun(self):
@@ -694,7 +700,8 @@ class SupportRerunTests(unittest.TestCase):
             rc, out, err = dev(r, "prove", "--json", "--runs", "1")
         self.assertEqual({"test_a.CalcTests.test_x": "cannot be proven: without the change it fails on AttributeError, "
                                                      "not on an assertion",
-                          "test_a.CalcTests.test_mul": "proves the change",
+                          "test_a.CalcTests.test_mul": "cannot be proven: without the change it fails on AttributeError, "
+                                                       "not on an assertion",
                           "test_b.BTests.test_add": "does not test the change"},
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
 
@@ -706,23 +713,26 @@ class SupportRerunTests(unittest.TestCase):
             rc, out, err = dev(r, "prove", "--json", "--runs", "1")
         self.assertEqual({"test_a.CalcTests.test_x": "cannot be proven: without the change it fails on AttributeError, "
                                                      "not on an assertion",
-                          "test_a.CalcTests.test_mul": "proves the change"},
+                          "test_a.CalcTests.test_mul": "cannot be proven: without the change it fails on AttributeError, "
+                                                       "not on an assertion"},
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
-        self.assertEqual(0, rc, out + err)
 
     @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
-    def test_a_javascript_error_under_a_rebuild_proves_when_the_module_as_it_is_now_fails_too(self):
+    def test_a_javascript_error_under_a_rebuild_proves_when_the_module_as_it_is_now_fails_on_an_assertion(self):
         head = NODE_HEAD + 'import * as util from "../src/util.mjs";\n\n'
-        before = head + "function h() {\n  return 1;\n}\n\n" + 'test("a", () => assert.equal(util.value(), 1));\n'
-        after = before.replace("return 1;", "return 2 - 1;") + \
-            'test("other", () => assert.equal(util.other(), 3));\n'
+        before = head + "function h() {\n  return null;\n}\n\n" + 'test("a", () => assert.equal(util.value(), 1));\n'
+        after = before.replace("return null;", "return { k: 1 };") + \
+            'test("other", () => assert.equal(util.other(), 3));\n' + \
+            'test("tripled", () => {\n  const k = h().k;\n  assert.equal((util.other ?? (() => 0))() * 3 * k, 9);\n});\n'
         with Env() as e:
             r = e.repo({"package.json": NODE_PACKAGE, "src/util.mjs": "export const value = () => 1;\n",
                         "test/util.test.mjs": before})
             edit(r, {"src/util.mjs": "export const value = () => 1;\nexport const other = () => 3;\n",
                      "test/util.test.mjs": after})
             rc, out, err = dev(r, "prove", "--json", "--runs", "1")
-        self.assertEqual({"test/util.test.mjs::other": "proves the change"},
+        self.assertEqual({"test/util.test.mjs::other": "cannot be proven: without the change it fails on TypeError, not "
+                                                       "on an assertion",
+                          "test/util.test.mjs::tripled": "proves the change"},
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
 
 
@@ -738,6 +748,54 @@ class CleanRerunTests(unittest.TestCase):
         rc, rows, text = prove_rows(before, after)
         self.assertEqual([("test_calc.CalcTests.test_x", "cannot be proven: without the change it fails on "
                                                          "AttributeError, not on an assertion")], rows, text)
+
+
+def leaving(where):
+    """A new test for fake_module's module: it makes the folder `where` (an expression), checks a member only the
+    helper's edit gives, then removes the folder. Without the change it stops before, so the folder stays."""
+    return ("\n    def test_x(self):\n        out = " + where + "\n        out.mkdir()\n"
+            "        self.assertEqual(make().extra(), 1)\n        shutil.rmtree(out)\n")
+
+
+LEFT_BASE = "import shutil\nimport tempfile\n" + fake_module(OLD_MAKE + "\n\n")
+# a new test that fails when its temp folder holds what an earlier run left, or is not each of TMPDIR, TEMP and TMP
+TEMP_TEST = """
+    def test_mul(self):
+        mark = Path(tempfile.gettempdir()) / 'mark'
+        self.assertFalse(mark.exists())
+        mark.write_text('x')
+        self.assertEqual({os.environ.get(k) for k in ('TMPDIR', 'TEMP', 'TMP')}, {tempfile.gettempdir()})
+        self.assertEqual(calc.mul(2, 3), 6)
+"""
+
+
+class LeftStateRerunTests(unittest.TestCase):
+    # the run once more with the support as it is now proves only by an assertion failure, as the run without the
+    # change does, and each run has a fresh temp folder of its own: a folder that the run without the change left
+    # outside the copy (in the temp folder, the home folder, the folder beside the copy) never proves a change the test
+    # does not reach
+    def test_a_folder_left_outside_the_copy_proves_nothing(self):
+        places = {"the temp folder": "Path(tempfile.gettempdir()) / 'left'", "the home folder": "Path.home() / '.left'",
+                  "the folder beside the copy": "Path(__file__).resolve().parents[2] / 'left'"}
+        for name, where in places.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.dict(os.environ, {"HOME": home, "TMPDIR": tmp}):
+                rc, rows, text = prove_rows(LEFT_BASE, LEFT_BASE.replace(OLD_MAKE, NEW_MAKE) + leaving(where))
+                self.assertEqual([("test_calc.CalcTests.test_x", "cannot be proven: without the change it fails on "
+                                                                 "AttributeError, not on an assertion")], rows, text)
+
+    # each run of a test (here twice with the change, once without) starts with an empty temp folder of its own,
+    # named by TMPDIR, TEMP and TMP, and removed with the run: what one run leaves there never reaches the next
+    def test_each_run_has_a_fresh_temp_folder_of_its_own(self):
+        before = with_tests()
+        after = "import os\nimport tempfile\n" + with_tests(TEMP_TEST)
+        with Env() as e, tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"TMPDIR": tmp}):
+            r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": before}))
+            edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "2")
+            self.assertEqual([], os.listdir(tmp))
+        self.assertEqual({"test_calc.CalcTests.test_mul": "proves the change"},
+                         {x["id"]: x["verdict"] for x in json.loads(out)["tests"]}, out + err)
 
 
 def locked_folder(lock, unlock):

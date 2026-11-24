@@ -2619,8 +2619,10 @@ def run_complete(runner, rc, completion=None, failures=()) -> bool:
 
 
 def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, stream=False, log=None,
-              timeout=None, isolated_imports=False) -> dict:
-    """Run one selection with one runner; stream the output when asked; parse the results.
+              timeout=None, isolated_imports=False, own_temp=False) -> dict:
+    """Run one selection with one runner; stream the output when asked; parse the results. `own_temp`: the tests get
+    a temp folder of their own (TMPDIR, TEMP and TMP), empty when the run starts and removed with it, so what one run
+    leaves there never reaches the next (dev test prove's runs).
 
     -> {runner, root, files, ids, related, all, argv, rc, secs, cases, count, passed, failed, skipped, expected_failure,
         failures, zero (the selection ran no test), complete (the selection finished), crash (no complete result),
@@ -2638,7 +2640,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
                 part_log = f"{log}.{k}" if log else None
                 parts.append(run_tests(top, runner, [f] if f in files else [],
                                        [i for i in ids if _id(i).split("::")[0] == f], env=env, stream=stream,
-                                       log=part_log, timeout=timeout))
+                                       log=part_log, timeout=timeout, own_temp=own_temp))
             return _merged_runs(parts, files, ids, log)
     if runner["name"] == "pytest" and not related and not _pytest_importlib(top, runner, env):
         # pytest's default import mode imports a test file by its name inside its packages: two test files of one
@@ -2654,7 +2656,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
         buckets = _pytest_buckets(top, runner, picked, [] if all_ else ids)
         if len(buckets) > 1:
             parts = [run_tests(top, runner, fs, i_s, env=env, stream=stream, log=f"{log}.{k}" if log else None,
-                               timeout=timeout) for k, (fs, i_s) in enumerate(buckets)]
+                               timeout=timeout, own_temp=own_temp) for k, (fs, i_s) in enumerate(buckets)]
             merged = _merged_runs(parts, [] if all_ else files, [] if all_ else ids, log)
             merged["all"] = bool(all_)
             return merged
@@ -2676,6 +2678,9 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     for k, v in cmd["env"].items():
         full_env[k] = v if k != "PYTHONPATH" or not (env or {}).get(k) else v + os.pathsep + env[k]
     full_env = identity.runner_env(full_env)  # the tests are the project's code: a dev command in them names nobody
+    if own_temp:
+        (work / "tmp").mkdir()
+        full_env.update(dict.fromkeys(("TMPDIR", "TEMP", "TMP"), str(work / "tmp")))
     import_receipt = None
     completion = unittest_completion(work) if runner["name"] == "unittest" else None
     if isolated_imports:
@@ -2741,7 +2746,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     if complete and completion:
         receipt = core.read_json(completion["path"], {})
         unattributed = max(0, receipt["skipped"] - sum(c["status"] == "skipped" for c in cases))
-    shutil.rmtree(work, ignore_errors=True)
+    _remove_tree(work)  # with the tests' own temp folder, whatever they locked in it
     if unit:
         # only the launcher's receipt proves an empty selection: loader text and nested summaries cannot
         zero = not cases and not unattributed and complete
@@ -5783,7 +5788,7 @@ def _prove(a, top, runners) -> int:
         answered, first = set(), {}  # selected names some case answered to; each runner's first result
         for n in range(runs):
             for r, sel, members in groups.values():
-                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env,
+                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env, own_temp=True,
                                 **({"isolated_imports": True} if isolated else {}))
                 imports_attested = imports_attested and res.get("imports_attested") is True
                 if res["zero"]:
@@ -5818,7 +5823,7 @@ def _prove(a, top, runners) -> int:
             bare = dict(env, **recorder_env, PYTHONPATH=os.pathsep.join(
                 [p for p in [env.get("PYTHONPATH") or os.environ.get("PYTHONPATH"), recorder] if p]))
             for r, sel, members in groups.values():
-                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=bare,
+                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=bare, own_temp=True,
                                 **({"isolated_imports": True} if isolated else {}))
                 imports_attested = imports_attested and res.get("imports_attested") is True
                 for key, c in place(res, members):
@@ -5844,7 +5849,7 @@ def _prove(a, top, runners) -> int:
                     recorder, records, recorder_env = _import_recorder(dest, top, f"imports-{n}")
                     one = dict(bare, **recorder_env, PYTHONPATH=os.pathsep.join(
                         [p for p in [env.get("PYTHONPATH") or os.environ.get("PYTHONPATH"), recorder] if p]))
-                    again = run_tests(dest, r, files=[] if ids else [f], ids=list(ids or []), env=one)
+                    again = run_tests(dest, r, files=[] if ids else [f], ids=list(ids or []), env=one, own_temp=True)
                     by_file[f] = _import_evidence(records, top, dest, undo, linked)
                     if not any(not c.get("load_failed") for c in again["cases"]):
                         # the file did not load this time (the first run left state that stops it): its record says
@@ -5868,12 +5873,15 @@ def _prove(a, top, runners) -> int:
                     if not mine:
                         continue
                     res = run_tests(dest, r, files=[f for f, _, ids in mine if not ids],
-                                    ids=[i for _, _, ids in mine for i in ids or ()], env=env,
+                                    ids=[i for _, _, ids in mine for i in ids or ()], env=env, own_temp=True,
                                     **({"isolated_imports": True} if isolated else {}))
+                    # only an assertion failure proves, as in the run without the change: an error there may come from
+                    # what an earlier run left outside the copy (a folder in the home folder or beside the copy)
                     for key, c in place(res, mine):
                         if key in rerun:
                             again_now[key] = again_now.get(key, False) or c["status"] == "failed" and \
-                                not c.get("load_failed") and not _stopped_at_import(c["message"])
+                                c.get("failure") == "assertion" and not c.get("load_failed") and \
+                                not _stopped_at_import(c["message"])
     finally:
         _remove_tree(dest)
         shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any
