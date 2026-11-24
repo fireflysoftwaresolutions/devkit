@@ -653,15 +653,22 @@ def install_packages(stacks, with_claude=True, extra=(), with_codex=False) -> in
 _BREW_RE = re.compile(r'^(brew|cask)\s+"([^"]+)"')
 
 
+# Seconds a try of `npm root -g` waits in the wizard, the packages step and `dev doctor`, whose screens show nothing new
+# while npm thinks: two tries stay under half a minute.
+NPM_ROOT_TIMEOUT = 15
+
+
 def _npm_root():
-    """npm's global folder, or None when npm is not installed. visual/npmroot.py asks `npm root -g`, again when npm
-    names no folder, and keeps a good answer for the process; npmroot.NoFolder when npm names none twice."""
-    return npmroot.global_root() if core.have("npm") else None
+    """npm's global folder, or None when npm is not installed. visual/npmroot.py asks `npm root -g`, NPM_ROOT_TIMEOUT
+    seconds a try, again when npm names no folder, and keeps a good answer for the process; npmroot.NoFolder when npm
+    names none twice."""
+    return npmroot.global_root(NPM_ROOT_TIMEOUT) if core.have("npm") else None
 
 
 def _npm_folder():
     """_npm_root, or None when npm names no folder: a package list then counts the packages only that folder shows as
-    missing, so the packages step installs them again, and its next look asks npm again."""
+    missing, so the packages step installs them again, and its next look asks npm again (the wizard's run keeps the
+    failed answer instead: _Wizard.npm_folder)."""
     try:
         return _npm_root()
     except npmroot.NoFolder:
@@ -712,11 +719,12 @@ def _npm_names(specs) -> set:
     return {npm_spec(s)[0] for s in specs}
 
 
-def _missing_npm(names) -> list:
+def _missing_npm(names, folder=None) -> list:
     """Lines of config/npm-globals.txt whose package is not installed, found by its name whatever its version (a
-    drifted pin is `dev doctor`'s to report): by the command it provides, else in npm's global directory."""
+    drifted pin is `dev doctor`'s to report): by the command it provides, else in npm's global directory, which
+    `folder` looks up (_npm_folder)."""
     names = list(names)
-    root = _npm_folder() if any(npm_spec(s)[0] not in _NPM_COMMANDS for s in names) else None
+    root = (folder or _npm_folder)() if any(npm_spec(s)[0] not in _NPM_COMMANDS for s in names) else None
     missing = []
     for spec in names:
         name = npm_spec(spec)[0]
@@ -791,11 +799,12 @@ def package_groups(stacks, hosts=(), clouds=(), frameworks=None) -> list:
     return list(dict.fromkeys(list(BASE_GROUPS) + selected + extra))
 
 
-def package_status(groups) -> list:
+def package_status(groups, folder=None) -> list:
     """[(group, [(name, kind, installed)])] for the Brewfile and npm packages of these groups. A package listed in
-    two groups counts in the first. Local checks only: Homebrew's Cellar, opt and Caskroom, npm's global folder."""
+    two groups counts in the first. Local checks only: Homebrew's Cellar, opt and Caskroom, npm's global folder, which
+    `folder` looks up (_npm_folder)."""
     prefix = Path(os.environ.get("HOMEBREW_PREFIX") or ("/opt/homebrew" if Path("/opt/homebrew").exists() else "/usr/local"))
-    npm_root, seen, out = _npm_folder(), set(), []
+    npm_root, seen, out = (folder or _npm_folder)(), set(), []
     for g in groups:
         pk = []
         for ln in filtered(DEVKIT_HOME / "Brewfile", {g}):
@@ -1571,6 +1580,7 @@ class _Wizard:
         self.d, self.a, self.saved_a, self.baseline, self.saved_file = None, None, None, None, False
         self.run_state = None  # SetupRun: the apply steps and where they stand (dev setup --resume reads it)
         self._pk = {}
+        self._no_npm_folder = False  # npm named no folder in this run: npm_folder does not ask again
         self.total = STEPS     # the steps of the path taken: "Step 2 of 3"
         self.extra = {}        # per step id: what to record with it when it is done
         self.by_id = {}
@@ -2113,8 +2123,21 @@ class _Wizard:
         k = (tuple(a["stacks"]), tuple(a["hosts"]), tuple(a["clouds"]),
              tuple(a["frameworks"]) if a.get("frameworks") is not None else None)
         if k not in self._pk:
-            self._pk = {k: package_status(package_groups(a["stacks"], a["hosts"], a["clouds"], a.get("frameworks")))}
+            self._pk = {k: package_status(package_groups(a["stacks"], a["hosts"], a["clouds"], a.get("frameworks")),
+                                          self.npm_folder)}
         return self._pk[k]
+
+    def npm_folder(self):
+        """npm's global folder for the package list and the npm step's check, or None. A failed answer is kept for the
+        rest of the run too, so a hung npm costs the run two short tries once, not two more on every change of
+        stacks; a new run, and `dev doctor`, ask again. visual/npmroot.py keeps a good answer for the process."""
+        if self._no_npm_folder:
+            return None
+        try:
+            return _npm_root()
+        except npmroot.NoFolder:
+            self._no_npm_folder = True
+            return None
 
     def package_counts(self) -> tuple:
         """(packages to install, packages already installed) for the answers."""
@@ -2651,9 +2674,8 @@ class _Wizard:
             return _exec(["brew", "bundle", "check", f"--file={bf}", "--no-upgrade"], None, self.log,
                          env=_child_env(), timeout=300) == 0
 
-    @staticmethod
-    def _npm_ok(plan) -> bool:
-        return not _missing_npm(plan["npm"])
+    def _npm_ok(self, plan) -> bool:
+        return not _missing_npm(plan["npm"], self.npm_folder)
 
     def _save(self, cl, i):
         cl.start(i)

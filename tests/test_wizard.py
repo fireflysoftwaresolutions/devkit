@@ -966,6 +966,59 @@ class NpmFolderTests(NpmStandIn, unittest.TestCase):
         self.assertEqual(self.calls(), ["root -g"] * 4)
 
 
+class NpmFolderLimitTests(NpmStandIn, unittest.TestCase):
+    # The wizard and dev doctor wait on npm root -g with nothing new on the screen, so each try gets their own limit
+    # (wizard.NPM_ROOT_TIMEOUT, 15 s; 1 s here) instead of npmroot's 30 s. The wizard keeps a failed answer for the rest
+    # of its run, so a hung npm costs a run two short tries, not two more on every change of stacks; a new run, and dev
+    # doctor, ask again. The stand-in npm's `slow` sleeps 5 s, past the limit. Each test runs in a process of its own,
+    # with a devkit home that pins axe-core for the node stack.
+    def setUp(self):
+        self.start_npm()
+        self.kit = self.top / "kit"
+        (self.kit / "config").mkdir(parents=True)
+        (self.kit / "Brewfile").write_text("")
+        (self.kit / "config" / "npm-globals.txt").write_text("# @node\naxe-core@4.14.0\n")
+
+    def run_wizard(self, body: str) -> dict:
+        # body sets `out`, with the limit at 1 s; calls() is how many times npm was asked so far
+        p = self.python("import time\nfrom devkit import wizard\n"
+                        f"wizard.DEVKIT_HOME = Path({str(self.kit)!r})\nwizard.NPM_ROOT_TIMEOUT = 1\n"
+                        f"calls = lambda: len(Path({str(self.log)!r}).read_text().splitlines())\n"
+                        + body + "\nprint(json.dumps(out))\n")
+        return json.loads(p.stdout)
+
+    def test_a_hung_npm_costs_a_wizard_run_two_short_tries_across_stack_changes_and_a_new_run_asks_again(self):
+        self.answers(*["slow"] * 4)
+        out = self.run_wizard(
+            "def run(*stacks):\n"
+            "    w = wizard._Wizard(None)\n"
+            "    looks = []\n"
+            "    for s in stacks:\n"
+            "        w.a = {'stacks': s, 'hosts': [], 'clouds': []}\n"
+            "        looks.append(w.packages())\n"
+            "    return looks + [w._npm_ok({'npm': ['axe-core@4.14.0']})]\n"
+            "start = time.monotonic()\n"
+            "first = run(['node'], ['node', 'python'])\n"
+            "out = {'first': first, 'seconds': time.monotonic() - start, 'asked': calls()}\n"
+            "run(['node'])\n"
+            "out['asked again'] = calls()\n")
+        missing = [["node", [["axe-core", "npm", False]]]]
+        self.assertEqual(out["first"], [missing, missing, False])
+        self.assertEqual((out["asked"], out["asked again"]), (2, 4))
+        self.assertLess(out["seconds"], 5)  # the stand-in sleeps 5 s: no try waited it out
+
+    def test_dev_doctor_gives_up_after_two_tries_of_its_limit(self):
+        self.answers("slow", "slow")
+        out = self.run_wizard("start = time.monotonic()\n"
+                              "out = {'row': wizard.npm_pin_check(['node']), 'seconds': time.monotonic() - start}\n")
+        self.assertEqual(out["row"], ["Toolchain", "pinned npm packages", False,
+                                      "npm root -g gave no folder (it did not answer in 1 s, twice), so devkit cannot "
+                                      "check the pinned packages",
+                                      "check that npm root -g prints a folder here, then run dev doctor again"])
+        self.assertEqual(len(self.calls()), 2)
+        self.assertLess(out["seconds"], 5)  # the stand-in sleeps 5 s: neither try waited it out
+
+
 class HomebrewAskTests(unittest.TestCase):
     """Homebrew asks "Do you want to proceed with the installation? [y/n]" by default; HOMEBREW_NO_ASK, the switch it
     documents, turns that off for every brew the setup runs."""
