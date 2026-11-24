@@ -287,8 +287,8 @@ dev commit -m "chore(release): 26.11.4" --why "…" --verified "…"
 `hotfix/` or `integration/` branch. They name the commits that changed it and the fragment to move the lines to, and
 a branch cut from an unmerged release branch is judged by its own commits only. They also fail, and `dev release`
 refuses, naming the file and line, on a fragment they cannot read or that is not UTF-8, a symbolic link in
-`changes/`, or a file there that is no `.md` fragment. `dev ci --run --dry-run` warns about each of these and still
-plans the steps.
+`changes/`, or a file there that is no `.md` fragment. `dev ci --run --dry-run` names the first of these problems it
+finds and still plans the steps.
 `changes/README.md` is no fragment: it explains the format and keeps the folder, which turns these checks on, after a
 release removed every fragment. A repository without a `changes/` folder keeps editing `CHANGELOG.md` as before.
 
