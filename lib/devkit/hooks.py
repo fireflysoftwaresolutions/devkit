@@ -1486,8 +1486,8 @@ def _config_change(agent: str):
         said = []
         if env_keys:
             env = ", ".join(f"env.{k}" for k in env_keys)
-            done = (f"refused {env} in {path}, and could not remove them ({unwritten}): remove them from the file"
-                    if unwritten else f"removed {env} from {path}")
+            done = (f"refused {env} in {tilde(path)}, and could not remove them ({unwritten}): remove them from the "
+                    f"file" if unwritten else f"removed {env} from {tilde(path)}")
             said.append(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings "
                         f"file sets them: {done}. Change devkit's configuration with dev config.")
         if off is not False:
@@ -1505,10 +1505,12 @@ def _config_change(agent: str):
 
 
 def _hooks_off_refusal(path: str, value: str) -> str:
-    """The refusal of a disableAllHooks that is not false in a project's or local settings (config_change)."""
-    return (f"disableAllHooks turns every hook off, devkit's too: refused disableAllHooks {value} in {tilde(path)}, "
-            f"left in the file as written. In that file, set it to false or remove it: a new session reads it, and "
-            f"would start without devkit's hooks.")
+    """The refusal of a disableAllHooks that is not false in a project's or local settings (config_change), its value
+    (JSON text) cut to policy.SHOWN characters."""
+    from .policy import shown
+    return (f"disableAllHooks turns every hook off, devkit's too: refused disableAllHooks {shown(value)} in "
+            f"{tilde(path)}, left in the file as written. In that file, set it to false or remove it: a new session "
+            f"reads it, and would start without devkit's hooks.")
 
 
 def _refuse_unchecked(path: str, project: bool, why: str):

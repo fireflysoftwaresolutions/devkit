@@ -406,6 +406,25 @@ class ProjectHooksOffTests(unittest.TestCase):
         self.assertFalse(t.is_alive(), "dev doctor waited on a FIFO")
         self.assertTrue(rows[0][2])
 
+    def test_a_false_elsewhere_in_a_file_python_cannot_parse_does_not_hide_a_top_level_true(self):
+        deep = "[" * 70 + "]" * 70
+        decoys = {"nested": '{"disableAllHooks": true, "d": %s, "x": {"disableAllHooks": false}}' % deep,
+                  "in a string": '{"disableAllHooks": true, "d": %s, "s": "\\u0022disableAllHooks\\u0022: false"}' % deep,
+                  "big integer": '{"disableAllHooks": true, "n": 1%s, "x": {"disableAllHooks": false}}' % ("0" * 5000)}
+        for name, text in decoys.items():
+            with self.subTest(name):
+                self.settings(self.repo, "settings.local.json", text)
+                _, _, ok, detail, _ = setup.project_hooks_check(self.repo)
+                self.assertFalse(ok)
+                self.assertIn("settings.local.json sets disableAllHooks to true", detail)
+
+    def test_a_long_value_is_cut_in_the_row(self):
+        self.settings(self.repo, "settings.json", '{"disableAllHooks": "' + "z" * 5000 + '"}')
+        _, _, ok, detail, _ = setup.project_hooks_check(self.repo)
+        self.assertFalse(ok)
+        self.assertIn('sets disableAllHooks to "' + "z" * 60, detail)
+        self.assertNotIn("z" * 81, detail)
+
     def test_hooks_left_on_pass(self):
         self.settings(self.repo, "settings.json", '{"disableAllHooks": false, "env": {"NODE_ENV": "test"}}')
         self.settings(self.repo, "settings.local.json", '{"note": "disableAllHooks: true is not set here"}')

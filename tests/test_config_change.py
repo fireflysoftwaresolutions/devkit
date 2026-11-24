@@ -22,6 +22,16 @@ from devkit import audit, core, hooks, policy, setup  # noqa: E402
 
 REAL_SPAWN = hooks._spawn
 
+# Text Python's parser refuses and Node's JSON.parse reads (nested deeper than core.JSON_MAX_DEPTH, an integer of more
+# digits than Python converts), each with a top-level disableAllHooks true and a false elsewhere that came last
+DEEP = "[" * 70 + "]" * 70
+DECOYS = {
+    "a nested false": '{"disableAllHooks": true, "d": %s, "x": {"disableAllHooks": false}}' % DEEP,
+    "a false inside a string": '{"disableAllHooks": true, "d": %s, "s": "\\u0022disableAllHooks\\u0022: false"}' % DEEP,
+    "a big integer and a nested false": ('{"disableAllHooks": true, "n": 1%s, "x": {"disableAllHooks": false}}'
+                                         % ("0" * 5000)),
+}
+
 
 def pin_release(home: Path, version: str, record_version: str = None) -> Path:
     # a pinned copy as dev install leaves it: a folder of the releases folder with its manifest, and install.json
@@ -492,6 +502,58 @@ class ConfigChangeTests(unittest.TestCase):
                    "file_path": str(f)}
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
             hooks.config_change("claude")  # false turns nothing off: no refusal
+
+    def project_change_text(self, name, source, text):
+        # the ConfigChange hook on a project's or local settings file written as `text` -> (exit code, stderr)
+        f = self.root / "repo" / ".claude" / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        payload = {"session_id": "s1", "hook_event_name": "ConfigChange", "source": source, "file_path": str(f)}
+        err = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stderr(err):
+            try:
+                hooks.config_change("claude")
+                code = 0
+            except SystemExit as e:
+                code = e.code
+        self.assertEqual(f.read_text(), text)  # a project's file devkit cannot parse is never rewritten
+        return code, err.getvalue()
+
+    def test_a_false_elsewhere_in_settings_python_cannot_parse_does_not_hide_a_top_level_true(self):
+        # Node reads the top-level true; devkit reads the text, where a false nested or inside a string came last
+        for name, text in DECOYS.items():
+            with self.subTest(name):
+                self.assertEqual(policy.hooks_off(text), "true")
+                code, err = self.project_change_text("settings.local.json", "local_settings", text)
+                self.assertEqual(code, 2)
+                self.assertIn("refused disableAllHooks true", err)
+
+    def test_the_text_of_settings_python_cannot_parse_is_read_failing_closed(self):
+        # any value but false, wherever it stands, reads as hooks off: a false alarm only for a file Python cannot parse
+        self.assertEqual(policy.hooks_off('{"d": %s, "x": {"disableAllHooks": true}}' % DEEP), "true")
+        self.assertEqual(policy.hooks_off('{"d": %s, "x": {"disableAllHooks": 0}, "disableAllHooks": false}' % DEEP),
+                         "0")
+        self.assertIsNone(policy.hooks_off('{"d": %s, "x": {"disableAllHooks": false}, "disableAllHooks": false}'
+                                           % DEEP))
+        self.assertIsNone(policy.hooks_off('{"d": %s, "note": "hooks stay on"}' % DEEP))
+
+    def test_a_long_disable_all_hooks_value_is_cut_where_it_is_printed(self):
+        long = "y" * 5000
+        cases = {"parsed": json.dumps({"disableAllHooks": long}),
+                 "unparsable": '{"disableAllHooks": "%s", "d": %s}' % (long, DEEP)}
+        for name, text in cases.items():
+            with self.subTest(name):
+                code, err = self.project_change_text("settings.json", "project_settings", text)
+                self.assertEqual(code, 2)
+                self.assertIn('refused disableAllHooks "' + "y" * 60, err)
+                self.assertNotIn("y" * 81, err)
+        self.assertLessEqual(len(policy.hooks_off(cases["unparsable"])), 80)
+
+    def test_a_devkit_variable_refused_in_project_settings_names_the_file_from_home(self):
+        code, err, _ = self.project_change("settings.json", "project_settings", {"env": {"DEVKIT_GUARD": "off"}})
+        self.assertEqual(code, 2)
+        self.assertIn("removed env.DEVKIT_GUARD from ~/repo/.claude/settings.json", err)
+        self.assertNotIn(str(self.root), err)
 
     def test_a_settings_file_that_is_json_null_is_refused_as_no_settings_object(self):
         self.settings.write_text("null")

@@ -236,23 +236,34 @@ DEVKIT_OFF = [
      "turns Codex hooks off"),
 ]
 
-_HOOKS_OFF_JSON = re.compile(r'"disableAllHooks"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\s]+)')
+SHOWN = 80  # how much of a value from a settings file a refusal or a doctor row prints
+
+# the string part is bounded: a longer one, or a value cut short, still reads as something other than false
+_HOOKS_OFF_JSON = re.compile(r'"disableAllHooks"\s*:\s*("(?:[^"\\]|\\.){0,%d}"|[^,}\s]{1,%d})' % (SHOWN, SHOWN))
+
+
+def shown(value: str, n: int = SHOWN) -> str:
+    """A value from a settings file as a refusal or a doctor row prints it: at most n characters, cut with an ellipsis."""
+    value = str(value)
+    return value if len(value) <= n else value[:n - 1] + "…"
 
 
 def hooks_off(text: str):
-    """What a Claude settings file's text sets disableAllHooks to, as JSON text, when it is anything but false, which
-    turns every hook off, devkit's included; None when it is false or not set. Text no JSON reader takes (cut short,
-    nested too deep) is read for the key, \\u escapes undone, its last value winning as in JSON.parse: Claude Code may
-    still read the file."""
+    """What a Claude settings file's text sets disableAllHooks to, as JSON text cut to SHOWN characters, when it is
+    anything but false, which turns every hook off, devkit's included; None when it is false or not set. Text Python's
+    parser refuses (cut short, nested deeper than core.JSON_MAX_DEPTH, an integer of more digits than it converts) is
+    read for the key, \\u escapes undone, and fails closed: Claude Code (Node's JSON.parse) may still read the file, and
+    the text cannot tell the top level from a nested object or a string, so any value but false, wherever it stands,
+    reads as hooks off. A false there (nested, or inside a string) cannot hide a top-level true; a false alarm is
+    possible only for a file Python cannot parse."""
     try:
         data = core.load_json(text or "")
     except ValueError:
-        found = _HOOKS_OFF_JSON.findall(_unescape(text))
-        return found[-1] if found and found[-1] != "false" else None
+        return next((shown(v) for v in _HOOKS_OFF_JSON.findall(_unescape(text)) if v != "false"), None)
     if not isinstance(data, dict):
         return None
     off = data.get("disableAllHooks", False)
-    return None if off is False else json.dumps(off)
+    return None if off is False else shown(json.dumps(off))
 
 
 # the DEVKIT_* keys a settings or shell startup file sets; DEV_ROOT counts with them: the handoff (policies, plans,

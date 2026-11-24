@@ -715,6 +715,25 @@ class HookInputTests(acceptance.Sandbox):
                 self.assertEqual((code, err), (0, ""))
         self.assertEqual(self.failures(), [])
 
+    def test_config_change_reads_a_top_level_true_beside_a_false_decoy_in_settings_python_cannot_parse(self):
+        local = self.repo / ".claude" / "settings.local.json"
+        local.parent.mkdir()
+        nested = "[" * 70 + "]" * 70
+        for name, text in {
+                "nested": '{"disableAllHooks": true, "d": %s, "x": {"disableAllHooks": false}}' % nested,
+                "in a string": '{"disableAllHooks": true, "d": %s, "s": "\\u0022disableAllHooks\\u0022: false"}' % nested,
+                "big integer": ('{"disableAllHooks": true, "n": 1%s, "x": {"disableAllHooks": false}}'
+                                % ("0" * 5000))}.items():
+            with self.subTest(name):
+                local.write_text(text)
+                code, _, err = self.dev_hook("config-change", json.dumps(
+                    {"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange",
+                     "source": "local_settings", "file_path": str(local), "cwd": str(self.repo)}))
+                self.assertEqual(code, 2)
+                self.assertIn("refused disableAllHooks true", err)
+                self.assertEqual(local.read_text(), text)
+        self.assertEqual(self.failures(), [])
+
     def session_start(self):
         """A Claude Code session start, its spawns recorded rather than started (acceptance.BOOT) -> its output."""
         out = self.hook("session-start", "claude", self.claude("SessionStart", source="startup",
