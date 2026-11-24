@@ -807,19 +807,21 @@ def sweep_gone(now: float | None = None) -> int:
     ledger, each open call whose agent process no longer runs ends like one still open when its session ends
     (_end_call, "session-gone"), so a state change that ran under it is audited (calls.text-use-without-result); a
     call past its time ends there as expired (progress.open_calls). A call whose agent pid another process took since
-    waits for its time. Then the contest flags the ended calls left behind go (_sweep_flags). Run at every session
-    start and by `dev sync`. -> the calls it ended"""
+    waits for its time. Then the contest flags the ended calls left behind go (_sweep_flags). The work is bounded by
+    the names listed, not the entries read: at most _ROOT_MAX in the ledger's root, and at most _LIST_MAX across the
+    session folders, each name listed taking one, dot-files and names that are no ledger entry too; the rest waits
+    for the next sweep. Run at every session start and by `dev sync`. -> the calls it ended"""
     from . import progress
-    reads = [_LIST_MAX]  # the names a sweep lists and the ledger entries it reads, shared by all its folders
-    sids = []
+    reads = [_LIST_MAX]  # the names a sweep lists in the session folders (every name, dot-files too), shared by all
+    sids, listed = [], 0
     try:  # a session folder that is a link is never one: nothing it points to is read or removed
-        with os.scandir(progress.CALLS) as found:
+        with os.scandir(progress.CALLS) as found:  # the root's names take none of `reads`: they have their own cap
             for d in found:
-                if reads[0] <= 0:
-                    break
-                reads[0] -= 1
+                listed += 1
                 if d.is_dir(follow_symlinks=False) and not d.name.startswith("."):
                     sids.append(d.name)
+                if listed >= _ROOT_MAX:
+                    break
     except OSError:
         return 0
     sids.sort()
@@ -849,7 +851,8 @@ def _sweep_start(n: int) -> int:
 FLAG_GRACE_S = 60  # seconds a sweep leaves a contest flag after it was made and after its call closed
 _TREE_DEPTH = 16  # levels of a folder planted at a flag's name the sweep removes; a deeper one stays
 _SWEEP_MAX = 1000  # flags a sweep looks at and entries of planted folders it removes, at most: the rest waits
-_LIST_MAX = 10 * _SWEEP_MAX  # names a sweep lists and ledger entries it reads, at most: the rest waits
+_LIST_MAX = 10 * _SWEEP_MAX  # names a sweep lists in the session folders (dot-files too), at most: the rest waits
+_ROOT_MAX = 10 * _SWEEP_MAX  # names a sweep lists in the ledger's root, at most: its own cap, apart from _LIST_MAX
 CLAIM_SLACK_S = 1  # seconds a call's audit claim may read as made before the call opened (file and clock times)
 
 

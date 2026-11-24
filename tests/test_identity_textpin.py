@@ -2157,6 +2157,44 @@ class LedgerFolderTests(TextPinCase):
             identity.sweep_gone()
         self.assertLessEqual(len(reads), 10)
 
+    # names flooded into the ledger's root (dot-files, anything but a session folder) never spend the budget the
+    # sweep has for the session folders' names, and the root's own listing stops at its cap
+    def test_a_flooded_ledger_root_never_spends_the_sweeps_budget(self):
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        (folder / "toolu_g.json").write_text(json.dumps({"ts": time.time(), "agent_pid": 1, "tool_use_id": "toolu_g",
+                                                         "session": "s1", "agent": "claude", "cmd": "git status"}))
+        for i in range(9):
+            (pg.CALLS / f".flood-{i}").write_text("")
+        with mock.patch.object(identity, "_LIST_MAX", 10), mock.patch.object(pg, "_pid_running", lambda pid: False):
+            self.assertEqual(identity.sweep_gone(), 1)
+        for i in range(9, 40):
+            (pg.CALLS / f".flood-{i}").write_text("")
+        real, listed = os.scandir, []
+
+        class Counted:
+            def __init__(self, it):
+                self.it = it
+
+            def __enter__(self):
+                self.it.__enter__()
+                return self
+
+            def __exit__(self, *a):
+                return self.it.__exit__(*a)
+
+            def __iter__(self):
+                for d in self.it:
+                    listed.append(d.name)
+                    yield d
+
+        def scandir(p=None):
+            got = real(p)
+            return Counted(got) if p == pg.CALLS else got
+        with mock.patch.object(identity, "_ROOT_MAX", 5), mock.patch.object(os, "scandir", scandir):
+            identity.sweep_gone()
+        self.assertEqual(len(listed), 5)
+
 
 if __name__ == "__main__":
     unittest.main()
