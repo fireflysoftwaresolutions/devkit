@@ -1922,7 +1922,10 @@ class CodexWorkdirLedgerTests(unittest.TestCase):
     # hook's cwd, so `ls > notes.txt` in a repository read as a write into a temporary folder: no write at all
     def test_a_codex_calls_workdir_decides_whether_its_redirect_writes(self):
         with TempState():
-            repo = str(Path(__file__).resolve().parents[1])  # a checkout, outside every temporary folder
+            # a folder outside every temporary folder, wherever this checkout sits: the verdict reads paths only,
+            # so the folder need not exist
+            repo = os.path.join(os.path.abspath(os.sep), "devkit-codex-workdir", "repo")
+            self.assertFalse(core.is_temp(repo))
             data = {"session_id": "s1", "tool_use_id": "call_1", "tool_name": "exec_command",
                     "cwd": tempfile.gettempdir(), "tool_input": {"cmd": "ls > notes.txt", "workdir": repo}}
             pg.call_opened("codex", data)
