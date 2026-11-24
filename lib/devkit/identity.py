@@ -660,14 +660,37 @@ def end_session(agent: str, sid: str):
 
 
 def _end_call(agent: str, sid: str, e: dict, ended: str):
-    """An open call that will get no result leaves the ledger, and its identity ends with it (note_closed)."""
+    """An open call that will get no result leaves the ledger, and its identity ends with it (note_closed). A contested
+    one is audited as such (audit_contested), as at its PostToolUse."""
     from . import progress
     tid = str(e.get("tool_use_id") or "")
     if not tid:
         return
+    mark = _contest_mark(e)  # while its ledger entry keeps a sweep off the flag
     progress.call_closed({"tool_use_id": tid, "session_id": sid, "hook_event_name": "SessionEnd"}, ended=ended)
+    audit_contested(e, sid, tid, mark or _contest_mark(e), ended)  # again: a contest made while it closed
     if e.get("pin_by"):
         note_closed(str(e.get("agent") or agent), sid, tid, entry=e, ended=ended)
+
+
+def audit_contested(entry: dict, sid: str, tid: str, mark: str, ended: str = ""):
+    """A stamped call that ends marked contested (`mark`, _contest_mark) is audited (calls.pin-contested, flagged): at
+    its PostToolUse (hooks._pin_audits), and when it ends with no result: its session ended, its time ran out, or its
+    agent went without its SessionEnd (`ended`, named in the record). The caller reads the mark before the call's
+    ledger entry goes, and again after."""
+    if not mark or not entry.get("pin"):
+        return
+    why = ("another process wrote this call's pin before its shell did" if mark == "pin"
+           else "this call is marked contested: its contest flag is in the ledger")
+    if ended:
+        why += f" (the call ended: {ended[:40]})"
+    try:
+        from . import audit
+        audit.record("calls.pin-contested", tid[:80] or "-", why, "flagged", tool_use_id=tid[:80],
+                     session=str(sid)[:80], host_agent=str(entry.get("agent") or ""),
+                     command=str(entry.get("cmd") or "")[:300])
+    except Exception:  # noqa: BLE001 - the audit never stops a call's end
+        pass
 
 
 def sweep_gone(now: float | None = None) -> int:
@@ -678,35 +701,42 @@ def sweep_gone(now: float | None = None) -> int:
     waits for its time. Then the contest flags the ended calls left behind go (_sweep_flags). Run at every session
     start and by `dev sync`. -> the calls it ended"""
     from . import progress
-    try:
-        sids = sorted(d.name for d in progress.CALLS.iterdir() if d.is_dir() and not d.name.startswith("."))
+    try:  # a session folder that is a link is never one: nothing it points to is read or removed
+        with os.scandir(progress.CALLS) as found:
+            sids = sorted(d.name for d in found if d.is_dir(follow_symlinks=False) and not d.name.startswith("."))
     except OSError:
         return 0
-    n = 0
+    n, budget = 0, [_SWEEP_MAX]
     for sid in sids:
         for e in progress.open_calls(sid, now):
             pid = e.get("agent_pid")
             if isinstance(pid, int) and not progress._pid_running(pid):
                 _end_call(str(e.get("agent") or ""), sid, e, "session-gone")
                 n += 1
-        _sweep_flags(progress.CALLS / sid, now)
+        if budget[0] > 0:
+            _sweep_flags(progress.CALLS / sid, now, budget)
     return n
 
 
 FLAG_GRACE_S = 60  # seconds a sweep leaves a contest flag after it was made and after its call closed
 _TREE_DEPTH = 16  # levels of a folder planted at a flag's name the sweep removes; a deeper one stays
+_SWEEP_MAX = 1000  # flags a sweep looks at and entries of planted folders it removes, at most: the rest waits
 
 
-def _sweep_flags(folder, now: float | None = None):
+def _sweep_flags(folder, now: float | None = None, budget: list | None = None):
     """The contest flags (contest_path) a session's ledger folder kept after their calls ended: each `.<tid>.contested`
     whose call has no ledger entry and no kept record goes, whatever is there: a file, a link (never followed), or a
     folder planted at its name, which the call's end cannot unlink (_drop_marks). A flag made, or whose call closed
     (the session's record of closed shell calls), less than FLAG_GRACE_S before `now` stays: the close's audit reads
     it right after the call's ledger entry goes (hooks._pin_audits), and the record is written before the entry goes.
+    A date more than FLAG_GRACE_S after `now` is no sign of a fresh flag (an mtime anyone can set): that flag goes.
     The folder is opened once, never through a link (O_NOFOLLOW), and every name in it is reached from that open
-    folder (dir_fd): a folder that is a link is left, and one swapped for a link meanwhile is never followed."""
+    folder (dir_fd): a folder that is a link is left, and one swapped for a link meanwhile is never followed. `budget`
+    ([count], shared by the sweep's folders): the flags looked at and planted entries removed, at most _SWEEP_MAX;
+    what is left past it waits for the next sweep."""
     import stat
     now = now or time.time()
+    budget = budget if budget is not None else [_SWEEP_MAX]
     suffix = ".contested"
     try:
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -716,7 +746,11 @@ def _sweep_flags(folder, now: float | None = None):
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             return
         names = [n for n in os.listdir(fd) if n.startswith(".") and n.endswith(suffix) and len(n) > len(suffix) + 1]
+        closed = unread = object()
         for name in names:
+            if budget[0] <= 0:
+                break
+            budget[0] -= 1
             tid = name[1:-len(suffix)]
             if _lexists_at(fd, f"{tid}.json") or _lexists_at(fd, f".{tid}.background"):
                 continue
@@ -724,11 +758,15 @@ def _sweep_flags(folder, now: float | None = None):
                 st = os.lstat(name, dir_fd=fd)
             except OSError:
                 continue
-            if now - st.st_mtime < FLAG_GRACE_S or _closed_lately(folder.name, tid, now):
+            if abs(now - st.st_mtime) < FLAG_GRACE_S:
+                continue
+            if closed is unread:  # read once per folder, and only when a flag is old enough to go
+                closed = _closed_lately(folder.name, now)
+            if closed is None or tid in closed:
                 continue
             try:
                 if stat.S_ISDIR(st.st_mode):
-                    _remove_tree_at(fd, name, _TREE_DEPTH)
+                    _remove_tree_at(fd, name, _TREE_DEPTH, budget)
                 else:
                     os.unlink(name, dir_fd=fd)
             except OSError:
@@ -739,14 +777,16 @@ def _sweep_flags(folder, now: float | None = None):
         os.close(fd)
 
 
-def _closed_lately(sid: str, tid: str, now: float) -> bool:
-    """Call `tid` closed less than FLAG_GRACE_S before `now` (the session's record of closed shell calls). True when
-    the record cannot be read as one: the sweep then leaves the flag."""
+def _closed_lately(sid: str, now: float):
+    """The calls that closed less than FLAG_GRACE_S before `now` (the session's record of closed shell calls; a close
+    dated more than FLAG_GRACE_S after `now` does not count), as a set of tool_use_ids. None when the record is there
+    and cannot be read as one (no read permission, broken, not a file, a link): the sweep then leaves every flag."""
     from . import progress
     try:
-        return any(c.get("tool_use_id") == tid for c in progress.shells_since(sid, now - FLAG_GRACE_S, now))
-    except Exception:  # noqa: BLE001 - a record of another shape: the flag stays, as for a call that just closed
-        return True
+        return {str(c.get("tool_use_id")) for c in progress.shells_since(sid, now - FLAG_GRACE_S, now, strict=True)
+                if (c.get("closed") or 0) < now + FLAG_GRACE_S}
+    except Exception:  # noqa: BLE001 - a record that cannot be read: the flags stay, as for calls that just closed
+        return None
 
 
 def _lexists_at(fd: int, name: str) -> bool:
@@ -759,11 +799,13 @@ def _lexists_at(fd: int, name: str) -> bool:
         return True  # it may be there: the sweep leaves the flag
 
 
-def _remove_tree_at(parent: int, name: str, depth: int):
+def _remove_tree_at(parent: int, name: str, depth: int, budget: list | None = None):
     """Remove folder `name` of the open folder `parent` and all it holds, never through a link: each folder is opened
     with O_NOFOLLOW from its parent's descriptor, and a link inside is unlinked, never followed. A tree deeper than
-    `depth` levels stays (OSError)."""
+    `depth` levels stays (OSError), and so does what is left once `budget` ([count]) is spent: each entry removed
+    takes one."""
     import stat
+    budget = budget if budget is not None else [_SWEEP_MAX]
     if depth <= 0:
         raise OSError(errno.ELOOP, "folder too deep", name)
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
@@ -771,8 +813,11 @@ def _remove_tree_at(parent: int, name: str, depth: int):
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             raise OSError(errno.ENOTDIR, "not a folder", name)
         for child in os.listdir(fd):
+            if budget[0] <= 0:
+                raise OSError(errno.EAGAIN, "the sweep's budget is spent", name)
+            budget[0] -= 1
             if stat.S_ISDIR(os.lstat(child, dir_fd=fd).st_mode):
-                _remove_tree_at(fd, child, depth - 1)
+                _remove_tree_at(fd, child, depth - 1, budget)
             else:
                 os.unlink(child, dir_fd=fd)
     finally:

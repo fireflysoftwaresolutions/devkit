@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import statistics
 import subprocess
 import sys
@@ -686,13 +687,36 @@ def call_closed(data: dict, ended: str = ""):
         pass
 
 
-def shells_since(sid: str, since: float, now: float | None = None) -> list:
+def shells_since(sid: str, since: float, now: float | None = None, strict: bool = False) -> list:
     """The session's shell calls that closed at `since` or later and had opened by `now`: [{caller, opened,
-    closed, reads}], the closed calls that overlap that window."""
+    closed, reads}], the closed calls that overlap that window. `strict`: a record that is there and cannot be read as
+    one raises ValueError (_read_shells) instead of reading as empty."""
     now = now or time.time()
-    doc = core.read_json(_shells_path(sid), {}) or {}
+    doc = _read_shells(sid) if strict else core.read_json(_shells_path(sid), {}) or {}
     return [c for c in doc.get("calls") or [] if isinstance(c, dict)
             and (c.get("closed") or 0) >= since and (c.get("opened") or 0) <= now]
+
+
+def _read_shells(sid: str) -> dict:
+    """The session's record of closed shell calls; {} when there is none. ValueError when it is there and cannot be
+    read as one: no read permission, broken JSON, another shape, or not a regular file (a folder, a FIFO, or a link,
+    which is never followed)."""
+    try:
+        fd = os.open(_shells_path(sid), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise ValueError(f"the record of closed shell calls cannot be opened: {type(e).__name__}") from e
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise ValueError("the record of closed shell calls is not a file")
+        try:
+            doc = json.loads(fh.read())
+        except (OSError, UnicodeDecodeError) as e:
+            raise ValueError(f"the record of closed shell calls cannot be read: {type(e).__name__}") from e
+    if not isinstance(doc, dict) or not isinstance(doc.get("calls", []), list):
+        raise ValueError("the record of closed shell calls has another shape")
+    return doc
 
 
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit")  # the tools that name the one file they change (tool_input.file_path)
@@ -827,31 +851,66 @@ def call_limit(entry: dict) -> float:
 def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> list:
     """The session's open calls, oldest first. An entry past its time (call_limit) got no result (the tool was cut
     off, another hook refused it, or the developer denied it): it is removed and audited as calls.unclosed, and its
-    call's identity ends (identity.note_closed). `closed_too`: with the entries of closed calls whose record could
-    not be written (call_closed), kept as later calls for the text pin until SHELL_KEEP after they closed, then removed
-    without an audit (their call ended, and its drop was audited)."""
+    call's identity ends (identity.note_closed; a contested one is audited, identity.audit_contested). `closed_too`:
+    with the entries of closed calls whose record could not be written (call_closed), kept as later calls for the text
+    pin until SHELL_KEEP after they closed, then removed without an audit (their call ended, and its drop was audited).
+    The folder is opened once, never through a link, and every entry is read and removed through it (dir_fd)."""
     now = now or time.time()
-    try:
-        files = [f for f in (CALLS / _safe_name(sid)).iterdir() if f.suffix == ".json" and not f.name.startswith(".")]
+    try:  # the session's folder, never through a link: what a link points to is never read or removed
+        fd = os.open(CALLS / _safe_name(sid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return []
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            return []
+        return _open_calls_at(fd, sid, now, closed_too)
+    except OSError:
+        return []
+    finally:
+        os.close(fd)
+
+
+def _read_entry_at(fd: int, name: str):
+    """Ledger entry `name` of the open session folder `fd`, never through a link; None when it cannot be read."""
+    try:
+        f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(f, "rb") as fh:
+            return json.loads(fh.read())
+    except (OSError, ValueError):
+        return None
+
+
+def _open_calls_at(fd: int, sid: str, now: float, closed_too: bool) -> list:
+    """open_calls in the session folder open at `fd`: every name is read and removed from that folder (dir_fd)."""
     out = []
-    for f in files:
-        e = core.read_json(f, None)
+    for name in os.listdir(fd):
+        if not name.endswith(".json") or name.startswith("."):
+            continue
+        e = _read_entry_at(fd, name)
         if not isinstance(e, dict):
             continue
         if e.get("closed"):
             if now - float(e.get("closed") or 0) > SHELL_KEEP:
                 try:
-                    f.unlink()
+                    os.unlink(name, dir_fd=fd)
                 except OSError:
                     pass
             elif closed_too:
                 out.append(e)
             continue
         if now - (e.get("ts") or 0) > call_limit(e):
+            mark = ""
+            if e.get("pin_by") and e.get("tool_use_id"):
+                try:  # its contest mark, read while its ledger entry keeps a sweep off the flag
+                    from . import identity
+                    mark = identity._contest_mark(e)
+                except Exception:  # noqa: BLE001 - no mark read: the end reads it again after the removal
+                    pass
             try:
-                f.unlink()
+                os.unlink(name, dir_fd=fd)
             except OSError:
                 continue  # another process removed it first, and audits it
             _audit("calls.unclosed", e.get("caller") or "?", f"{str(e.get('cmd') or '')[:200]} (no result within "
@@ -861,6 +920,8 @@ def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> 
                 # text call that a state change ran under (one the developer denied never gets a result) is audited
                 try:
                     from . import identity
+                    identity.audit_contested(e, str(sid), str(e["tool_use_id"]), mark or identity._contest_mark(e),
+                                             "expired")
                     identity.note_closed(str(e.get("agent") or ""), str(sid), str(e["tool_use_id"]), entry=e,
                                          ended="expired")
                 except Exception:  # noqa: BLE001 - the ledger read goes on; the audit above records the expiry
