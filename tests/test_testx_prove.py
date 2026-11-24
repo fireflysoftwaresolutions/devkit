@@ -382,7 +382,86 @@ class RebuildRuleTests(unittest.TestCase):
                 self.assertEqual({"text": None, "first": first}, rebuilt(f, before, after))
 
 
+class FailureKindTests(unittest.TestCase):
+    # a failure without the change proves a rebuilt module's test only when it is an assertion failure, so each
+    # runner's failed case says which it is: "assertion", or the name of what it raised
+    def test_each_runner_says_whether_a_failure_is_an_assertion_or_names_what_was_raised(self):
+        top = "/w"
+        rn = {"name": "unittest", "root": ".", "start": "tests"}
+        out = ("test_a (test_x.T.test_a) ... FAIL\ntest_b (test_x.T.test_b) ... ERROR\n\n" + "=" * 70 +
+               "\nFAIL: test_a (test_x.T.test_a)\n" + "-" * 70 + "\nTraceback (most recent call last):\n"
+               '  File "/w/tests/test_x.py", line 5, in test_a\n    self.assertEqual(1, 2)\n'
+               "AssertionError: 1 != 2\n\n" + "=" * 70 + "\nERROR: test_b (test_x.T.test_b)\n" + "-" * 70 +
+               '\nTraceback (most recent call last):\n  File "/w/tests/test_x.py", line 8, in test_b\n'
+               "    make()['k']\nTypeError: list indices must be integers or slices, not str\n\n" + "-" * 70 +
+               "\nRan 2 tests in 0.001s\n\nFAILED (failures=1, errors=1)\n")
+        self.assertEqual({"test_x.T.test_a": "assertion", "test_x.T.test_b": "TypeError"},
+                         {c["id"]: c.get("failure") for c in testx.parse_unittest(out, top, rn)})
+        node = ('<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n'
+                '<testcase name="value" classname="test" file="/w/test/a.test.mjs">\n'
+                '<failure type="testCodeFailure" message="Expected values to be strictly equal:&#10;&#10;0 !== 1">\n'
+                "[Error [ERR_TEST_FAILURE]: Expected values to be strictly equal:\n\n0 !== 1\n] {\n"
+                "  code: 'ERR_TEST_FAILURE',\n  failureType: 'testCodeFailure',\n"
+                "  cause: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  0 !== 1\n"
+                "  \n      at TestContext.&lt;anonymous> (file:///w/test/a.test.mjs:5:29) {\n"
+                "    code: 'ERR_ASSERTION'\n  }\n}\n</failure>\n</testcase>\n"
+                '<testcase name="get" classname="test" file="/w/test/a.test.mjs">\n'
+                '<failure type="testCodeFailure" message="make(...).get is not a function">\n'
+                "[Error [ERR_TEST_FAILURE]: make(...).get is not a function] {\n  code: 'ERR_TEST_FAILURE',\n"
+                "  failureType: 'testCodeFailure',\n  cause: TypeError [Error]: make(...).get is not a function\n"
+                "      at TestContext.&lt;anonymous> (file:///w/test/a.test.mjs:6:41)\n}\n</failure>\n</testcase>\n"
+                "</testsuites>\n")
+        self.assertEqual({"test/a.test.mjs::value": "assertion", "test/a.test.mjs::get": "TypeError"},
+                         {c["id"]: c.get("failure") for c in testx.parse_node_junit(node, top, top)})
+        jest = {"testResults": [{"name": "/w/src/a.test.ts", "assertionResults": [
+            {"fullName": f"t{i}", "status": "failed", "failureMessages": [m]} for i, m in enumerate((
+                "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 1\nReceived: 0",
+                "AssertionError: expected 0 to be 1 // Object.is equality",
+                "TypeError: make(...).get is not a function\n    at Object.<anonymous> (/w/src/a.test.ts:6:20)"))]}]}
+        self.assertEqual({"src/a.test.ts::t0": "assertion", "src/a.test.ts::t1": "assertion",
+                          "src/a.test.ts::t2": "TypeError"},
+                         {c["id"]: c.get("failure") for c in testx.parse_jest_json(json.dumps(jest), top)})
+        pytest = ('<testsuites><testsuite name="pytest">'
+                  '<testcase classname="tests.test_x" name="test_a"><failure message="assert 0 == 1">x</failure>'
+                  '</testcase><testcase classname="tests.test_x" name="test_b"><failure message="TypeError: '
+                  "'list' object is not callable\">x</failure></testcase>"
+                  '<testcase classname="tests.test_x" name="test_c"><failure message="json.decoder.JSONDecodeError: '
+                  'Expecting value: line 1 column 1 (char 0)">x</failure></testcase></testsuite></testsuites>')
+        self.assertEqual(["assertion", "TypeError", "json.decoder.JSONDecodeError"],
+                         [c.get("failure") for c in testx.parse_junit(pytest, top, top, "pytest")])
+
+
 class RebuildVerdictTests(unittest.TestCase):
+    # under a rebuild, a failure without the change proves only when it is an assertion failure: one that raises
+    # anything else (a TypeError on a member only the helper edit gives) cannot be proven, named by what it raised. A
+    # helper fix that starts to use a module both sides import is proven by its assertion
+    def test_under_a_rebuild_only_an_assertion_failure_proves(self):
+        before = fake_module("import json\n\n\ndef make():\n    return [0]\n\n\ndef h(x):\n    return str(x)\n\n\n")
+        after = before.replace("return [0]", "return {'k': 1, 0: 1}").replace("return str(x)", "return json.dumps(x)") + \
+            "\n    def test_key(self):\n        self.assertEqual(make()['k'], 1)\n" \
+            "\n    def test_value(self):\n        self.assertEqual(make()[0], 1)\n" \
+            "\n    def test_quoted(self):\n        self.assertEqual(h('a'), '\"a\"')\n"
+        rc, rows, text = prove_rows(before, after)
+        self.assertEqual([("test_calc.CalcTests.test_key", "cannot be proven: without the change it fails on "
+                                                            "TypeError, not on an assertion"),
+                          ("test_calc.CalcTests.test_quoted", "proves the change"),
+                          ("test_calc.CalcTests.test_value", "proves the change")], rows, text)
+        self.assertEqual(0, rc, text)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_under_a_rebuild_a_javascript_error_is_no_proof(self):
+        before = NODE_HEAD + "function make() {\n  return { n: 0 };\n}\n\n" + 'test("a", () => assert.equal(1, 1));\n'
+        after = before.replace("return { n: 0 };", "return { n: 1, get: () => 1 };") + \
+            'test("value", () => assert.equal(make().n, 1));\ntest("get", () => assert.equal(make().get(), 1));\n'
+        with Env() as e:
+            r = e.repo({"package.json": NODE_PACKAGE, "test/util.test.mjs": before})
+            edit(r, {"test/util.test.mjs": after})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+        self.assertEqual({"test/util.test.mjs::get": "cannot be proven: without the change it fails on TypeError, not "
+                                                     "on an assertion",
+                          "test/util.test.mjs::value": "proves the change"},
+                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
+
     # a module whose change outside its helpers' bodies stays (here a helper the change adds) runs as it is now: a
     # test that fails without the production change proves it, and one that passes cannot be proven, named by the
     # module's first difference, never "does not test the change"
@@ -403,17 +482,6 @@ class RebuildVerdictTests(unittest.TestCase):
             rc, out, err = dev(r, "prove", "--runs", "1")
         self.assertRegex(out, r"keeps a change outside its helpers' bodies[^\n]*:\n\s+tests/test_calc.py\s+"
                               r"test_calc.CalcTests.test_pair  · an added helper `pair` \(line 9\)")
-
-
-class ImportedNameTests(unittest.TestCase):
-    # a name an import binds in the rebuilt module means the same with and without the change: a test that names it
-    # still proves a helper fix that starts to use it (str(x) to json.dumps(x), json imported on both sides)
-    def test_a_helper_fix_that_reads_a_module_both_sides_import_proves(self):
-        before = fake_module("import json\n\n\ndef h(x):\n    return str(x)\n\n\n")
-        after = before.replace("return str(x)", "return json.dumps(x)") + \
-            "\n    def test_h(self):\n        self.assertEqual(json.loads(h('a')), 'a')\n"
-        rc, rows, text = prove_rows(before, after)
-        self.assertEqual([("test_calc.CalcTests.test_h", "proves the change")], rows, text)
 
 
 class SameShapeGroupTests(unittest.TestCase):

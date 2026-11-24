@@ -218,7 +218,7 @@ never touched):
 
 1. **It fails without your change.** devkit restores the base version of every production file you changed (the
    merge-base with `origin/<default>`, or `--since REF`) and runs the test. A changed test helper or fixture counts
-   as part of the change and is restored too. A changed Python or JavaScript test module follows these rules, so the
+   as part of the change and is restored too. A changed Python or JavaScript test module follows three rules, so the
    run without your change never mixes code of the base with code of your change:
 
    - **Only helper bodies changed: the module is rebuilt.** When the module's code outside its tests (helpers,
@@ -229,6 +229,12 @@ never touched):
      beside its setter, or in one of the `beforeEach` hooks of two `describe` blocks, counts. Comments, layout, and
      docstrings are not changes. A fix that lives only in a helper is proven this way, and a test that still passes
      is reported as "does not test the change."
+   - **In a rebuilt module, only an assertion failure proves.** A test proves your change only when it fails without
+     it on an assertion: unittest's FAIL (not ERROR), pytest's `assert` or `AssertionError`, a `node:assert` error,
+     or a jest, vitest, or Playwright `expect`. Any other error, such as `NameError`, `AttributeError`, `TypeError`,
+     `KeyError`, or `ReferenceError`, is "cannot be proven: without the change it fails on TypeError, not on an
+     assertion." Such a test reached a name or member that only your helper edit gives, which says nothing about
+     what it asserts.
    - **Any other change keeps the module as it is now.** When your change adds, removes, or edits anything else
      outside the tests (a helper, a helper's decorators or parameters, an import, a class, a statement, a
      `describe`), the run without your change restores only the other files. A test that fails then proves your

@@ -1921,6 +1921,24 @@ def _case(id_, file, line, status, message="", secs=0.0, name=""):
             "secs": round(float(secs or 0), 3), "name": name or id_}
 
 
+# an assertion failure as each runner words it: an AssertionError (Python, node:assert, chai and vitest), pytest's
+# rewritten assert, an expect of jest or Playwright (a timed-out one too), JUnit 5's AssertionFailedError
+_ASSERTION = re.compile(r"(?:E\s+)?(?:(?:[\w.]+\.)?(?:AssertionError|AssertionFailedError|JestAssertionError)\b|"
+                        r"assert\b|(?:Error:\s*)?(?:Timed out \d+ms waiting for )?expect\()")
+_RAISED = re.compile(r"(?:E\s+)?([A-Za-z_$][\w$.]*?)(?:\s*\[[^\]\n]*\])?:(?:\s|$)")
+
+
+def _failure_of(message, error=False) -> str:
+    """What a failed case's message says it failed on (a case's "failure"): "assertion" for an assertion failure, else
+    the name of what it raised as the message opens with it (TypeError, json.decoder.JSONDecodeError), or "an error"
+    when it names none. `error`: the runner reported an error rather than a failure, which is never an assertion."""
+    msg = ui.ANSI_RE.sub("", message or "").strip()
+    if _ASSERTION.match(msg) and not error:
+        return "assertion"
+    m = _RAISED.match(msg)
+    return m.group(1) if m and m.group(1) not in ("AssertionError", "assert") else "an error"
+
+
 def _relto(top, path) -> str:
     if not path:
         return ""
@@ -2034,6 +2052,8 @@ def parse_junit(text, top, base, runner) -> list:
         if bad is not None and not msg:
             msg = _first_line(body)
         out.append(_case(id_, file, line, status, msg, tc.get("time") or 0, name))
+        if bad is not None:
+            out[-1]["failure"] = _failure_of(msg, error=bad.tag == "error")
     return out
 
 
@@ -2058,6 +2078,8 @@ def parse_playwright_junit(text, top, base, runner) -> list:
         msg = _first_line(bad.get("message") or body) if bad is not None else ""
         out.append(_case(f"{file}::{name}", file, int(hits[-1]) if hits else None, status, msg,
                          tc.get("time") or 0, name))
+        if bad is not None:
+            out[-1]["failure"] = _failure_of(msg)
     return out
 
 
@@ -2079,7 +2101,7 @@ def parse_node_junit(text, top, base, only="") -> list:
         bad = tc.find("failure")
         bad = bad if bad is not None else tc.find("error")
         status = "failed" if bad is not None else "skipped" if tc.find("skipped") is not None else "passed"
-        msg, line = "", None
+        msg, line, failure = "", None, ""
         if bad is not None:  # node ends an assertion's first line in ':' and gives the values (or a diff) after it
             lines = [ln.strip() for ln in (bad.get("message") or bad.text or "").splitlines() if ln.strip()]
             vals = [ln for ln in lines[1:] if ln != "+ actual - expected"][:2] if lines[:1] and \
@@ -2087,10 +2109,17 @@ def parse_node_junit(text, top, base, only="") -> list:
             msg = " ".join(lines[:1] + vals)
             code = re.search(r"\bexitCode: (\d+)", bad.text or "") if whole else None
             msg = f"the script exited {code.group(1)}" if code else msg
+            # the message leaves out what the test raised; the failure's text names it as its cause
+            cause = re.search(r"\bcause: ([A-Za-z_$][\w$.]*)", bad.text or "")
+            failure = (f"exit code {code.group(1)}" if code else
+                       ("assertion" if cause.group(1) == "AssertionError" else cause.group(1)) if cause else
+                       _failure_of(msg))
             m = re.search(re.escape(fabs) + r":(\d+):\d+", bad.text or "") if fabs else None
             line = int(m.group(1)) if m else None
         out.append(_case(file if whole else f"{file}::{full}", file, line, status, msg, tc.get("time") or 0,
                          file if whole else full))
+        if bad is not None:
+            out[-1]["failure"] = failure
 
     def walk(el, path):
         for ch in el:
@@ -2178,6 +2207,7 @@ def parse_jest_json(text, top) -> list:
         if not ars and tr.get("status") == "failed":
             out.append(_case(file, file, None, "failed", _first_line(tr.get("message") or tr.get("failureMessage")),
                              0, file))
+            out[-1]["failure"] = _failure_of(out[-1]["message"])
         for ar in ars:
             full = ar.get("fullName") or " ".join((ar.get("ancestorTitles") or []) + [ar.get("title") or ""])
             msgs = "\n".join(ar.get("failureMessages") or [])
@@ -2185,6 +2215,8 @@ def parse_jest_json(text, top) -> list:
             line = int(m.group(1)) if m else ((ar.get("location") or {}).get("line"))
             out.append(_case(f"{file}::{full}", file, line, _JEST_STATUS.get(ar.get("status"), "failed"),
                              _first_line(msgs), (ar.get("duration") or 0) / 1000.0, full))
+            if out[-1]["status"] == "failed":
+                out[-1]["failure"] = _failure_of(out[-1]["message"])
     return out
 
 
@@ -2303,6 +2335,9 @@ def parse_unittest(text, top, runner, names=()) -> list:
             _first_line("\n".join(b for b in body if not b.startswith("Traceback")))
         prev = cases.get(id_)
         cases[id_] = _case(id_, file or (prev or {}).get("file", ""), line, "failed", msg, 0, m.group(2))
+        # FAIL: the test's assertion failed; ERROR: it raised something else
+        cases[id_]["failure"] = ("assertion" if m.group(1) == "FAIL" else "an unexpected success"
+                                 if m.group(1) == "UNEXPECTED SUCCESS" else _failure_of(msg, error=True))
         # The innermost traceback may be production code. Keep the selected test's origin separate so proof
         # attribution does not replace its own error with another failure from the same test module.
         cases[id_]["test_file"] = _ut_file(top, runner, id_)
@@ -4678,13 +4713,15 @@ _NOT_FROM_COPY = "cannot be proven: imported none of the changed files from the 
 # a test of a module that keeps its change (_rebuild_helpers) that passes without the change: + the module's first
 # difference outside its helpers' bodies
 _HELPERS_KEPT = "cannot be proven: its module keeps a change outside its helpers' bodies: "
+# a test of a rebuilt module that fails without the change on anything but an assertion: + what it raised
+_NOT_ASSERTION = "cannot be proven: without the change it fails on "
 
 _NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD,
                _NOT_FROM_COPY)
 
 
 def _not_proven(verdict: str) -> bool:
-    return verdict in _NOT_PROVEN or verdict.startswith((_CHECKOUT_IMPORT, _HELPERS_KEPT))
+    return verdict in _NOT_PROVEN or verdict.startswith((_CHECKOUT_IMPORT, _HELPERS_KEPT, _NOT_ASSERTION))
 
 
 # The run without the change records which files each Python process ran: this sitecustomize, first on the copy's
@@ -5438,13 +5475,15 @@ def _prove(a, top, runners) -> int:
                                 **({"isolated_imports": True} if isolated else {}))
                 imports_attested = imports_attested and res.get("imports_attested") is True
                 for key, c in place(res, members):
-                    without[key] = (c["status"], c["message"], "load" if c.get("load_failed") else "")
+                    without[key] = (c["status"], c["message"], "load" if c.get("load_failed") else "",
+                                    c.get("failure") or "an error its runner did not name")
                 # a test with no result of its own: only a failure that stopped it before it ran says what happened
                 # to it; else it did not run, as far as anyone can tell
                 for f, units, ids in members:
                     for key in [k for k in found if k[0] == f and k not in without]:
                         cover = _cover(res, f, key[1])
-                        without[key] = ("failed", _tail_line(cover[1]), cover[0]) if cover else ("not run", "", "")
+                        without[key] = ("failed", _tail_line(cover[1]), cover[0], "") if cover else \
+                            ("not run", "", "", "")
             evidence = _import_evidence(records, top, dest, undo, linked)
             # a Python child that skipped the recorder leaves the run's record incomplete: run each test file again
             # with a record of its own, so only the files that start such a child lose their proof. Only a Python
@@ -5473,7 +5512,7 @@ def _prove(a, top, runners) -> int:
     rows = []
     py_undo = any(f.endswith(".py") for f in undo)
     for key, rec in sorted(found.items()):
-        st, msg, stop = without.get(key, ("not run", "", ""))
+        st, msg, stop, failure = without.get(key, ("not run", "", "", ""))
         p = rec["passes"]
         # Neither a skipped assertion nor an expected failure is a passing run of the changed behavior.
         inconclusive = rec.get("skips", 0) + rec.get("expected_failures", 0) == runs
@@ -5498,6 +5537,10 @@ def _prove(a, top, runners) -> int:
                    _SETUP_STOPPED if st == "failed" and stop == "setup" else
                    # a failure proves the change only when the changed code it ran came from the copy
                    _NOT_FROM_COPY if st == "failed" and py and py_undo and not mine["from_copy"] else
+                   # a rebuilt module's test proves the change only by an assertion failure: anything else it raises
+                   # (a name or member only the change's helper edit gives) says nothing about what it asserts
+                   f"{_NOT_ASSERTION}{failure}, not on an assertion" if st == "failed" and rec["file"] in inner and
+                   failure != "assertion" else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
@@ -5571,6 +5614,8 @@ def _prove(a, top, runners) -> int:
                 (_HELPERS_KEPT, ui.WARN, "cannot be proven: their module keeps a change outside its helpers' bodies "
                                          "(named below), so the run without the change ran it as it is now, and they "
                                          "pass:"),
+                (_NOT_ASSERTION, ui.WARN, "cannot be proven: their module came back as the base module with the tests "
+                                          "now, and without the change they fail on an error, not on an assertion:"),
                 (_NOT_FROM_COPY, ui.WARN, "cannot be proven: the run without the change imported none of the changed "
                                           "Python files from the copy, so nothing shows that it ran the code without "
                                           "the change:"),
@@ -5585,7 +5630,7 @@ def _prove(a, top, runners) -> int:
                          f"where the change stays ({how}):"),) + sections
     for verdict, mark, title in sections:
         mine = [x for x in rows if x["verdict"] == verdict or
-                verdict == _HELPERS_KEPT and x["verdict"].startswith(verdict)]
+                verdict in (_HELPERS_KEPT, _NOT_ASSERTION) and x["verdict"].startswith(verdict)]
         if not mine:
             continue
         print(f"{mark} {title}")
