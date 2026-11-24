@@ -3661,8 +3661,34 @@ def _js_mask(text: str, strings: bool = True) -> str:
     return "".join(out)
 
 
+_JS_BRACKET = re.compile(r"[()\[\]{}]")
+
+
+@functools.lru_cache(maxsize=16)
+def _js_closes(masked: str, typed: bool = True) -> dict:
+    """{index of each opening bracket of masked text: the index _js_close gives for it}, in one pass, kept for the last
+    texts read, so a reader that asks for many nested brackets reads the text once. A closing bracket that does not
+    match the innermost open one ends every bracket open there, as a scan from each of them ends at it. Not `typed`:
+    any closing bracket closes the innermost open one, as a count of the depth has it (_js_statement_end)."""
+    pairs, out, stack = {"(": ")", "[": "]", "{": "}"}, {}, []
+    for m in _JS_BRACKET.finditer(masked):
+        k, c = m.start(), m.group()
+        if c in pairs:
+            stack.append((pairs[c], k))
+        elif stack:
+            want, i = stack.pop()
+            out[i] = k
+            if typed and want != c:
+                out.update((j, k) for _, j in stack)
+                stack.clear()
+    out.update((j, len(masked) - 1) for _, j in stack)
+    return out
+
+
 def _js_close(masked: str, at: int) -> int:
     """The index of the bracket closing the one at `at` in masked text (_js_mask), or the end of the text."""
+    if 0 <= at < len(masked) and masked[at] in "([{":
+        return _js_closes(masked)[at]
     pairs, stack = {"(": ")", "[": "]", "{": "}"}, []
     for k in range(at, len(masked)):
         c = masked[k]
@@ -3676,28 +3702,37 @@ def _js_close(masked: str, at: int) -> int:
     return len(masked) - 1
 
 
+_JS_CODE = re.compile(r"\S")
+
+
 def _js_statement_end(masked: str, at: int) -> int:
-    """The index where the statement starting at `at` ends: a new line outside brackets after a complete expression."""
-    depth, k = 0, at
-    while k < len(masked):
+    """The index where the statement starting at `at` ends: a new line outside brackets after a complete expression.
+    A bracket is passed over whole, to where the depth falls back (_js_closes), and a run of blanks at once, so each
+    character is read once."""
+    k, n, last, closes = at, len(masked), -1, _js_closes(masked, False)
+    while k < n:
         c = masked[k]
         if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-            if depth < 0:
-                return k - 1
-        elif c == ";" and depth == 0:
+            k = closes[k] + 1
+            last = k - 1
+            continue
+        if c in ")]}":
+            return k - 1
+        if c == ";":
             return k
-        elif c == "\n" and depth == 0:
-            before = masked[at:k].rstrip()
-            after = masked[k:].lstrip()
-            if before and not before.endswith(("=", ",", "(", "[", "{", "+", "-", "*", "/", "%", "&", "|", "?",
-                                               ":", "<", ">", "!", ".", "=>")) and \
-                    not after.startswith((".", "?", ":", "+", "-", "*", "/", "&&", "||", "=>")):
+        if c == "\n":
+            m = _JS_CODE.search(masked, k)
+            nxt = m.start() if m else n
+            if last >= at and not masked[max(at, last - 1):last + 1].endswith((
+                    "=", ",", "(", "[", "{", "+", "-", "*", "/", "%", "&", "|", "?", ":", "<", ">", "!", ".", "=>")) and \
+                    not masked[nxt:nxt + 2].startswith((".", "?", ":", "+", "-", "*", "/", "&&", "||", "=>")):
                 return k - 1
+            k = nxt
+            continue
+        if not c.isspace():
+            last = k
         k += 1
-    return len(masked) - 1
+    return n - 1
 
 
 @functools.lru_cache(maxsize=8)

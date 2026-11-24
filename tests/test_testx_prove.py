@@ -582,7 +582,23 @@ class JsReaderCostTests(unittest.TestCase):
             self.fail("rebuilding a hook fix among thousands of describes took more than 20 s")
         self.assertEqual("rebuilt", p.stdout.strip(), p.stderr)
 
-
+    # each declaration, hook, test and class finds where it ends in one pass over the brackets, so 5,000 of them
+    # nested in one another, open or closed, are read in about 5 s in all here; a reader that scans from each to its
+    # end takes 30 s or more on the 5,000 nested declarations alone
+    def test_thousands_of_nested_declarations_hooks_tests_and_classes_read_in_linear_time(self):
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+                "for line, close in (('const x = () => {', '};'), ('beforeEach(() => {', '});'), "
+                "(\"test('a', () => {\", '});'), ('class C {', '}'), ('function f() {', '}')):\n"
+                "    for text in ((line + '\\n') * 5000, (line + '\\n') * 5000 + (close + '\\n') * 5000):\n"
+                "        testx._js_entries(text), testx._js_support(text), testx._js_units(text)\n"
+                "        assert testx._rebuild_helpers('a.test.js', text, 'y;\\n' + text)['first']\n"
+                "print('read')\n")
+        lib = str(Path(__file__).resolve().parents[1] / "lib")
+        try:
+            p = subprocess.run([sys.executable, "-I", "-c", code, lib], capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail("the JS readers took more than 30 s on 5,000 nested declarations, hooks, tests or classes")
+        self.assertEqual("read", p.stdout.strip(), p.stderr)
 
 
 PY_SHARED = """
