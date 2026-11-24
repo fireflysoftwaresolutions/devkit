@@ -224,32 +224,41 @@ never touched):
    - **Only helper bodies changed: the module is rebuilt from the base text.** devkit compares the base and the
      module now outside their tests and outside the bodies of helpers that both sides hold in the same places, byte
      for byte. A test takes the comment and blank lines that directly precede it, and a blank line that no string
-     holds does not count. When nothing else differs, the module the run without your change runs is the base text with your tests
-     spliced in where the module has them now: outside the tests, it is the base module byte for byte, and devkit
-     checks that it is. The same places means the same names, kinds, and order, so a fix in a property getter beside
-     its setter, or in one of the `beforeEach` hooks of two `describe` blocks, counts, and a comment or a docstring
-     inside a helper's body comes back with the body. A fix that lives only in a helper is proven this way, as is any
-     helper edit that a test detects by an assertion, and a test that still passes is reported as "does not test the
-     change."
+     holds does not count. When nothing else differs, the module the run without your change runs is the base text
+     with your tests spliced in where the module has them now: outside the tests, it is the base module byte for
+     byte, and devkit checks that it is. The same places means the same names, kinds, and order, so a fix in a
+     property getter beside its setter, or in one of the `beforeEach` hooks of two `describe` blocks, counts, and a
+     comment or a docstring inside a helper's body comes back with the body. A fix that lives only in a helper is
+     proven this way, as is any helper edit that a test detects by an assertion, and a test that still passes is
+     reported as "does not test the change."
    - **When the run undid test support, a test proves by an assertion.** A test whose run without your change undid
-     test support it reaches (its own module rebuilt, or a rebuilt module or a changed test helper file that it
-     imports) proves your change when it fails there on an assertion: unittest's FAIL (not ERROR), pytest's `assert`,
-     `AssertionError` or `Failed` (`pytest.raises` or `pytest.warns` that saw nothing, `pytest.fail`), a `node:assert`
-     error, or a jest, vitest, or Playwright `expect` (jest's `expect.assertions(n)` and `expect.hasAssertions()`
-     too; Playwright 1.64 names a failure by its type, such as `expect.toBe`, and 1.55 writes the error into the
-     failure's text, which devkit reads instead). When it fails on any other error,
-     such as `NameError`, `AttributeError`, `TypeError`, `KeyError`, or `ReferenceError`, devkit runs it once more
-     with that support as it is now and only your production change undone. A failure there proves your production
-     change, such as a function the change adds. A pass is "cannot be proven: without the change it fails on
-     TypeError, not on an assertion": the test reached a name or member that only the support's edit gives, which
-     says nothing about what it asserts.
+     test support it reaches (its own module rebuilt, a rebuilt module or a changed test helper file that it
+     imports, or a changed data fixture that the run's record shows it read) proves your change when it fails there
+     on an assertion: unittest's FAIL (not ERROR), pytest's `assert`, `AssertionError` or `Failed` (`pytest.raises`
+     or `pytest.warns` that saw nothing, `pytest.fail`, but not pytest-timeout's `Failed: Timeout >1.0s`), a
+     `node:assert` error, or a jest, vitest, or Playwright `expect` (jest's `expect.assertions(n)` and
+     `expect.hasAssertions()` too; Playwright 1.64 names a failure by its type, such as `expect.toBe`, and 1.55 writes
+     the error into the failure's text, which devkit reads instead). A data fixture that a test reads without
+     importing it (a JSON or text file) is test support like a helper: a test that fails on an assertion because it
+     read the fixture's base version proves your change, as a test that detects a helper edit does. When it fails on
+     any other error, such as `NameError`, `AttributeError`, `TypeError`, `KeyError`, or `ReferenceError`, devkit runs
+     it once more in a fresh copy, with that support as it is now and only your production change undone, so nothing
+     the first runs left behind (a folder that the test stopped before it removed) decides the result. A failure there
+     proves your production change, such as a function the change adds. A pass is "cannot be proven: without the
+     change it fails on TypeError, not on an assertion": the test reached a name or member that only the support's
+     edit gives, which says nothing about what it asserts.
    - **Any other change keeps the module as it is now.** When your change adds, removes, or edits anything else
      outside the tests (a comment, a docstring, a coding declaration, a helper, a helper's decorators or parameters,
      an import, a class, a statement, a `describe`), the run without your change restores only the other files. A
      test that fails then proves your production change. A test that passes is "cannot be proven: its module keeps a
      change outside its helpers' bodies," followed by the first difference, such as "an added helper `pair` (line 9)"
      or "an edited docstring `"""Tests of h."""` (line 1)." It is never reported as "does not test the change,"
-     because the module's own change was never undone.
+     because the module's own change was never undone. The module keeps its change, named by the cause, also when
+     devkit cannot be sure where its helpers' bodies end: when either side holds a line break that devkit's readers
+     do not see (a carriage return without a new line, which ends a line for Python, and in JavaScript also a line
+     separator U+2028 or a paragraph separator U+2029, which end a `//` comment), or when a JavaScript helper's body
+     holds a line of code indented no deeper than the helper's first line, the sign of a regular expression read as
+     a division, or a division read as a regular expression.
 
    unittest runs only the test methods of a `TestCase`: in a module it runs, a module-level function named `test…`
    is a helper, never a test that `prove` names.
