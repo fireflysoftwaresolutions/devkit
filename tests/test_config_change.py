@@ -645,17 +645,34 @@ class ConfigChangeTests(unittest.TestCase):
         log = self.root / "state" / "logs" / "config.log"
         self.assertNotIn("lock ", log.read_text() if log.exists() else "")
 
-    def test_unlock_fails_when_the_user_settings_write_is_refused_after_the_managed_file_went(self):
+    def test_unlock_keeps_the_managed_file_when_the_user_settings_cannot_take_devkits_hooks(self):
+        # the hooks go into the user settings before the drop-in goes: a write that fails must not leave them in neither
         self.claude_home()
         self.settings.write_text(json.dumps(managed_settings()))
-        with mock.patch.object(policy, "MANAGED_FILE", self.root / "managed-settings.json"), \
-                mock.patch.object(policy.subprocess, "call", lambda *a, **k: 0), \
+        managed = self.root / "managed-settings.json"
+        managed.write_text('{"_devkit": {}}')
+        sudo = []
+        with mock.patch.object(policy, "MANAGED_FILE", managed), \
+                mock.patch.object(policy.subprocess, "call", lambda *a, **k: sudo.append(a) or 0), \
                 mock.patch.object(core, "replace_text", side_effect=PermissionError(13, "Permission denied")), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(policy.unlock(), 1)
+        self.assertEqual(sudo, [])
+        self.assertTrue(managed.exists())
         self.assertIn("Permission denied", err.getvalue())
         log = self.root / "state" / "logs" / "config.log"
         self.assertNotIn("lock off: managed-settings drop-in removed", log.read_text() if log.exists() else "")
+
+    def test_repair_names_user_settings_that_are_json_but_no_object_instead_of_crashing(self):
+        self.claude_home()
+        self.settings.write_text("[1]")
+        with mock.patch.object(core, "is_current_pin", lambda: False), \
+                mock.patch.object(policy, "CLAUDE_HOME", self.settings.parent):
+            got = policy.repair(quiet=True, include_codex=False)
+        self.assertEqual([d for d in got if d.target == "claude"], [])
+        self.assertEqual(len(got.left), 1)
+        self.assertIn(core.tilde(self.settings), got.left[0])
+        self.assertEqual(self.settings.read_text(), "[1]")
 
     def test_a_settings_file_that_is_json_null_is_refused_as_no_settings_object(self):
         self.settings.write_text("null")

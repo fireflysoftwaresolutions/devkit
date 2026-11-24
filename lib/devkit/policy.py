@@ -127,6 +127,8 @@ def diff_claude(settings=None):
     under a matcher that never matches, as another type, cut short or run in the background it would stop nothing.
     So is any disableAllHooks but false (hooks_off), which turns every hook off."""
     s = settings if settings is not None else (read_json(CLAUDE_HOME / "settings.json", {}) or {})
+    if not isinstance(s, dict):  # JSON but no object (a list, a number): write_claude_settings leaves such a file as
+        return [Drift("claude", "settings.json", type(s).__name__, "a settings object")]  # it is, and repair names it
     flat, hooks = claude_desired()
     out = [Drift("claude", _key(p), _get(s, p), v) for p, v in flat.items() if _get(s, p) != v]
     off = s.get("disableAllHooks", False)
@@ -491,15 +493,16 @@ def lock() -> int:
 
 
 def unlock() -> int:
-    """Remove the managed-settings drop-in and put devkit's hooks back in the user settings. 1, the drop-in kept, when
-    the user settings are a file devkit leaves as it is; 1 when their write fails once the drop-in is gone."""
+    """Put devkit's hooks back in the user settings, then remove the managed-settings drop-in. 1, the drop-in kept,
+    when the user settings are a file devkit leaves as it is or their write fails: the hooks go in before the drop-in
+    goes, so they are never in neither tier (a removal that fails leaves them in both, as a lock that fails does)."""
     if _older_refuses("dev config unlock"):
         return 1
     if _user_settings_refused("dev config unlock"):
         return 1
+    if not _user_settings_written(True, "the managed-settings drop-in is kept"):
+        return 1
     rc = subprocess.call(["sudo", "rm", "-f", str(MANAGED_FILE)])
     if rc == 0:
-        if not _user_settings_written(True, "the managed-settings drop-in is removed"):
-            return 1
         _log("lock off: managed-settings drop-in removed")
     return rc
