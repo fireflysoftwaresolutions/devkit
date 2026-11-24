@@ -28,8 +28,8 @@ _hermetic.activate()
 import test_acceptance_hooks as acceptance  # noqa: E402  (the hook entry run as an agent's harness runs it)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import (audit, canary, continuity, core, gates, language, lessonlint, lessons, scope,  # noqa: E402
-                    skillguard, state)
+from devkit import (audit, bugs, canary, continuity, core, gates, language, lessonlint, lessons,  # noqa: E402
+                    scope, skillguard, state)
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
 # inside every reader's window (canary reads the last 400 KB of a transcript).
@@ -262,6 +262,19 @@ class RecordReaderTests(TempFolder):
                     self.assertEqual(lessonlint._rule_ids(), {"R-1"})
 
 
+class ForeignTextReaderTests(TempFolder):
+    """Text the public, a model, a repository or an MCP client chooses: an issue's body, a Codex call's arguments, a
+    JSON-RPC message, an agent's settings file, a package.json."""
+
+    def test_an_issue_body_with_a_deep_json_block_holds_no_payload_or_record(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                block = "```json\n" + '{"devkit_bug": 1, "fingerprint": "f", "x": ' + deep(d) + "}\n```"
+                self.assertIsNone(bugs.parse_payload(block))
+                self.assertIsNone(bugs.parse_record(bugs.RECORD_MARK + "\n" + block))
+        self.assertEqual(bugs.parse_payload('```json\n{"devkit_bug": 1}\n```'), {"devkit_bug": 1})
+
+
 # --------------------------------------------------------------------------- the guard
 
 # Why a raw parse is safe where it stands. A deep document can reach a parser only through text whose shape someone
@@ -301,8 +314,6 @@ REVIEWED = {
     ("bugs", "UrlClient._get"): (1, TOOL),
     ("bugs", "_bounded_json"): (1, OWN),
     ("bugs", "_load_item"): (1, OWN),
-    ("bugs", "_one_block"): (1, "OPEN: the JSON block of a public issue's body; RecursionError is caught, but Python "
-                                "3.15 parses a value about 150,000 levels deep that nothing bounds"),
     ("bugs", "_tail_records"): (1, OWN),
     ("bugs", "_trim_occurrences"): (1, OWN),
     ("bugs", "fit_record"): (1, COPY),

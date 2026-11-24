@@ -1494,8 +1494,8 @@ def _one_block(body):
     if len(blocks) != 1:
         return None
     try:
-        obj = json.loads(blocks[0])
-    except (ValueError, RecursionError):  # nested past the parser's depth: no payload either
+        obj = core.load_json(blocks[0])
+    except ValueError:  # not JSON, or nested deeper than a reader can read: no payload either
         return None
     return obj if isinstance(obj, dict) else None
 
