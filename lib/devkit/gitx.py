@@ -5282,7 +5282,9 @@ def release_version_refusal(top, version: str, scheme: str, nxt: str):
     """Why `version` cannot be released -> (reason, fix or None), or None. dev release checks it on the default branch
     before it tags, and on a release branch before it writes the change fragments into that version's CHANGELOG
     section: a PEP 440 version where the repository uses PEP 440, else X.Y.Z, and a plausible YY.MM.PATCH under
-    CalVer; and no tag v<version> yet, as the caller fetched the tags from origin. `scheme`, `nxt`: version_scheme's."""
+    CalVer; and no tag of it yet, as the caller fetched the tags from origin: neither v<version>, the tag dev release
+    creates, nor <version>, which a repository that tags without the v (a tag_format such as YY.MM.PATCH) has.
+    `scheme`, `nxt`: version_scheme's."""
     if scheme == "pep440":
         from . import delivery
         if not (delivery.PEP440_RE.match(version) and _PEP440_PARTS.match(version)):
@@ -5291,8 +5293,9 @@ def release_version_refusal(top, version: str, scheme: str, nxt: str):
         return f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)", None
     if scheme == "calver" and not _plausible_calver(version):
         return f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})", None
-    if _ref_sha(top, f"refs/tags/v{version}"):
-        return f"tag v{version} already exists", (f"next version: {nxt}" if scheme == "calver" else None)
+    tag = next((t for t in (f"v{version}", version) if _ref_sha(top, f"refs/tags/{t}")), None)
+    if tag:
+        return f"tag {tag} already exists", (f"next version: {nxt}" if scheme == "calver" else None)
     return None
 
 

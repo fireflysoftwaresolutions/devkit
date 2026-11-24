@@ -269,10 +269,10 @@ repository that keeps a `changes/` folder takes its CHANGELOG lines from fragmen
    commit. The version is `--version`, else the one the branch names (`release/26.11.4`); an `integration/<topic>`
    or `hotfix/<topic>` branch names none, so it needs `--version`. The version is checked as `dev release` checks a
    tag's: `X.Y.Z` (a plausible `YY.MM.PATCH` under CalVer), or PEP 440 where the repository uses it, and refused when
-   its tag already exists, so a released section takes no new lines. A section the release already has keeps its
-   lines and takes the fragments' entries after them; a new one goes before the newest release, below an Unreleased
-   section, or, with no release yet, at the end. The link definitions at the end of the file stay there. Nothing is
-   tagged on a release branch.
+   its tag already exists here or on `origin`, with or without the `v` (`v26.11.4` or `26.11.4`), so a released
+   section takes no new lines. A section the release already has keeps its lines and takes the fragments' entries
+   after them; a new one goes before the newest release, below an Unreleased section, or, with no release yet, at the
+   end. The link definitions at the end of the file stay there. Nothing is tagged on a release branch.
 3. Review the section, bump the version files, and commit. A second `dev release` before that commit says so. Then
    go on as for any change: `dev ci --run`, `dev push`, `dev pr create`. After the merge, `dev release` on the
    default branch tags the release, and refuses while a fragment is left.

@@ -87,6 +87,20 @@ class ReleaseFragmentsTests(unittest.TestCase):
         self.assertIn("tag v26.11.27 already exists", err)
         self.assertIn("next version: ", err)
 
+    def test_dev_release_refuses_a_version_the_repository_tagged_without_the_v(self):
+        git(self.s.repo, "tag", "26.11.27")
+        git(self.s.repo, "push", "-q", "origin", "--tags")
+        rc, out, err = dev("release", "--version", "26.11.27", "--dry-run")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("tag 26.11.27 already exists", err)
+        self.s.branch("release/26.11.27")
+        self.s.commit("fix: keep the login", {"changes/fix-login.md": LOGIN})
+        rc, out, err = dev("release")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("tag 26.11.27 already exists", err)
+        self.assertEqual((self.s.repo / "CHANGELOG.md").read_text(), CHANGELOG)
+        self.assertEqual(changes.fragments(self.s.repo), ["changes/fix-login.md"])
+
     def test_dev_release_on_the_default_branch_refuses_while_a_fragment_is_left(self):
         self.s.commit("feat: export", {"changes/feat-export.md": EXPORT})
         git(self.s.repo, "push", "-q", "origin", "main")

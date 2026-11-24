@@ -8,3 +8,8 @@
   `dev ci --mark-passed` fail a branch that edits `CHANGELOG.md` outside a release branch, and a fragment or file in
   `changes/` they cannot use; the error names its file and line number. devkit takes its own CHANGELOG lines from
   fragments from this release on.
+
+### Fixed
+
+- `dev release` refuses a version whose tag the repository wrote without the `v` (`26.11.4`), as it already refused
+  one tagged `v26.11.4`, so a repository whose tag format has no `v` cannot release a shipped version twice.
