@@ -17,6 +17,7 @@ import ast
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -826,6 +827,62 @@ class HookInputTests(acceptance.Sandbox):
                 self.assertEqual(self.audit("config.blocked")[-1]["detail"], "unchecked")
                 log = self.state / "logs" / "hooks.log"
                 self.assertNotIn("config-change claude error", log.read_text() if log.exists() else "")
+
+    def managed_user_settings(self) -> dict:
+        """The user settings exactly as devkit writes them in this sandbox (its hooks name the sandbox's devkit)."""
+        script = ("import json, sys; sys.path.insert(0, sys.argv[1]); from devkit import policy, setup\n"
+                  "s = {}\n"
+                  "for path, v in policy.claude_desired()[0].items():\n"
+                  "    d = s\n"
+                  "    for k in path[:-1]:\n"
+                  "        d = d.setdefault(k, {})\n"
+                  "    d[path[-1]] = v\n"
+                  "s['hooks'] = setup.load_conf('claude/settings.json')['hooks']\n"
+                  "print(json.dumps(s))\n")
+        p = subprocess.run([self.python, "-I", "-S", "-c", script, str(ROOT / "lib")], capture_output=True, text=True,
+                           env=self.env, timeout=180, check=True)
+        return json.loads(p.stdout)
+
+    def user_change(self, text, repair=True):
+        """The ConfigChange hook on user settings that say `text` -> (exit code, stderr, the file after it). Without
+        `repair`, the background repair a refusal starts is recorded instead (acceptance.BOOT): it would start the
+        agents' programs."""
+        user = self.home / ".claude" / "settings.json"
+        user.parent.mkdir(exist_ok=True)
+        user.write_text(text)
+        payload = json.dumps({"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange",
+                              "source": "user_settings", "file_path": str(user), "cwd": str(self.repo)})
+        if repair:
+            code, _, err = self.dev_hook("config-change", payload)
+        else:
+            p = self._child("config-change", "claude", payload, None)
+            code, err = p.returncode, p.stderr
+        return code, err, user.read_text()
+
+    def test_config_change_refuses_whatever_its_logs_do(self):
+        """policy._log opens logs/config.log and _spawn logs/sync.log before the refusal: an error there reached
+        hooks.run, which exits 0, so the change passed. With sync.log a folder, the background repair never starts."""
+        s = self.managed_user_settings()
+        s.pop("permissions")
+        logs = self.state / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        for broken in (("sync.log",), ("config.log", "sync.log")):
+            with self.subTest(broken=broken):
+                for name in broken:
+                    shutil.rmtree(logs / name) if (logs / name).is_dir() else (logs / name).unlink(missing_ok=True)
+                    (logs / name).mkdir()
+                code, err, _ = self.user_change(json.dumps(s))
+                self.assertEqual(code, 2, err)
+                self.assertIn("devkit manages these settings: permissions.", err)
+                self.assertTrue(self.audit("config.blocked")[-1]["detail"].startswith("permissions."))
+                for name in broken:
+                    (logs / name).rmdir()
+        with self.subTest(broken="logs is a file"):
+            shutil.rmtree(logs)
+            logs.write_text("")
+            code, err, _ = self.user_change(json.dumps(s))
+            self.assertEqual(code, 2, err)
+            self.assertIn("devkit manages these settings: permissions.", err)
 
 @unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
 class HookInputPython39Tests(HookInputTests):

@@ -294,6 +294,40 @@ class ConfigChangeTests(unittest.TestCase):
         s.pop("permissions")
         return s
 
+    def test_a_refusal_holds_when_its_logs_or_its_repair_do_not_open(self):
+        logs = self.root / "state" / "logs"
+        started = []
+        cases = {"config.log is a folder": lambda: (logs / "config.log").mkdir(parents=True),
+                 "sync.log is a folder": lambda: (logs / "sync.log").mkdir(parents=True),
+                 "logs is a file": lambda: (logs.parent.mkdir(parents=True, exist_ok=True), logs.write_text("x"))}
+        for name, break_logs in cases.items():
+            with self.subTest(name), mock.patch.object(hooks, "_spawn", REAL_SPAWN), \
+                    mock.patch.object(hooks.subprocess, "Popen", lambda *a, **k: started.append(a)):
+                break_logs()
+                code, err = self.change(self.drifted())
+                self.assertEqual(code, 2, err)
+                self.assertIn("devkit manages these settings: permissions.", err)
+                self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"][:12], "permissions.")
+                shutil.rmtree(logs) if logs.is_dir() else logs.unlink()
+        self.assertEqual(len(started), 1)  # the repair starts when its log opens: with config.log a folder
+
+    def test_an_older_copy_still_refuses_a_devkit_variable_when_its_repair_does_not_open(self):
+        self.older_session()
+        (self.root / "state" / "logs" / "sync.log").mkdir(parents=True)
+        s = managed_settings()
+        s["env"] = dict(s.get("env") or {}, DEVKIT_GUARD="off")
+        with mock.patch.object(hooks, "_spawn", REAL_SPAWN), contextlib.redirect_stdout(io.StringIO()):
+            code, err = self.change(s)
+        self.assertEqual(code, 2, err)
+        self.assertIn("refused env.DEVKIT_GUARD", err)
+
+    def test_a_check_that_fails_unexpectedly_refuses_the_change(self):
+        with mock.patch.object(core, "older_copy", side_effect=RuntimeError("broken")):
+            code, err = self.change(self.drifted())
+        self.assertEqual(code, 2)
+        self.assertIn("(RuntimeError)", err)
+        self.assertIn("refused the change", err)
+
     # devkit's hooks count only as dev install writes them: under a matcher that never matches, as another type, with
     # another timeout or run in the background, they never stop anything, and disableAllHooks turns them all off.
     def test_devkit_hooks_that_differ_from_what_devkit_writes_are_refused(self):

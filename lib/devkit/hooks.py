@@ -1380,10 +1380,37 @@ def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: li
         _log(f"stop audit {agent}: {traceback.format_exc()[-300:]}")
 
 
+def _quietly(component: str, fn, *args):
+    """fn(*args) for a step a refusal goes on without (a log line, the background repair): its error recorded
+    (_swallowed), never raised. -> its value, or None when it failed."""
+    try:
+        return fn(*args)
+    except Exception as e:
+        _swallowed(component, e)
+        return None
+
+
 def config_change(agent: str):
     """Claude ConfigChange. The user settings: refuse changes to devkit-managed keys, then restore the file. The
     project and local settings: refuse a DEVKIT_* variable in their env block and remove it; devkit
-    manages nothing else there."""
+    manages nothing else there. Exit 2 refuses; hooks.run turns any exception into exit 0, which would let the change
+    pass, so an error of the check itself refuses the change too."""
+    try:
+        _config_change(agent)
+    except SystemExit:
+        raise
+    except Exception as e:
+        _swallowed("config-change", e)
+        from . import audit
+        _log(f"config-change blocked, its check failed: {type(e).__name__}")
+        audit.record("config.blocked", str(_PAYLOAD.get("file_path") or "settings"), f"failed: {type(e).__name__}",
+                     "blocked")
+        print(f"devkit's check of this settings change failed ({type(e).__name__}), so it cannot tell whether the "
+              f"change turns off what devkit manages: refused the change. Run dev doctor.", file=sys.stderr)
+        sys.exit(2)
+
+
+def _config_change(agent: str):
     data = _stdin_json()
     from . import policy
     path = data.get("file_path") or str(core.CLAUDE_HOME / "settings.json")
@@ -1408,9 +1435,10 @@ def config_change(agent: str):
         # The user settings differ from what this older copy would write, most likely because a newer release was
         # installed. It writes nothing; the pinned release's repair (_spawn runs it) puts back what really drifted
         # from the installed configuration, a tampered DEVKIT_* variable included.
-        notice = _older_copy_notice(agent, data.get("session_id") or "", f"{tilde(path)} ({keys})")
+        notice = _quietly("config-change", _older_copy_notice, agent, data.get("session_id") or "",
+                          f"{tilde(path)} ({keys})") or ""
         _log(f"config-change left to the pinned release ({agent}): {keys}")
-        _spawn(["config", "repair", "--quiet"])
+        _quietly("config-change", _spawn, ["config", "repair", "--quiet"])
         if env_keys:
             print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so they change "
                   f"only with devkit's configuration: refused {', '.join(f'env.{k}' for k in env_keys)}. "
@@ -1427,8 +1455,8 @@ def config_change(agent: str):
               f"sets them: removed {keys} from {path}. Change devkit's configuration with dev config.",
               file=sys.stderr)
         sys.exit(2)
-    policy._log(f"blocked change to devkit-managed keys: {keys}")
-    _spawn(["config", "repair", "--quiet"])
+    _quietly("config-change", policy._log, f"blocked change to devkit-managed keys: {keys}")
+    _quietly("config-change", _spawn, ["config", "repair", "--quiet"])
     print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
           f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`.",
           file=sys.stderr)
@@ -4848,7 +4876,10 @@ def run(event: str, agent: str) -> int:
     from . import audit, watch
     with audit.hook_identity(), watch.context_notifications():
         try:
-            (STATE / "logs").mkdir(parents=True, exist_ok=True)
+            try:
+                (STATE / "logs").mkdir(parents=True, exist_ok=True)
+            except OSError:  # logs that do not open stop no handler: each log write goes on without its line
+                pass
             saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error
             fn(agent)
         except SystemExit:
