@@ -218,8 +218,8 @@ never touched):
 
 1. **It fails without your change.** devkit restores the base version of every production file you changed (the
    merge-base with `origin/<default>`, or `--since REF`) and runs the test. A changed test helper or fixture counts
-   as part of the change and is restored too. A changed Python or JavaScript test module follows three rules, so the
-   run without your change never mixes code of the base with code of your change:
+   as part of the change and is restored too. A changed Python test module follows three rules, so the run without
+   your change never mixes code of the base with code of your change:
 
    - **Only helper bodies changed: the module is rebuilt from the base text.** devkit compares the base and the
      module now outside their tests and outside the bodies of helpers that both sides hold in the same places, byte
@@ -227,10 +227,9 @@ never touched):
      holds does not count. When nothing else differs, the module the run without your change runs is the base text
      with your tests spliced in where the module has them now: outside the tests, it is the base module byte for
      byte, and devkit checks that it is. The same places means the same names, kinds, and order, so a fix in a
-     property getter beside its setter, or in one of the `beforeEach` hooks of two `describe` blocks, counts, and a
-     comment or a docstring inside a helper's body comes back with the body. A fix that lives only in a helper is
-     proven this way, as is any helper edit that a test detects by an assertion, and a test that still passes is
-     reported as "does not test the change."
+     property getter beside its setter counts, and a comment or a docstring inside a helper's body comes back with
+     the body. A fix that lives only in a helper is proven this way, as is any helper edit that a test detects by an
+     assertion, and a test that still passes is reported as "does not test the change."
    - **When the run undid test support, a test proves by an assertion.** A test whose run without your change undid
      test support it reaches (its own module rebuilt, a rebuilt module or a changed test helper file that it
      imports, or a changed data fixture that the run's record shows it read) proves your change when it fails there
@@ -244,39 +243,38 @@ never touched):
      read the fixture's base version proves your change, as a test that detects a helper edit does. When it fails on
      any other error, such as `NameError`, `AttributeError`, `TypeError`, `KeyError`, or `ReferenceError`, devkit runs
      it once more in a fresh copy, with that support as it is now and only your production change undone, so nothing
-     the first runs left in the copy (a folder that the test stopped before it removed, a read-only one too) decides
-     the result. An assertion failure there proves your production change, as in the run without it, and so does the
-     same error as in the run without it: the same type, which both runs name, and the same message (its first line,
-     as devkit records it), compared with only the copy's own path taken out. The support's edit did not decide that
-     failure, so a test that fails with an `AttributeError` on a function only your change adds, in a module whose
-     helpers you also changed, is proven. Another error there, or a pass, is "cannot be proven: without the change it
-     fails on TypeError, not on an assertion": the test reached a name or member that only the support's edit gives,
-     which says nothing about what it asserts, or it failed on what an earlier run left outside the copy. The same
-     type with another message is another error, and so is a plain script's exit code, which names no type. Each run
-     has a temp folder of its own (`TMPDIR`, `TEMP`, and `TMP`), which is empty when the run starts and is removed
-     with it, so nothing reaches the next run there. The home folder is not reset: a test that fails there on what an
-     earlier run left (a folder it makes again, with `FileExistsError`) fails on another error than the one it raised
-     without the change, and cannot be proven. When the copy cannot be removed (a file locked beyond its owner's
-     permissions), there is no rerun, and the test cannot be proven either.
+     the first runs left in the copy (a folder that the test stopped before it removed, a read-only or unreadable
+     one too, at any depth) decides the result. Only an assertion failure there proves your production change, as in
+     the run without it. Any other error there, or a pass, is "cannot be proven: without the change it fails on
+     TypeError, not on an assertion": the test reached a name or member that only the support's edit gives, which
+     says nothing about what it asserts, or it failed on what an earlier run left outside the copy. That holds for the
+     same error too: a folder that the run without your change left in the home folder, beside the copy, or at a
+     fixed path makes the rerun fail with the same `FileExistsError`, type and message, whatever your production
+     change. This means that a test that fails with an `AttributeError` on a function only your change adds, in a
+     module whose helpers you also changed, cannot be proven: test the new function from a module whose helpers stay
+     as they were. Each run has a temp folder of its own (`TMPDIR`, `TEMP`, and `TMP`), which is empty when the run
+     starts and is removed with it, so nothing reaches the next run there. The home folder is not reset. When the
+     copy cannot be removed (a file locked beyond its owner's permissions), there is no rerun, and the test cannot be
+     proven either.
    - **Any other change keeps the module as it is now.** When your change adds, removes, or edits anything else
      outside the tests (a comment, a docstring, a coding declaration, a helper, a helper's decorators or parameters,
-     an import, a class, a statement, a `describe`), the run without your change restores only the other files. A
-     test that fails then proves your production change. A test that passes is "cannot be proven: its module keeps a
-     change outside its helpers' bodies," followed by the first difference, such as "an added helper `pair` (line 9)"
-     or "an edited docstring `"""Tests of h."""` (line 1)." It is never reported as "does not test the change,"
-     because the module's own change was never undone. The module keeps its change, named by the cause, also when
-     devkit cannot be sure where its helpers' bodies end: when either side holds a line break that devkit's readers
-     do not see (a carriage return without a new line, which ends a line for Python, and in JavaScript also a line
-     separator U+2028 or a paragraph separator U+2029, which end a `//` comment), or when Node does not read each
-     helper's body and each test that devkit cut from a JavaScript or TypeScript module as one whole function body.
-     Node reads them all in one run before devkit rebuilds the module: a boundary that devkit's reader misplaced (a
-     regular expression read as a division, for example) leaves a brace or a token open in Node's view, so the
-     module keeps its change, named by that body's line and Node's reason, such as `a helper's body that Node does
-     not read as one function body (line 5): Unexpected identifier 'globalThis'`. Node strips TypeScript's types
-     first, which takes Node 22.13 or later. A `.jsx` or `.tsx` body that holds a `<` may hold JSX, which Node does
-     not read, and a machine without `node` on its `PATH` cannot check the bodies: both keep the module's change. In
-     a `.cjs` module, `<!--` and a `-->` at the start of a line open a comment, as in any script; a `.js` module may
-     be a script or a module, where they are code, so Node reads its bodies both ways.
+     an import, a class, a statement), the run without your change restores only the other files. A test that fails
+     then proves your production change. A test that passes is "cannot be proven: its module keeps a change outside
+     its helpers' bodies," followed by the first difference, such as "an added helper `pair` (line 9)" or "an edited
+     docstring `"""Tests of h."""` (line 1)." It is never reported as "does not test the change," because the
+     module's own change was never undone. The module keeps its change, named by the cause, also when devkit cannot
+     be sure where its helpers' bodies end: when either side holds a carriage return without a new line, which ends a
+     line for Python but not for devkit's readers.
+
+   devkit rebuilds only Python test modules. A JavaScript or TypeScript test module (`.js`, `.jsx`, `.ts`, `.tsx`,
+   `.mjs`, `.cjs`, `.mts`, `.cts`, `.vue`, or `.svelte`) whose lines outside its tests differ from the base, a fix
+   inside a helper's body or a hook too, keeps its change: the run without your change runs it as it is now. A test
+   of it that fails there proves your production change, on any error, because only the production change was
+   undone. A test that passes is "cannot be proven: its module keeps its change: devkit rebuilds only Python test
+   modules." A module whose only change is its tests (each with the comment and blank lines that directly precede
+   it) has nothing to rebuild. devkit's own JavaScript reader could not tell reliably where a helper's body or a
+   template literal ends, and a misread could put a base fixture back under a new test; rebuilding these modules
+   safely would take a real JavaScript parser.
 
    unittest runs only the test methods of a `TestCase`: in a module it runs, a module-level function named `test…`
    is a helper, never a test that `prove` names.
@@ -362,8 +360,8 @@ the change, `1` when one does not, and `2` when none could be proven because eac
 - **Node tests.** Tests that `node --test` runs are proven with Node: a `node:test` case by its title, and a plain test
   script (one that exits non-zero when a check fails) as one test. In a `test` folder, a script that another file of
   that folder imports or names in quotes is a helper (a harness, a fake), so it counts as part of the change. Name it
-  to prove it as a test: `dev test prove test/protocol.mjs`. A plain script fails by its exit code, which is neither
-  an assertion nor an error type, so one that imports a changed helper cannot be proven.
+  to prove it as a test: `dev test prove test/protocol.mjs`. A plain script fails by its exit code, never on an
+  assertion, so one that imports a changed helper cannot be proven.
 - **What cannot run here is listed, not fatal.** A changed test that no runner here can run (no runner for its
   language, `node` missing, or left out by `--runner`) and a named file that is no test are listed under "not proven"
   with the reason; the other tests are proven. When nothing is left to prove, the command exits with `2` and lists
