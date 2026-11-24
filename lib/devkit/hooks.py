@@ -1599,7 +1599,9 @@ def _pin_audits(entry: dict, data: dict, mark: str):
             found.append(("calls.pin-replaced", "its pin is not the file its first verified use saw"))
     except OSError:
         pass
-    if identity.used_path(sid, tid).exists() and str(entry.get("caller") or "main") == "main":
+    # the use mark is looked up in the session's folder opened without following a link (identity._in_ledger): a
+    # folder that is a link never answers for a mark where it points
+    if identity._in_ledger(sid, identity.used_path("-", tid).name) and str(entry.get("caller") or "main") == "main":
         try:
             runs = [shellparse.dev_args(a) for a, _ in shellparse.shell_calls(str(entry.get("cmd") or ""), None) or []]
         except Exception:
@@ -2531,7 +2533,8 @@ def _codex_thread_mismatch(agent: str, data: dict, item):
     from . import identity, progress
     sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
     thread = str((item or {}).get("thread_id") or "") if isinstance(item, dict) else ""
-    if agent != "codex" or not thread or not sid or not tid or not identity.used_path(sid, tid).exists():
+    if (agent != "codex" or not thread or not sid or not tid
+            or not identity._in_ledger(sid, identity.used_path("-", tid).name)):  # never through a linked folder
         return
     caller = str(progress.call_entry(data).get("caller") or "main")[:80]
     if thread in ((sid,) if caller == "main" else (caller, sid)):

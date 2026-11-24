@@ -605,16 +605,63 @@ def note_opened(agent: str, sid: str, tid: str = "", every: bool = False) -> boo
 
 
 def _drop_marks(sid: str, tid: str):
-    """Call `tid`'s pin, its contested marker and contest flag, and its use marks go."""
+    """Call `tid`'s pin, its contested marker and contest flag, and its use marks go: the ones in the ledger through
+    the session's folder opened without following a link (ledger_folder)."""
     if not tid:
         return
     pin = pin_path(sid, tid)
-    for f in (used_path(sid, tid), uses_path(sid, tid), contest_path(sid, tid), pin,
-              pin.with_name(pin.name + ".contested")):
+    for f in (pin, pin.with_name(pin.name + ".contested")):
         try:
             f.unlink()
         except OSError:
             pass
+    try:
+        folder = ledger_folder(sid)
+    except OSError:
+        return
+    try:
+        for name in (used_path("-", tid).name, uses_path("-", tid).name, contest_path("-", tid).name):
+            try:
+                os.unlink(name, dir_fd=folder)
+            except OSError:
+                pass
+    finally:
+        os.close(folder)
+
+
+def _in_ledger(sid: str, name: str) -> bool:
+    """Is there anything named `name` (a link counts, never followed) in session `sid`'s folder, opened without
+    following a link (ledger_folder)? A name that cannot be looked up counts as there, as for the sweep
+    (_lexists_at): one presence rule for every ledger mark. False when that folder cannot be opened so."""
+    try:
+        folder = ledger_folder(sid)
+    except OSError:
+        return False
+    try:
+        return _lexists_at(folder, name)
+    finally:
+        os.close(folder)
+
+
+def _read_ledger_text(sid: str, name: str):
+    """File `name` of session `sid`'s folder as text, read through the folder opened without following a link, never
+    through a link and only from a regular file (a FIFO is never waited on); None when it cannot be read so."""
+    import stat
+    try:
+        folder = ledger_folder(sid)
+    except OSError:
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+    except OSError:
+        return None
+    finally:
+        os.close(folder)
+    try:
+        with os.fdopen(fd) as fh:
+            return fh.read(1 << 20) if stat.S_ISREG(os.fstat(fh.fileno()).st_mode) else None
+    except (OSError, ValueError):
+        return None
 
 
 def note_closed(agent: str, sid: str, tid: str, entry: dict | None = None, ended: str = ""):
@@ -637,7 +684,7 @@ def note_closed(agent: str, sid: str, tid: str, entry: dict | None = None, ended
                              command=str(entry.get("cmd") or "")[:300])
             except Exception:
                 pass
-    if not os.path.lexists(background_path(sid, tid)):
+    if not _in_ledger(sid, background_path("-", tid).name):
         _drop_marks(sid, tid)
 
     def put(d):
@@ -677,8 +724,10 @@ def audit_contested(entry: dict, sid: str, tid: str, mark: str, ended: str = "")
     """A stamped call that ends marked contested (`mark`, _contest_mark) is audited (calls.pin-contested, flagged): at
     its PostToolUse (hooks._pin_audits), and when it ends with no result: its session ended, its time ran out, or its
     agent went without its SessionEnd (`ended`, named in the record). The caller reads the mark before the call's
-    ledger entry goes, and again after."""
-    if not mark or not entry.get("pin"):
+    ledger entry goes, and again after. Two processes that end one call (its PostToolUse and a SessionEnd, two
+    sweeps) write one audit: the first to make the call's audit claim (audit_claim_path) writes it. An audit that
+    fails is recorded as a swallowed devkit error (bugs.swallowed), never lost silently."""
+    if not mark or not entry.get("pin") or not _claim_audit(sid, tid, entry.get("ts")):
         return
     why = ("another process wrote this call's pin before its shell did" if mark == "pin"
            else "this call is marked contested: its contest flag is in the ledger")
@@ -689,8 +738,65 @@ def audit_contested(entry: dict, sid: str, tid: str, mark: str, ended: str = "")
         audit.record("calls.pin-contested", tid[:80] or "-", why, "flagged", tool_use_id=tid[:80],
                      session=str(sid)[:80], host_agent=str(entry.get("agent") or ""),
                      command=str(entry.get("cmd") or "")[:300])
-    except Exception:  # noqa: BLE001 - the audit never stops a call's end
-        pass
+    except Exception as e:  # noqa: BLE001 - the audit never stops a call's end
+        try:
+            from . import bugs
+            bugs.swallowed({"": "post-tool", "session-ended": "session-end"}.get(ended, "identity"), e)
+        except Exception:  # noqa: BLE001 - nor does the record of its failure
+            pass
+
+
+def audit_claim_path(sid: str, tid: str):
+    """Call `tid`'s audit claim: CALLS/<sid>/.<tid>.audited (a dot-file: no reader of the ledger takes it for an
+    entry), made by the first process that audits the call's contest. It outlives the call's other marks, so a second
+    end that read the call before the first removed it finds the claim; the sweep removes it like a contest flag
+    (_sweep_flags)."""
+    from . import progress
+    return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.audited"
+
+
+def _claim_audit(sid: str, tid: str, since=None) -> bool:
+    """True when this process is the first to audit call `tid`'s contest: it made the claim (O_EXCL), in the session's
+    folder opened without following a link. A claim already there counts only when it is a regular file of this user
+    made no earlier than the call opened (`since`, its ledger entry's ts; CLAIM_SLACK_S for the clocks): anything
+    else there (a FIFO, a link, never followed, a folder, an older file, any file when `since` is unknown) is removed
+    and the claim made again. True too when no claim can be made there (no folder, a link, a full disk, something
+    planted that cannot be removed): an audit written twice is better than none."""
+    import stat
+    if not tid:
+        return True
+    try:
+        since = float(since)
+    except (TypeError, ValueError):
+        since = None
+    name = audit_claim_path("-", tid).name
+    try:
+        folder = ledger_folder(sid)
+    except OSError:
+        return True
+    try:
+        for _ in range(2):
+            try:
+                os.close(os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder))
+                return True
+            except FileExistsError:
+                pass
+            try:
+                st = os.lstat(name, dir_fd=folder)
+            except FileNotFoundError:
+                continue  # removed meanwhile: make it again
+            if (stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() and since is not None
+                    and st.st_mtime >= since - CLAIM_SLACK_S):
+                return False  # another end of this call made it: that end writes the audit
+            if stat.S_ISDIR(st.st_mode):
+                _remove_tree_at(folder, name, _TREE_DEPTH)
+            else:
+                os.unlink(name, dir_fd=folder)
+        return True
+    except OSError:
+        return True
+    finally:
+        os.close(folder)
 
 
 def sweep_gone(now: float | None = None) -> int:
@@ -698,32 +804,68 @@ def sweep_gone(now: float | None = None) -> int:
     ledger, each open call whose agent process no longer runs ends like one still open when its session ends
     (_end_call, "session-gone"), so a state change that ran under it is audited (calls.text-use-without-result); a
     call past its time ends there as expired (progress.open_calls). A call whose agent pid another process took since
-    waits for its time. Then the contest flags the ended calls left behind go (_sweep_flags). Run at every session
-    start and by `dev sync`. -> the calls it ended"""
+    waits for its time. Then the contest flags the ended calls left behind go (_sweep_flags). The work is bounded by
+    the names listed, not the entries read: in the ledger's root, a window of _ROOT_MAX names that starts at a random
+    one among the first _ROOT_MAX (_root_offset), so at most 2 * _ROOT_MAX - 1 names are listed there and no session
+    folder among them is always past the cap; and at most _LIST_MAX across the session folders, each name listed
+    taking one, dot-files and names that are no ledger entry too; the rest waits for the next sweep. Run at every
+    session start and by `dev sync`. -> the calls it ended"""
     from . import progress
+    reads = [_LIST_MAX]  # the names a sweep lists in the session folders (every name, dot-files too), shared by all
+    skip = _root_offset()
+    head, sids, listed = [], [], 0
     try:  # a session folder that is a link is never one: nothing it points to is read or removed
-        with os.scandir(progress.CALLS) as found:
-            sids = sorted(d.name for d in found if d.is_dir(follow_symlinks=False) and not d.name.startswith("."))
+        with os.scandir(progress.CALLS) as found:  # the root's names take none of `reads`: they have their own cap
+            for d in found:
+                if d.is_dir(follow_symlinks=False) and not d.name.startswith("."):
+                    (head if listed < skip else sids).append((listed, d.name))
+                listed += 1
+                if listed >= skip + _ROOT_MAX:
+                    break
     except OSError:
         return 0
+    # a listing that ends before its window is full wraps round: the window takes the names it skipped at its start
+    wrap = skip + _ROOT_MAX - listed
+    sids = sorted([name for _, name in sids] + [name for i, name in head if i < wrap])
+    if sids:  # each sweep starts at another folder, so one flooded folder never starves the ones after it
+        at = _sweep_start(len(sids)) % len(sids)
+        sids = sids[at:] + sids[:at]
     n, budget = 0, [_SWEEP_MAX]
     for sid in sids:
-        for e in progress.open_calls(sid, now):
+        if reads[0] <= 0:
+            break
+        for e in progress.open_calls(sid, now, budget=reads):
             pid = e.get("agent_pid")
             if isinstance(pid, int) and not progress._pid_running(pid):
                 _end_call(str(e.get("agent") or ""), sid, e, "session-gone")
                 n += 1
         if budget[0] > 0:
-            _sweep_flags(progress.CALLS / sid, now, budget)
+            _sweep_flags(progress.CALLS / sid, now, budget, reads)
     return n
+
+
+def _root_offset() -> int:
+    """Where a sweep's window of the ledger root's names starts (sweep_gone): a random name among the first
+    _ROOT_MAX listed."""
+    import random
+    return random.randrange(_ROOT_MAX)  # nosemgrep: python.lang.security.audit.insecure-random  (an order, no secret)
+
+
+def _sweep_start(n: int) -> int:
+    """Where a sweep of `n` session folders starts (sweep_gone): a random one."""
+    import random
+    return random.randrange(n)  # nosemgrep: python.lang.security.audit.insecure-random  (an order, no secret)
 
 
 FLAG_GRACE_S = 60  # seconds a sweep leaves a contest flag after it was made and after its call closed
 _TREE_DEPTH = 16  # levels of a folder planted at a flag's name the sweep removes; a deeper one stays
 _SWEEP_MAX = 1000  # flags a sweep looks at and entries of planted folders it removes, at most: the rest waits
+_LIST_MAX = 10 * _SWEEP_MAX  # names a sweep lists in the session folders (dot-files too), at most: the rest waits
+_ROOT_MAX = 10 * _SWEEP_MAX  # names in a sweep's window of the ledger's root: its own cap, apart from _LIST_MAX
+CLAIM_SLACK_S = 1  # seconds a call's audit claim may read as made before the call opened (file and clock times)
 
 
-def _sweep_flags(folder, now: float | None = None, budget: list | None = None):
+def _sweep_flags(folder, now: float | None = None, budget: list | None = None, reads: list | None = None):
     """The contest flags (contest_path) a session's ledger folder kept after their calls ended: each `.<tid>.contested`
     whose call has no ledger entry and no kept record goes, whatever is there: a file, a link (never followed), or a
     folder planted at its name, which the call's end cannot unlink (_drop_marks). A flag made, or whose call closed
@@ -733,11 +875,15 @@ def _sweep_flags(folder, now: float | None = None, budget: list | None = None):
     The folder is opened once, never through a link (O_NOFOLLOW), and every name in it is reached from that open
     folder (dir_fd): a folder that is a link is left, and one swapped for a link meanwhile is never followed. `budget`
     ([count], shared by the sweep's folders): the flags looked at and planted entries removed, at most _SWEEP_MAX;
-    what is left past it waits for the next sweep."""
+    `reads` ([count], shared too): the names listed, at most _LIST_MAX; what is left past either waits for the next
+    sweep. A call's audit claim (audit_claim_path) goes by the same rules. Anything but a regular file at a background
+    record's name (background_path) is never a record (keep_background writes a file) and goes too, a folder through
+    the same bounded removal: while it is there, it keeps its call's flag and marks, as a record does."""
     import stat
     now = now or time.time()
     budget = budget if budget is not None else [_SWEEP_MAX]
-    suffix = ".contested"
+    reads = reads if reads is not None else [_LIST_MAX]
+    suffixes = (".contested", ".audited", ".background")
     try:
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
@@ -745,13 +891,31 @@ def _sweep_flags(folder, now: float | None = None, budget: list | None = None):
     try:
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             return
-        names = [n for n in os.listdir(fd) if n.startswith(".") and n.endswith(suffix) and len(n) > len(suffix) + 1]
+        names = []
+        with os.scandir(fd) as listed:
+            for d in listed:
+                if reads[0] <= 0:
+                    break
+                reads[0] -= 1
+                suffix = next((x for x in suffixes if d.name.endswith(x)), "")
+                if suffix and d.name.startswith(".") and len(d.name) > len(suffix) + 1:
+                    names.append((d.name, suffix))
         closed = unread = object()
-        for name in names:
+        for name, suffix in names:
             if budget[0] <= 0:
                 break
             budget[0] -= 1
             tid = name[1:-len(suffix)]
+            if suffix == ".background":
+                try:
+                    mode = os.lstat(name, dir_fd=fd).st_mode
+                    if stat.S_ISDIR(mode):
+                        _remove_tree_at(fd, name, _TREE_DEPTH, budget)
+                    elif not stat.S_ISREG(mode):
+                        os.unlink(name, dir_fd=fd)
+                except OSError:
+                    pass
+                continue
             if _lexists_at(fd, f"{tid}.json") or _lexists_at(fd, f".{tid}.background"):
                 continue
             try:
@@ -1066,19 +1230,29 @@ def used_path(sid: str, tid: str):
 
 
 def _read_used(sid: str, tid: str) -> dict:
+    """The first verified use's mark (_mark_used), read through the session's folder (_read_ledger_text); {} when
+    there is none."""
     try:
-        doc = json.loads(used_path(sid, tid).read_text() or "{}")
-    except (OSError, ValueError):
+        doc = json.loads(_read_ledger_text(sid, used_path("-", tid).name) or "{}")
+    except ValueError:
         return {}
     return doc if isinstance(doc, dict) else {}
 
 
 def _mark_used(sid: str, tid: str, pid=None, start=None, inode=None):
-    """Record the first verified use: the pinned pid, its start time and the pin's inode (O_EXCL: the first one)."""
+    """Record the first verified use: the pinned pid, its start time and the pin's inode (O_EXCL: the first one), in
+    the session's folder opened without following a link (ledger_folder), never through a link."""
     try:
-        fd = os.open(used_path(sid, tid), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        folder = ledger_folder(sid)
     except OSError:
         return
+    try:
+        fd = os.open(used_path("-", tid).name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                     dir_fd=folder)
+    except OSError:
+        return
+    finally:
+        os.close(folder)
     with os.fdopen(fd, "w") as fh:
         fh.write(json.dumps({"pid": pid, "start": start, "inode": inode}))
 
@@ -1117,36 +1291,42 @@ def _note_use(sid: str, tid: str, entry: dict, args: list) -> bool:
     and whether the call's text runs it (_listed). Appended (O_APPEND), so each dev command of one call keeps its own
     line; the PostToolUse hook audits the changes the text does not run (caller.token-unlisted-use). Never through a
     link: one planted there is removed and the list made anew. False when the use could not be recorded."""
+    import stat
     from . import progress
     line = json.dumps({"use": progress.args_hash(args), "change": bool(state_changing(args)),
                        "listed": _listed(entry, args)}) + "\n"
-    path = uses_path(sid, tid)
-    for _ in range(2):
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-        except OSError:
-            if not os.path.islink(path):
-                return False
+    name = uses_path("-", tid).name
+    try:  # the session's folder, never through a link
+        folder = ledger_folder(sid)
+    except OSError:
+        return False
+    try:
+        for _ in range(2):
             try:
-                os.unlink(path)
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+            except OSError:
+                try:
+                    if not stat.S_ISLNK(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode):
+                        return False
+                    os.unlink(name, dir_fd=folder)
+                except OSError:
+                    return False
+                continue
+            try:
+                return os.write(fd, line.encode()) == len(line.encode())
             except OSError:
                 return False
-            continue
-        try:
-            return os.write(fd, line.encode()) == len(line.encode())
-        except OSError:
-            return False
-        finally:
-            os.close(fd)
-    return False
+            finally:
+                os.close(fd)
+        return False
+    finally:
+        os.close(folder)
 
 
 def read_uses(sid: str, tid: str) -> list:
-    """The verified uses _note_use appended for call `tid`, oldest first ([] when none)."""
-    try:
-        lines = uses_path(sid, tid).read_text().splitlines()
-    except OSError:
-        return []
+    """The verified uses _note_use appended for call `tid`, oldest first ([] when none), read through the session's
+    folder (_read_ledger_text)."""
+    lines = (_read_ledger_text(sid, uses_path("-", tid).name) or "").splitlines()
     out = []
     for ln in lines:
         try:
@@ -1167,9 +1347,10 @@ def _session_of(pid):
 
 
 def _read_entry(sid: str, tid: str):
-    """The ledger entry of call `tid` in session `sid`'s folder only, None when it has none."""
-    from . import core, progress
-    e = core.read_json(progress.CALLS / progress._safe_name(sid) / f"{tid}.json", None)
+    """The ledger entry of call `tid` in session `sid`'s folder only, None when it has none (read through the folder
+    opened without following a link: progress._read_ledger)."""
+    from . import progress
+    e = progress._read_ledger(sid, f"{progress._safe_name(tid)}.json")
     return e if isinstance(e, dict) else None
 
 
@@ -1385,37 +1566,61 @@ def background_path(sid: str, tid: str):
     return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.background"
 
 
+def ledger_folder(sid: str) -> int:
+    """Session `sid`'s folder in the ledger, open for reading and never through a link (O_NOFOLLOW): a descriptor the
+    caller closes, through which every name in it is read, written and removed (dir_fd). OSError when it is missing,
+    a link or anything but a folder."""
+    import stat
+    from . import progress
+    fd = os.open(progress.CALLS / progress._safe_name(sid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError(errno.ENOTDIR, "not a folder", str(sid))
+    return fd
+
+
 def keep_background(entry: dict):
     """The PostToolUse of a background shell call (it closes as soon as it starts), text-pinned or carrying its token:
     its entry is kept for BACKGROUND_KEEP_S so the dev command it starts can still name its caller for a read or a
-    wait (never a state change)."""
+    wait (never a state change). Written in the session's folder opened without following a link (ledger_folder)."""
     if entry.get("pin_by") not in ("text", "shell", "dev") or not entry.get("background"):
         return
-    path = background_path(str(entry.get("session") or ""), str(entry.get("tool_use_id") or ""))
-    for _ in range(2):  # a file or link already there is removed, never written through
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        except FileExistsError:
+    name = background_path("-", str(entry.get("tool_use_id") or "")).name
+    try:
+        folder = ledger_folder(str(entry.get("session") or ""))
+    except OSError:
+        return
+    try:
+        for _ in range(2):  # a file or link already there is removed, never written through
             try:
-                os.unlink(path)
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+            except FileExistsError:
+                try:
+                    os.unlink(name, dir_fd=folder)
+                except OSError:
+                    return
+                continue
             except OSError:
                 return
-            continue
-        except OSError:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(entry))
             return
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(entry))
-        return
+    finally:
+        os.close(folder)
 
 
-def _read_kept(path):
-    """A kept background record, never through a link; None when it cannot be read as one."""
+def _read_kept(path, dir_fd: int | None = None):
+    """A kept background record, never through a link, and only a regular file (a FIFO is never waited on); None when
+    it cannot be read as one. `dir_fd`: the open folder `path` (a name) is in."""
+    import stat
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except OSError:
         return None
     try:
         with os.fdopen(fd) as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
             e = json.loads(fh.read(1 << 20))
     except (OSError, ValueError):
         return None
@@ -1423,24 +1628,38 @@ def _read_kept(path):
 
 
 def _kept_background(sid: str, now: float) -> list:
-    """The background shell calls of session `sid` kept for their reads and waits; older ones go."""
-    from . import progress
-    out = []
+    """The background shell calls of session `sid` kept for their reads and waits; older ones go, and so does anything
+    at a record's name that cannot be read as one: a folder planted there through the bounded tree removal
+    (_remove_tree_at), as the audit claim does, so it never stays to keep the call's marks for every later sweep; the
+    planted folders of one read remove at most _SWEEP_MAX entries together, and the rest waits for the next read. The
+    session's folder is opened once, never through a link (ledger_folder), and every record is read and removed
+    through it."""
+    import stat
+    out, budget = [], [_SWEEP_MAX]
     try:
-        files = list((progress.CALLS / progress._safe_name(sid)).glob(".*.background"))
+        folder = ledger_folder(sid)
     except OSError:
         return []
-    for f in files:
-        e = _read_kept(f)
-        if e is None or now - float(e.get("ts") or 0) > BACKGROUND_KEEP_S:
-            try:
-                f.unlink()
-            except OSError:
-                pass
-            if e is not None:  # its pin and use marks, kept with it, go with it
-                _drop_marks(sid, str(e.get("tool_use_id") or ""))
-            continue
-        out.append(e)
+    try:
+        names = [n for n in os.listdir(folder) if n.startswith(".") and n.endswith(".background")]
+        for name in names:
+            e = _read_kept(name, folder)
+            if e is None or now - float(e.get("ts") or 0) > BACKGROUND_KEEP_S:
+                try:
+                    if stat.S_ISDIR(os.lstat(name, dir_fd=folder).st_mode):
+                        _remove_tree_at(folder, name, _TREE_DEPTH, budget)
+                    else:
+                        os.unlink(name, dir_fd=folder)
+                except OSError:
+                    pass
+                if e is not None:  # its pin and use marks, kept with it, go with it
+                    _drop_marks(sid, str(e.get("tool_use_id") or ""))
+                continue
+            out.append(e)
+    except OSError:
+        return out
+    finally:
+        os.close(folder)
     return out
 
 
@@ -1456,21 +1675,37 @@ def _contest(entry: dict) -> bool:
     """Mark a text call contested, which refuses it for every later claimant: its pin's `.contested` marker, made where
     the name is, never through a link (O_EXCL, O_NOFOLLOW; anything already there, a link included, is the marker
     already: _text_verdict and _pinned refuse on it, os.path.lexists). When the marker cannot be made, the call's
-    contest flag in the ledger (contest_path), made the same way, which they refuse on too (a kept background call's
-    claims read it as well). The call's ledger entry is never rewritten: its close may remove it at any moment, and a
-    rewrite would bring it back as an open call. False when neither could be made: the claimant is still refused, and
-    a later one finds no contest, though the folders that refused these files refuse its pin or its use record too."""
+    contest flag in the ledger (contest_path), made the same way in the session's folder opened without following a
+    link (ledger_folder), which they refuse on too (a kept background call's claims read it as well). The call's
+    ledger entry is never rewritten: its close may remove it at any moment, and a rewrite would bring it back as an
+    open call. False when neither could be made: the claimant is still refused, and a later one finds no contest,
+    though the folders that refused these files refuse its pin or its use record too."""
     sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
     pin = str(entry.get("pin") or "")
-    for path in ([f"{pin}.contested"] if pin else []) + ([str(contest_path(sid, tid))] if sid and tid else []):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    if pin:
         try:
-            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+            os.close(os.open(f"{pin}.contested", flags, 0o600))
             return True
         except FileExistsError:  # it is contested already
             return True
         except OSError:
             pass
-    return False
+    if not (sid and tid):
+        return False
+    try:  # the contest flag, in the session's folder opened without following a link (ledger_folder)
+        folder = ledger_folder(sid)
+    except OSError:
+        return False
+    try:
+        os.close(os.open(contest_path("-", tid).name, flags, 0o600, dir_fd=folder))
+        return True
+    except FileExistsError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(folder)
 
 
 def _contest_mark(entry: dict) -> str:
@@ -1481,7 +1716,7 @@ def _contest_mark(entry: dict) -> str:
     sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
     if pin and os.path.lexists(f"{pin}.contested"):
         return "pin"
-    return "ledger" if sid and tid and os.path.lexists(contest_path(sid, tid)) else ""
+    return "ledger" if sid and tid and _in_ledger(sid, contest_path("-", tid).name) else ""
 
 
 def _was_contested(entry: dict) -> bool:

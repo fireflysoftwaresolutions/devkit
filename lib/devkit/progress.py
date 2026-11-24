@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -37,7 +38,6 @@ import stat
 import statistics
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -420,19 +420,51 @@ def _safe_name(s) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "", str(s or ""))[:120]
 
 
-def _write_private(path: Path, doc: dict):
-    """An atomic write, 0600 in 0700 folders, without a lock: each entry has one writer."""
-    for d in (path.parent.parent, path.parent):  # the ledger, and the session's folder in it
-        d.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+def _private_folder(name, parent: int | None = None) -> int:
+    """Folder `name` (in the open folder `parent`), made if missing, open and never through a link (O_NOFOLLOW): a
+    descriptor, its mode set to 0700 through it. OSError when it is a link, not a folder, or another user's."""
     try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(doc))
-        os.replace(tmp, path)
+        os.mkdir(name, 0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise OSError(errno.ENOTDIR, "not a folder of this user's own", str(name))
+        os.fchmod(fd, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        os.close(fd)
         raise
+    return fd
+
+
+def _write_private(path: Path, doc: dict):
+    """An atomic write, 0600 in 0700 folders, without a lock: each entry has one writer. The ledger (or the record's
+    own top folder) and the session's folder in it are opened without following a link, the first made by path, the
+    second in it, and the file is written and renamed through that open folder (dir_fd): a folder that is a link is
+    refused (OSError) before anything is made, changed or written where it points."""
+    path.parent.parent.parent.mkdir(parents=True, exist_ok=True)
+    top = _private_folder(str(path.parent.parent))
+    try:
+        folder = _private_folder(path.parent.name, top)
+    finally:
+        os.close(top)
+    tmp = f".{path.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(doc))
+            os.replace(tmp, path.name, src_dir_fd=folder, dst_dir_fd=folder)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=folder)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(folder)
 
 
 # What a shell call may run and still write no file (call_reads): devkit's own commands that change only devkit's
@@ -598,10 +630,24 @@ def _dev_arg_hashes(cmd: str, cwd) -> list:
     return list(dict.fromkeys(args_hash(d) for d in found if d))
 
 
+def _read_ledger(sid: str, name: str):
+    """File `name` of session `sid`'s ledger folder, read through that folder opened without following a link, and
+    never through a link or from anything but a regular file (_read_entry_at); None when it cannot be read."""
+    try:
+        from . import identity
+        fd = identity.ledger_folder(sid)
+    except OSError:
+        return None
+    try:
+        return _read_entry_at(fd, name)
+    finally:
+        os.close(fd)
+
+
 def call_entry(data: dict) -> dict:
-    """The open ledger entry of this call; {} when it has none."""
+    """The open ledger entry of this call; {} when it has none (or it cannot be read as one: _read_ledger)."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
-    e = core.read_json(CALLS / sid / f"{tid}.json", None) if tid and sid else None
+    e = _read_ledger(sid, f"{tid}.json") if tid and sid else None
     return e if isinstance(e, dict) else {}
 
 
@@ -648,12 +694,9 @@ def call_closed(data: dict, ended: str = ""):
         return
     entry = CALLS / sid / f"{tid}.json"
     # a call refused before it ran, or denied at its permission check, never started a shell: no record of it
-    e = core.read_json(entry, None) if data.get("hook_event_name") not in ("PreToolUse", "PermissionDenied") else None
+    e = _read_ledger(sid, entry.name) if data.get("hook_event_name") not in ("PreToolUse", "PermissionDenied") else None
     if not isinstance(e, dict) or not e.get("ts") or e.get("closed"):
-        try:
-            entry.unlink()
-        except OSError:
-            pass
+        _unlink_ledger(sid, entry.name)
         return
     now = time.time()
     background = _ran_in_background(e, data)
@@ -683,10 +726,22 @@ def call_closed(data: dict, ended: str = ""):
                f"the record of closed shell calls could not be written ({type(err).__name__}): the call's entry stays "
                f"in the ledger as a later call for {SHELL_KEEP} s", "flagged", tool_use_id=tid, session=sid[:40])
         return
+    _unlink_ledger(sid, entry.name)
+
+
+def _unlink_ledger(sid: str, name: str):
+    """Remove file `name` of session `sid`'s ledger folder, through that folder opened without following a link."""
     try:
-        entry.unlink()
+        from . import identity
+        fd = identity.ledger_folder(sid)
+    except OSError:
+        return
+    try:
+        os.unlink(name, dir_fd=fd)
     except OSError:
         pass
+    finally:
+        os.close(fd)
 
 
 def shells_since(sid: str, since: float, now: float | None = None, strict: bool = False) -> list:
@@ -850,13 +905,15 @@ def call_limit(entry: dict) -> float:
     return ttl + (APPROVAL_S if entry.get("pin_by") == "text" else 0)
 
 
-def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> list:
+def open_calls(sid: str, now: float | None = None, closed_too: bool = False, budget: list | None = None) -> list:
     """The session's open calls, oldest first. An entry past its time (call_limit) got no result (the tool was cut
     off, another hook refused it, or the developer denied it): it is removed and audited as calls.unclosed, and its
     call's identity ends (identity.note_closed; a contested one is audited, identity.audit_contested). `closed_too`:
     with the entries of closed calls whose record could not be written (call_closed), kept as later calls for the text
     pin until SHELL_KEEP after they closed, then removed without an audit (their call ended, and its drop was audited).
-    The folder is opened once, never through a link, and every entry is read and removed through it (dir_fd)."""
+    The folder is opened once, never through a link, and every entry is read and removed through it (dir_fd).
+    `budget` ([count], a sweep's): it counts the names listed, each name taking one (dot-files and names that are no
+    entry too; reading an entry takes none), and the listing stops when it is spent (the calls found by then)."""
     now = now or time.time()
     try:  # the session's folder, never through a link: what a link points to is never read or removed
         fd = os.open(CALLS / _safe_name(sid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -865,7 +922,7 @@ def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> 
     try:
         if not stat.S_ISDIR(os.fstat(fd).st_mode):
             return []
-        return _open_calls_at(fd, sid, now, closed_too)
+        return _open_calls_at(fd, sid, now, closed_too, budget)
     except OSError:
         return []
     finally:
@@ -873,22 +930,25 @@ def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> 
 
 
 def _read_entry_at(fd: int, name: str):
-    """Ledger entry `name` of the open session folder `fd`, never through a link; None when it cannot be read."""
+    """Ledger entry `name` of the open session folder `fd`, never through a link and only from a regular file (a FIFO
+    is never waited on); None when it cannot be read."""
     try:
         f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     except OSError:
         return None
     try:
         with os.fdopen(f, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
             return json.loads(fh.read())
     except (OSError, ValueError):
         return None
 
 
-def _open_calls_at(fd: int, sid: str, now: float, closed_too: bool) -> list:
+def _open_calls_at(fd: int, sid: str, now: float, closed_too: bool, budget: list | None = None) -> list:
     """open_calls in the session folder open at `fd`: every name is read and removed from that folder (dir_fd)."""
     out = []
-    for name in os.listdir(fd):
+    for name in (os.listdir(fd) if budget is None else _listed(fd, budget)):
         if not name.endswith(".json") or name.startswith("."):
             continue
         e = _read_entry_at(fd, name)
@@ -931,6 +991,16 @@ def _open_calls_at(fd: int, sid: str, now: float, closed_too: bool) -> list:
             continue
         out.append(e)
     return sorted(out, key=lambda e: e.get("ts") or 0)
+
+
+def _listed(fd: int, budget: list):
+    """The names of the open folder `fd`, each taking one of `budget` ([count]); the listing stops when it is spent."""
+    with os.scandir(fd) as found:
+        for d in found:
+            if budget[0] <= 0:
+                return
+            budget[0] -= 1
+            yield d.name
 
 
 def _names_args(entry: dict, args: list) -> bool:

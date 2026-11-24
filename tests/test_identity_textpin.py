@@ -1347,6 +1347,37 @@ class TextPinRecordFailureTests(TextPinCase):
         self.closed(lead)
         self.assertFalse(os.path.lexists(flag))
 
+    # anything planted at the call's contest flag while the pin's marker cannot be made is contest enough: the
+    # member's retry is still refused once the tech lead's shell is gone
+    def planted_at_the_contest_flag(self, kind):
+        lead, lead_shell, forger = self.raced()
+        flag = identity.contest_path("s1", lead["tool_use_id"])
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "folder":
+            flag.mkdir()
+        elif kind == "dangling-link":
+            os.symlink(self.root / "nowhere", flag)
+        else:
+            os.mkfifo(flag)
+        with self.no_marker():
+            rc, out = self.in_shell(forger, *LEAD_ARGS)
+            self.assertEqual(rc, 2, out)
+            del self.argvs[lead_shell]
+            self.starts[lead_shell] = None
+            rc, out = self.in_shell(forger, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(identity._contest_mark(pg.call_entry(lead)), "ledger")
+
+    def test_a_folder_planted_at_the_contest_flag_still_refuses_a_later_claimant(self):
+        self.planted_at_the_contest_flag("folder")
+
+    def test_a_dangling_link_planted_at_the_contest_flag_still_refuses_a_later_claimant(self):
+        self.planted_at_the_contest_flag("dangling-link")
+
+    def test_a_fifo_planted_at_the_contest_flag_still_refuses_a_later_claimant(self):
+        self.planted_at_the_contest_flag("fifo")
+
     # a later call that was interrupted (its result says so) but whose shell ignored the signal and took the tech
     # lead's call form is still that later call: the tech lead's call is contested, never taken
     def test_a_surviving_shell_of_an_interrupted_later_call_never_passes_as_the_tech_leads(self):
@@ -1507,14 +1538,14 @@ class TextPinRecordFailureTests(TextPinCase):
         outside.mkdir()
         (outside / ".toolu_z.contested").write_text("")
         moved = self.root / "moved"
-        real = os.listdir
+        real = os.scandir
 
         def swap(p):
             if not os.path.islink(folder):
                 os.rename(folder, moved)
                 os.symlink(outside, folder)
             return real(p)
-        with mock.patch.object(os, "listdir", swap):
+        with mock.patch.object(os, "scandir", swap):  # the listing, once the folder is open
             identity._sweep_flags(folder, time.time() + identity.FLAG_GRACE_S + 1)
         self.assertTrue(os.path.islink(folder))  # the swap happened
         self.assertEqual(os.listdir(outside), [".toolu_z.contested"])
@@ -1875,6 +1906,426 @@ class TextPinRecordFailureTests(TextPinCase):
             self.assertEqual(cli.cmd_sync(args), 0)
         self.assertEqual(len(self.records("calls.text-use-without-result")), 1)
         self.assertEqual(pg.open_calls("s1"), [])
+
+
+
+# The ledger's session folders and files as a user's other processes may leave them: a session folder that is a link,
+# a ledger file that is a link or a FIFO. devkit never reads, writes or removes through a link, and never blocks.
+class LedgerFolderTests(TextPinCase):
+    def linked(self, sid="s-link"):
+        outside = self.root / f"outside-{sid}"
+        outside.mkdir(mode=0o755)
+        outside.chmod(0o755)
+        pg.CALLS.mkdir(parents=True, exist_ok=True)
+        os.symlink(outside, pg.CALLS / sid)
+        return outside
+
+    def kept_record(self, sid, tid, ts):
+        return json.dumps({"session": sid, "tool_use_id": tid, "ts": ts, "pin_by": "text", "background": True,
+                           "caller": "main", "agent": "claude", "cmd": "dev watch --wait"})
+
+    # in a background record's reader: a linked session folder is never listed, read or cleaned
+    def test_kept_background_records_are_never_read_or_removed_through_a_linked_session_folder(self):
+        outside = self.linked()
+        now = time.time()
+        (outside / ".toolu_k.background").write_text(self.kept_record("s-link", "toolu_k", now))
+        (outside / ".toolu_old.background").write_text(self.kept_record("s-link", "toolu_old", now - 1000))
+        self.assertEqual(identity._kept_background("s-link", now), [])
+        self.assertEqual(sorted(os.listdir(outside)), [".toolu_k.background", ".toolu_old.background"])
+        # swapped for a link once the reader opened it: the stale record of the folder it opened goes, nothing outside
+        folder = pg.CALLS / "s-swap"
+        folder.mkdir()
+        (folder / ".toolu_old.background").write_text(self.kept_record("s-swap", "toolu_old", now - 1000))
+        moved, real = self.root / "moved", os.listdir
+
+        def swap(p):
+            if not os.path.islink(folder):
+                os.rename(folder, moved)
+                os.symlink(outside, folder)
+            return real(p)
+        with mock.patch.object(os, "listdir", swap):
+            self.assertEqual(identity._kept_background("s-swap", now), [])
+        self.assertTrue(os.path.islink(folder))  # the swap happened
+        self.assertEqual(os.listdir(moved), [])
+        self.assertEqual(sorted(os.listdir(outside)), [".toolu_k.background", ".toolu_old.background"])
+
+    # a background call's record and a call's contest flag are never written or removed through a linked folder
+    def test_a_call_never_keeps_or_drops_its_marks_through_a_linked_session_folder(self):
+        outside = self.linked()
+        (outside / ".toolu_k.contested").write_text("")
+        entry = json.loads(self.kept_record("s-link", "toolu_k", time.time()))
+        identity.keep_background(entry)
+        identity._drop_marks("s-link", "toolu_k")
+        self.assertEqual(os.listdir(outside), [".toolu_k.contested"])
+
+    # a contest flag is never made or read through a linked session folder: a flag planted where the link points
+    # marks nothing, and none is made there; in a real folder the flag is made and read
+    def test_a_contest_flag_is_never_made_or_read_through_a_linked_session_folder(self):
+        outside = self.linked()
+        self.assertFalse(identity._contest({"session": "s-link", "tool_use_id": "toolu_c"}))
+        self.assertEqual(os.listdir(outside), [])
+        (outside / ".toolu_k.contested").write_text("")
+        self.assertEqual(identity._contest_mark({"session": "s-link", "tool_use_id": "toolu_k"}), "")
+        self.assertEqual(os.listdir(outside), [".toolu_k.contested"])
+        (pg.CALLS / "s1").mkdir()
+        real = {"session": "s1", "tool_use_id": "toolu_r"}
+        self.assertTrue(identity._contest(real))
+        self.assertEqual(identity._contest_mark(real), "ledger")
+
+    # a call's end never takes a kept record seen through a linked session folder for its own, so its pin goes; and
+    # its use marks are never made, read or removed there
+    def test_a_calls_end_and_use_marks_never_go_through_a_linked_session_folder(self):
+        outside = self.linked()
+        planted = {".toolu_k.background": self.kept_record("s-link", "toolu_k", time.time()),
+                   ".toolu_k.used": json.dumps({"pid": 1, "start": 1.0, "inode": 1}),
+                   ".toolu_k.uses": json.dumps({"use": "x", "change": True, "listed": False}) + "\n",
+                   "toolu_k.json": json.dumps({"tool_use_id": "toolu_k", "session": "s-link", "caller": "main"})}
+        for name, text in planted.items():
+            (outside / name).write_text(text)
+        pin = identity.pin_path("s-link", "toolu_k")
+        pin.parent.mkdir(parents=True, exist_ok=True)
+        pin.write_text("123")
+        identity.note_closed("claude", "s-link", "toolu_k")
+        self.assertFalse(os.path.lexists(pin))
+        self.assertEqual((identity._read_used("s-link", "toolu_k"), identity.read_uses("s-link", "toolu_k"),
+                          identity._read_entry("s-link", "toolu_k")), ({}, [], None))
+        identity._mark_used("s-link", "toolu_n", 1, 1.0, 1)
+        self.assertFalse(identity._note_use("s-link", "toolu_n", {"cmd": "dev progress add x"},
+                                            ["progress", "add", "x"]))
+        self.assertEqual(sorted(os.listdir(outside)), sorted(planted))
+        self.assertEqual([(outside / n).read_text() for n in sorted(planted)], [planted[n] for n in sorted(planted)])
+
+    # a use mark planted where a linked session folder points never makes the PostToolUse hook flag the tech lead's
+    # call as resolved by a dev command its text does not run; the same mark in a real folder does
+    def test_a_use_mark_seen_through_a_linked_session_folder_flags_no_unexplained_use(self):
+        from devkit import hooks
+        outside = self.linked()
+        (pg.CALLS / "s1").mkdir()
+        for sid, folder in (("s-link", outside), ("s1", pg.CALLS / "s1")):
+            (folder / ".toolu_u.used").write_text(json.dumps({"pid": 1, "start": 1.0, "inode": 1}))
+            entry = {"pin": str(self.root / "no-pin"), "caller": "main", "cmd": "git status", "agent": "claude",
+                     "ts": time.time(), "session": sid, "tool_use_id": "toolu_u"}
+            hooks._pin_audits(entry, {"session_id": sid, "tool_use_id": "toolu_u", "hook_event_name": "PostToolUse"},
+                              "")
+        self.assertEqual([r["ref"]["session"] for r in self.records("caller.token-unexplained-use")], ["s1"])
+
+    # nor the Codex thread check flag a mismatch for it
+    def test_a_use_mark_seen_through_a_linked_session_folder_flags_no_codex_thread_mismatch(self):
+        from devkit import hooks
+        outside = self.linked()
+        (pg.CALLS / "s1").mkdir()
+        for sid, folder in (("s-link", outside), ("s1", pg.CALLS / "s1")):
+            (folder / ".toolu_t.used").write_text(json.dumps({"pid": 1, "start": 1.0, "inode": 1}))
+            hooks._codex_thread_mismatch("codex", {"session_id": sid, "tool_use_id": "toolu_t"},
+                                         {"thread_id": "thread-other"})
+        self.assertEqual([r["ref"]["session"] for r in self.records("caller.mismatch")], ["s1"])
+
+    # the hook's ledger writes (call_opened, call_note) never change the mode of a folder a link points to, nor
+    # write there
+    def test_a_ledger_write_never_goes_through_a_linked_session_folder(self):
+        outside = self.linked()
+        data = {"session_id": "s-link", "tool_use_id": "toolu_w", "tool_name": "Bash",
+                "tool_input": {"command": "git status"}}
+        with self.assertRaises(OSError):
+            pg.call_opened("claude", data)
+        with self.assertRaises(OSError):
+            pg._write_private(pg.CALLS / "s-link" / "toolu_w.json", {"ts": 1})
+        self.assertEqual((os.listdir(outside), oct(outside.stat().st_mode & 0o777)), ([], "0o755"))
+
+    # a ledger entry, a kept record or the ledger's own folder that is a FIFO never blocks a reader: it reads as none
+    def test_a_fifo_in_the_ledger_never_blocks_a_reader(self):
+        import threading
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        os.mkfifo(folder / "toolu_f.json")
+        os.mkfifo(folder / ".toolu_g.background")
+        got = {}
+
+        def read():
+            got["entry"] = pg.call_entry({"session_id": "s1", "tool_use_id": "toolu_f"})
+            got["kept"] = identity._read_kept(folder / ".toolu_g.background")
+            pg.call_closed({"session_id": "s1", "tool_use_id": "toolu_f", "hook_event_name": "PostToolUse"})
+            got["done"] = True
+        t = threading.Thread(target=read, daemon=True)
+        t.start()
+        t.join(10)
+        self.assertEqual(got, {"entry": {}, "kept": None, "done": True})
+
+    # a ledger entry that is a link is never read, whatever it points to
+    def test_a_ledger_entry_that_is_a_link_is_never_read(self):
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        target = self.root / "planted.json"
+        target.write_text(json.dumps({"tool_use_id": "toolu_l", "ts": time.time(), "caller": "main", "session": "s1",
+                                      "agent": "claude", "cmd": "dev progress add extra"}))
+        os.symlink(target, folder / "toolu_l.json")
+        self.assertEqual(pg.open_calls("s1"), [])
+        self.assertTrue(target.exists())
+
+    # SessionEnd: a contest that lands while the call closes (call_closed can wait on the record's lock) is audited,
+    # as at the call's PostToolUse
+    def test_a_contest_made_while_the_session_end_closes_the_call_is_audited(self):
+        self.plan_with_link()
+        data, _, _ = self.hook(LEAD)
+        entry = pg.call_entry(data)
+        real, contested = pg.call_closed, []
+
+        def contest_then_close(*a, **k):
+            contested.append(identity._contest(entry))
+            return real(*a, **k)
+        with mock.patch.object(pg, "call_closed", contest_then_close):
+            identity.end_session(self.agent, "s1")
+        self.assertEqual(contested, [True])
+        found = [r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"]
+        self.assertEqual(len(found), 1)
+        self.assertIn("session-ended", found[0]["detail"])
+
+    # two processes that end one call (its PostToolUse and a SessionEnd, or two sweeps) write one contest audit
+    def test_two_ends_of_one_contested_call_write_one_audit(self):
+        self.plan_with_link()
+        data, _, _ = self.hook(LEAD)
+        entry = pg.call_entry(data)
+        identity._contest(entry)
+        mark = identity._contest_mark(entry)
+        identity.audit_contested(entry, "s1", data["tool_use_id"], mark)
+        identity._drop_marks("s1", data["tool_use_id"])  # the first end's marks go before the second end audits
+        identity.audit_contested(entry, "s1", data["tool_use_id"], mark, "session-ended")
+        self.assertEqual(len([r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"]), 1)
+
+    # anything planted at a call's audit claim before its only end (a FIFO, a link, a dangling link, a folder, an
+    # empty file older than the call) never stops its contest audit; what a link points to is never touched, and the
+    # claim the audit makes then keeps a second end from writing it again
+    def test_something_planted_at_the_audit_claim_never_stops_the_contest_audit(self):
+        self.plan_with_link()
+        data, _, _ = self.hook(LEAD)
+        entry = pg.call_entry(data)
+        target = self.root / "target"
+        target.write_text("t")
+        flagged = lambda: len([r for r in self.records("calls.pin-contested")  # noqa: E731
+                               if r["ref"]["result"] == "flagged"])
+        for kind in ("fifo", "link", "dangling-link", "folder", "old-file"):
+            with self.subTest(kind):
+                tid = f"toolu_claim_{kind.replace('-', '_')}"
+                claim = identity.audit_claim_path("s1", tid)
+                if kind == "fifo":
+                    os.mkfifo(claim)
+                elif kind == "link":
+                    os.symlink(target, claim)
+                elif kind == "dangling-link":
+                    os.symlink(self.root / "nowhere", claim)
+                elif kind == "folder":
+                    claim.mkdir()
+                    (claim / "x").write_text("")
+                else:
+                    claim.write_text("")
+                    old = float(entry["ts"]) - 100
+                    os.utime(claim, (old, old))
+                before = flagged()
+                identity.audit_contested(entry, "s1", tid, "pin")
+                self.assertEqual(flagged(), before + 1)
+                identity.audit_contested(entry, "s1", tid, "pin", "session-ended")
+                self.assertEqual(flagged(), before + 1)
+        self.assertEqual(target.read_text(), "t")
+
+    # anything planted at a call's use mark before its token's real first use (a dangling link, a folder, a FIFO)
+    # keeps that use from writing its mark, and counts as the mark: the PostToolUse hook still flags the unexplained
+    # use of the tech lead's token, since something planted there is itself suspect
+    def test_something_planted_at_the_use_mark_still_flags_the_unexplained_use(self):
+        from devkit import hooks
+        sids = []
+        for i, kind in enumerate(("dangling-link", "folder", "fifo")):
+            sid, tid = f"s-{kind}", f"toolu_{i}"
+            (pg.CALLS / sid).mkdir(parents=True)
+            mark = identity.used_path(sid, tid)
+            if kind == "dangling-link":
+                os.symlink(self.root / "nowhere", mark)
+            elif kind == "folder":
+                mark.mkdir()
+            else:
+                os.mkfifo(mark)
+            identity._mark_used(sid, tid, 4242, 1.0, 7)  # the token's real first use
+            entry = {"pin": str(self.root / "no-pin"), "caller": "main", "cmd": "python3 x.py", "agent": "claude",
+                     "ts": time.time(), "session": sid, "tool_use_id": tid}
+            hooks._pin_audits(entry, {"session_id": sid, "tool_use_id": tid, "hook_event_name": "PostToolUse"}, "")
+            sids.append(sid)
+        self.assertEqual([r["ref"]["session"] for r in self.records("caller.token-unexplained-use")], sids)
+
+    # a folder planted at a call's background record counts as one when the call ends (its marks stay, as the sweep
+    # leaves its flag while it is there), and never stays: the record's reader removes it, which unlink cannot, and so
+    # does the sweep when no reader comes; the call's stale flag then goes at the next sweep
+    def planted_background_folder(self, sid, kind="folder"):
+        folder = pg.CALLS / sid
+        folder.mkdir(parents=True)
+        record = identity.background_path(sid, "toolu_bg")
+        if kind == "folder":
+            record.mkdir()
+            (record / "d").mkdir()
+            (record / "d" / "x").write_text("")
+        elif kind == "fifo":
+            os.mkfifo(record)
+        else:
+            os.symlink(self.root / "nowhere", record)
+        flag = identity.contest_path(sid, "toolu_bg")
+        flag.write_text("")
+        old = time.time() - 10 * identity.FLAG_GRACE_S
+        os.utime(flag, (old, old))
+        identity.note_closed("claude", sid, "toolu_bg")
+        self.assertTrue(os.path.lexists(flag))
+        return folder, record, flag
+
+    def test_a_folder_planted_at_a_background_record_goes_at_its_next_read(self):
+        folder, record, flag = self.planted_background_folder("s1")
+        self.assertEqual(identity._kept_background("s1", time.time()), [])
+        self.assertFalse(os.path.lexists(record))
+        identity._sweep_flags(folder, time.time())
+        self.assertFalse(os.path.lexists(flag))
+
+    # the same for a FIFO or a dangling link there
+    def test_anything_but_a_file_planted_at_a_background_record_goes_at_the_sweep(self):
+        for kind in ("folder", "fifo", "dangling-link"):
+            with self.subTest(kind):
+                folder, record, flag = self.planted_background_folder(f"s-{kind}", kind)
+                for _ in range(2):
+                    identity._sweep_flags(folder, time.time())
+                self.assertEqual((os.path.lexists(record), os.path.lexists(flag)), (False, False))
+
+    # a background record that cannot be looked up (the session's folder cannot be searched) counts as one for the
+    # call's end as for the sweep: the end keeps the call's pin, as the sweep keeps its flag
+    def test_a_background_record_that_cannot_be_looked_up_counts_as_one_for_the_end_and_the_sweep(self):
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        flag = identity.contest_path("s1", "toolu_bg")
+        flag.write_text("")
+        old = time.time() - 10 * identity.FLAG_GRACE_S
+        os.utime(flag, (old, old))
+        pin = identity.pin_path("s1", "toolu_bg")
+        pin.parent.mkdir(parents=True, exist_ok=True)
+        pin.write_text("123")
+        folder.chmod(0o600)  # listed, never searched: no name in it can be looked up
+        self.addCleanup(folder.chmod, 0o700)
+        identity._sweep_flags(folder, time.time())
+        identity.note_closed("claude", "s1", "toolu_bg")
+        folder.chmod(0o700)
+        self.assertEqual((os.path.lexists(flag), os.path.lexists(pin)), (True, True))
+
+    # an audit that cannot be written is recorded as a swallowed devkit error, never lost silently
+    def test_a_contest_audit_that_fails_is_reported(self):
+        from devkit import audit, bugs
+        seen = []
+        entry = {"pin": "/x/toolu_e.pin", "agent": "claude", "cmd": "dev progress add extra"}
+        with mock.patch.object(audit, "record", side_effect=OSError("disk full")), \
+                mock.patch.object(bugs, "swallowed", lambda c, e: seen.append(str(e))):
+            identity.audit_contested(entry, "s1", "toolu_e", "pin")
+        self.assertEqual(seen, ["disk full"])
+
+    # 1,000 flags in the first folder never starve the others: each sweep starts at another folder
+    def test_a_flood_of_flags_in_one_folder_never_starves_the_others(self):
+        old = time.time() - 10 * identity.FLAG_GRACE_S
+        for sid, n in (("s-a", 8), ("s-b", 1)):
+            folder = pg.CALLS / sid
+            folder.mkdir(parents=True)
+            for i in range(n):
+                flag = folder / f".toolu_{i}.contested"
+                flag.mkdir()  # a planted folder: each takes its entry and its own removal
+                (flag / "x").write_text("")
+                os.utime(flag, (old, old))
+        with mock.patch.object(identity, "_SWEEP_MAX", 2), mock.patch.object(identity, "_sweep_start", lambda n: 1):
+            identity.sweep_gone()
+        self.assertEqual(os.listdir(pg.CALLS / "s-b"), [])
+
+    # the sweep reads at most a bounded number of ledger entries and names, however many a folder holds
+    def test_the_sweep_reads_a_bounded_number_of_entries(self):
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        for i in range(40):
+            (folder / f"toolu_{i:02d}.json").write_text(json.dumps({"ts": time.time(), "agent_pid": 1}))
+        real, reads = pg._read_entry_at, []
+
+        def counted(fd, name):
+            reads.append(name)
+            return real(fd, name)
+        with mock.patch.object(identity, "_LIST_MAX", 10), mock.patch.object(pg, "_read_entry_at", counted), \
+                mock.patch.object(pg, "_pid_running", lambda pid: True):
+            identity.sweep_gone()
+        self.assertLessEqual(len(reads), 10)
+
+    # names flooded into the ledger's root (dot-files, anything but a session folder) never spend the budget the
+    # sweep has for the session folders' names, and the root's own listing stops at its cap
+    def test_a_flooded_ledger_root_never_spends_the_sweeps_budget(self):
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        (folder / "toolu_g.json").write_text(json.dumps({"ts": time.time(), "agent_pid": 1, "tool_use_id": "toolu_g",
+                                                         "session": "s1", "agent": "claude", "cmd": "git status"}))
+        for i in range(9):
+            (pg.CALLS / f".flood-{i}").write_text("")
+        with mock.patch.object(identity, "_LIST_MAX", 10), mock.patch.object(pg, "_pid_running", lambda pid: False):
+            self.assertEqual(identity.sweep_gone(), 1)
+        for i in range(9, 40):
+            (pg.CALLS / f".flood-{i}").write_text("")
+        real, listed = os.scandir, []
+
+        class Counted:
+            def __init__(self, it):
+                self.it = it
+
+            def __enter__(self):
+                self.it.__enter__()
+                return self
+
+            def __exit__(self, *a):
+                return self.it.__exit__(*a)
+
+            def __iter__(self):
+                for d in self.it:
+                    listed.append(d.name)
+                    yield d
+
+        def scandir(p=None):
+            got = real(p)
+            return Counted(got) if p == pg.CALLS else got
+        with mock.patch.object(identity, "_ROOT_MAX", 5), mock.patch.object(os, "scandir", scandir), \
+                mock.patch.object(identity, "_root_offset", lambda: 4, create=True):
+            identity.sweep_gone()
+        self.assertEqual(len(listed), 9)  # the names before its window's random start, then the window
+
+    # a session folder listed after 30 names flooded into the ledger's root is still swept, though the root's window
+    # holds 20 names: each sweep's window starts at a random name, and one that runs past the listing's end wraps
+    # round to its start
+    def test_a_session_folder_past_the_roots_cap_is_still_swept(self):
+        folder = pg.CALLS / "s-real"
+        folder.mkdir(parents=True)
+        flag = identity.contest_path("s-real", "toolu_q")
+        flag.write_text("")
+        old = time.time() - 10 * identity.FLAG_GRACE_S
+        os.utime(flag, (old, old))
+        for i in range(30):
+            (pg.CALLS / f".junk{i:03d}").write_text("")
+        real = os.scandir
+
+        class Last:  # the root's listing, with the session folder last
+            def __init__(self, it):
+                self.it = it
+
+            def __enter__(self):
+                self.it.__enter__()
+                return self
+
+            def __exit__(self, *a):
+                return self.it.__exit__(*a)
+
+            def __iter__(self):
+                return iter(sorted(self.it, key=lambda d: d.name == "s-real"))
+
+        def scandir(p=None):
+            got = real(p)
+            return Last(got) if p == pg.CALLS else got
+        offsets, left = iter([0, 5, 12]), []
+        with mock.patch.object(identity, "_ROOT_MAX", 20), mock.patch.object(os, "scandir", scandir), \
+                mock.patch.object(identity, "_root_offset", lambda: next(offsets), create=True):
+            for _ in range(3):
+                identity.sweep_gone()
+                left.append(os.path.lexists(flag))
+        self.assertEqual(left, [True, True, False])
 
 
 if __name__ == "__main__":
