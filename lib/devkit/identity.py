@@ -730,7 +730,7 @@ def audit_contested(entry: dict, sid: str, tid: str, mark: str, ended: str = "")
     ledger entry goes, and again after. Two processes that end one call (its PostToolUse and a SessionEnd, two
     sweeps) write one audit: the first to make the call's audit claim (audit_claim_path) writes it. An audit that
     fails is recorded as a swallowed devkit error (bugs.swallowed), never lost silently."""
-    if not mark or not entry.get("pin") or not _claim_audit(sid, tid):
+    if not mark or not entry.get("pin") or not _claim_audit(sid, tid, entry.get("ts")):
         return
     why = ("another process wrote this call's pin before its shell did" if mark == "pin"
            else "this call is marked contested: its contest flag is in the ledger")
@@ -758,22 +758,44 @@ def audit_claim_path(sid: str, tid: str):
     return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.audited"
 
 
-def _claim_audit(sid: str, tid: str) -> bool:
+def _claim_audit(sid: str, tid: str, since=None) -> bool:
     """True when this process is the first to audit call `tid`'s contest: it made the claim (O_EXCL), in the session's
-    folder opened without following a link. True too when no claim can be made there (no folder, a link, a full
-    disk): an audit written twice is better than none."""
+    folder opened without following a link. A claim already there counts only when it is a regular file of this user
+    made no earlier than the call opened (`since`, its ledger entry's ts; CLAIM_SLACK_S for the clocks): anything
+    else there (a FIFO, a link, never followed, a folder, an older file, any file when `since` is unknown) is removed
+    and the claim made again. True too when no claim can be made there (no folder, a link, a full disk, something
+    planted that cannot be removed): an audit written twice is better than none."""
+    import stat
     if not tid:
         return True
+    try:
+        since = float(since)
+    except (TypeError, ValueError):
+        since = None
+    name = audit_claim_path("-", tid).name
     try:
         folder = ledger_folder(sid)
     except OSError:
         return True
     try:
-        os.close(os.open(audit_claim_path("-", tid).name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                         0o600, dir_fd=folder))
+        for _ in range(2):
+            try:
+                os.close(os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder))
+                return True
+            except FileExistsError:
+                pass
+            try:
+                st = os.lstat(name, dir_fd=folder)
+            except FileNotFoundError:
+                continue  # removed meanwhile: make it again
+            if (stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() and since is not None
+                    and st.st_mtime >= since - CLAIM_SLACK_S):
+                return False  # another end of this call made it: that end writes the audit
+            if stat.S_ISDIR(st.st_mode):
+                _remove_tree_at(folder, name, _TREE_DEPTH)
+            else:
+                os.unlink(name, dir_fd=folder)
         return True
-    except FileExistsError:
-        return False
     except OSError:
         return True
     finally:
@@ -828,6 +850,7 @@ FLAG_GRACE_S = 60  # seconds a sweep leaves a contest flag after it was made and
 _TREE_DEPTH = 16  # levels of a folder planted at a flag's name the sweep removes; a deeper one stays
 _SWEEP_MAX = 1000  # flags a sweep looks at and entries of planted folders it removes, at most: the rest waits
 _LIST_MAX = 10 * _SWEEP_MAX  # names a sweep lists and ledger entries it reads, at most: the rest waits
+CLAIM_SLACK_S = 1  # seconds a call's audit claim may read as made before the call opened (file and clock times)
 
 
 def _sweep_flags(folder, now: float | None = None, budget: list | None = None, reads: list | None = None):

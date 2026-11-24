@@ -2061,6 +2061,41 @@ class LedgerFolderTests(TextPinCase):
         identity.audit_contested(entry, "s1", data["tool_use_id"], mark, "session-ended")
         self.assertEqual(len([r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"]), 1)
 
+    # anything planted at a call's audit claim before its only end (a FIFO, a link, a dangling link, a folder, an
+    # empty file older than the call) never stops its contest audit; what a link points to is never touched, and the
+    # claim the audit makes then keeps a second end from writing it again
+    def test_something_planted_at_the_audit_claim_never_stops_the_contest_audit(self):
+        self.plan_with_link()
+        data, _, _ = self.hook(LEAD)
+        entry = pg.call_entry(data)
+        target = self.root / "target"
+        target.write_text("t")
+        flagged = lambda: len([r for r in self.records("calls.pin-contested")  # noqa: E731
+                               if r["ref"]["result"] == "flagged"])
+        for kind in ("fifo", "link", "dangling-link", "folder", "old-file"):
+            with self.subTest(kind):
+                tid = f"toolu_claim_{kind.replace('-', '_')}"
+                claim = identity.audit_claim_path("s1", tid)
+                if kind == "fifo":
+                    os.mkfifo(claim)
+                elif kind == "link":
+                    os.symlink(target, claim)
+                elif kind == "dangling-link":
+                    os.symlink(self.root / "nowhere", claim)
+                elif kind == "folder":
+                    claim.mkdir()
+                    (claim / "x").write_text("")
+                else:
+                    claim.write_text("")
+                    old = float(entry["ts"]) - 100
+                    os.utime(claim, (old, old))
+                before = flagged()
+                identity.audit_contested(entry, "s1", tid, "pin")
+                self.assertEqual(flagged(), before + 1)
+                identity.audit_contested(entry, "s1", tid, "pin", "session-ended")
+                self.assertEqual(flagged(), before + 1)
+        self.assertEqual(target.read_text(), "t")
+
     # a dangling link or a folder at a call's use mark is no use mark: the PostToolUse hook flags no unexplained use
     # of the tech lead's token for it, while a regular file there is one
     def test_only_a_regular_file_counts_as_a_use_mark(self):
