@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 import venv
 from unittest import mock
@@ -872,6 +873,61 @@ class LockedCopyTests(unittest.TestCase):
         self.assertEqual([("test_calc.CalcTests.test_x", "cannot be proven: without the change it fails on "
                                                          "AttributeError, not on an assertion")],
                          [(x["id"], x["verdict"]) for x in json.loads(out)["tests"]], out + err)
+
+
+def locked_chain(root, name, modes):
+    """Folder `name` in `root` that holds one folder in another, a file in the deepest, each folder given its mode of
+    `modes` from the outermost in (the deepest locked first). -> its path."""
+    top = p = os.path.join(root, name)
+    os.mkdir(top)
+    chain = []
+    for i in range(len(modes)):
+        p = os.path.join(p, f"d{i}")
+        os.mkdir(p)
+        chain.append(p)
+    Path(p, "f").write_text("x")
+    for d, mode in reversed(list(zip(chain, modes))):
+        os.chmod(d, mode)
+    return top
+
+
+def unlock_all(root):
+    """Give every folder under `root` back to its owner, outermost first, so a temporary folder can go."""
+    try:
+        os.chmod(root, 0o700)
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for e in entries:
+        if e.is_dir(follow_symlinks=False):
+            unlock_all(e.path)
+
+
+class RemoveTreeTests(unittest.TestCase):
+    # a removal cannot list a folder a test left unreadable (or listable by name only) until it unlocks it, which
+    # takes one more pass for each folder locked inside another: the passes go on while one unlocks something, so
+    # such folders go at any depth, and the sweep of stale proof copies removes them the same way
+    def test_folders_locked_one_inside_another_are_removed(self):
+        for modes in ([0o000] * 2, [0o000] * 3, [0o100] * 2, [0o555, 0o000, 0o100]):
+            with self.subTest(" in ".join(oct(m) for m in reversed(modes))), tempfile.TemporaryDirectory() as root:
+                top = locked_chain(root, "copy", modes)
+                try:
+                    self.assertTrue(testx._remove_tree(top))
+                    self.assertFalse(os.path.lexists(top))
+                finally:
+                    unlock_all(root)
+
+    def test_the_sweep_removes_a_stale_copy_with_folders_locked_one_inside_another(self):
+        with tempfile.TemporaryDirectory() as parent:
+            name = testx.PROVE_COPY + "stale"
+            top = locked_chain(parent, name, [0o000] * 3)
+            old = time.time() - 2 * 86400
+            os.utime(top, (old, old))
+            try:
+                self.assertEqual([name], testx.sweep_prove_copies(parent))
+                self.assertFalse(os.path.lexists(top))
+            finally:
+                unlock_all(parent)
 
 
 class UnittestModuleFunctionTests(unittest.TestCase):

@@ -5461,15 +5461,21 @@ PROVE_COPY_DAYS = 1
 
 
 def _remove_tree(path) -> bool:
-    """Remove folder `path` with all it holds, a read-only folder a test left in it too: a removal refused there makes
-    the folder and what failed readable and writable for their owner and is tried again, and a second pass reads a
-    folder the first could not list. Links are removed, never followed. -> whether `path` is gone (a file locked
-    beyond its owner's mode, as an immutable flag locks it, keeps it)."""
+    """Remove folder `path` with all it holds, read-only and unreadable folders a test left in it too: a removal
+    refused there makes the folder and what failed readable and writable for their owner and is tried again. A pass
+    lists a folder only once an earlier one unlocked it, one more level for each folder locked inside another, so the
+    passes go on while one unlocks something. Links are removed, never followed. -> whether `path` is gone (a file
+    locked beyond its owner's mode, as an immutable flag locks it, keeps it)."""
+    unlocked = []  # what this pass gave back to its owner
+
     def unlock(func, p, _exc):
         for d in (os.path.dirname(p), p):
             try:
                 if not os.path.islink(d):
-                    os.chmod(d, os.lstat(d).st_mode & 0o7777 | 0o700)
+                    mode = os.lstat(d).st_mode & 0o7777
+                    if mode | 0o700 != mode:
+                        os.chmod(d, mode | 0o700)
+                        unlocked.append(d)
             except OSError:
                 pass
         if func in (os.unlink, os.remove, os.rmdir):
@@ -5477,10 +5483,11 @@ def _remove_tree(path) -> bool:
                 func(p)
             except OSError:
                 pass
-    for _ in range(2):
-        if not os.path.lexists(path):
-            return True
+    while os.path.lexists(path):
+        unlocked.clear()
         shutil.rmtree(path, onerror=unlock)
+        if not unlocked:  # each pass unlocks something new or ends: modes only rise, so the passes end
+            break
     return not os.path.lexists(path)
 
 
@@ -5526,8 +5533,7 @@ def _sweep(parent, prefix, owner_name, now=None) -> list:
         owner = owner_name.match(entry.name)
         if owner and not _process_gone(int(owner.group(1))):
             continue
-        shutil.rmtree(entry.path, ignore_errors=True)
-        if not os.path.lexists(entry.path):
+        if _remove_tree(entry.path):  # what a stopped test locked in it too
             gone.append(entry.name)
     return gone
 
