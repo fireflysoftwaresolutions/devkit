@@ -346,7 +346,7 @@ def load(project: str, audit_id: str) -> list:
     out = []
     for path in sorted(_folder(project, audit_id).glob("*.json")):
         try:
-            doc = vmap.clean_record(json.loads(path.read_text()))
+            doc = vmap.clean_record(core.load_json(path.read_text()))
         except (OSError, ValueError):
             continue
         if isinstance(doc, dict) and doc.get("journey"):

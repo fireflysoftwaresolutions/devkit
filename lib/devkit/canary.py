@@ -49,8 +49,10 @@ def last_assistant_text(transcript_path: str):
         return None
     for ln in reversed(lines):
         try:
-            e = json.loads(ln)
+            e = core.load_json(ln)
         except ValueError:
+            continue
+        if not isinstance(e, dict):
             continue
         if e.get("type") == "user" and not e.get("isMeta") and _is_human_turn(e):
             return None  # reached the user's prompt without finding assistant text
@@ -545,9 +547,9 @@ def surface(agent: str, data: dict = None) -> str:
     tp = (data or {}).get("transcript_path")
     try:
         with open(tp) as fh:
-            meta = (json.loads(fh.readline()).get("payload") or {})
+            meta = (core.load_json(fh.readline()).get("payload") or {})
         orig = meta.get("originator") or ""
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError, AttributeError):
         return "unknown"
     if orig in SURFACES:
         return SURFACES[orig]
@@ -711,10 +713,10 @@ def records(days: int = 7) -> list:
     out = []
     for ln in LOG.read_text().splitlines():
         try:
-            r = json.loads(ln)
+            r = core.load_json(ln)
         except ValueError:
             continue
-        if r.get("ts", 0) >= cutoff:
+        if isinstance(r, dict) and r.get("ts", 0) >= cutoff:
             out.append(r)
     return out
 

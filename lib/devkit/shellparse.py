@@ -2098,7 +2098,7 @@ def _run_target(path, fam):
         if fam in ("python", "pypy"):
             return p / "__main__.py"
         try:
-            main = json.loads((p / "package.json").read_text()).get("main") or ""
+            main = core.load_json((p / "package.json").read_text()).get("main") or ""
         except (OSError, ValueError, AttributeError):
             main = ""
         for c in ([main, main + ".js"] if main else []) + ["index.js", "index.mjs", "index.cjs"]:

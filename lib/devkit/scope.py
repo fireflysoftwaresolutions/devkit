@@ -19,11 +19,11 @@ built inside a repository stays consulting work.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 from urllib.parse import unquote
 
+from . import core
 from .canary import CODEX_TURN_START
 from .hooks import SHELL_TOOLS  # Bash, Monitor and Codex's shells
 
@@ -358,7 +358,7 @@ def turn_actions(transcript_path: str) -> dict:
     recs = []
     for ln in _tail_lines(transcript_path):
         try:
-            recs.append(json.loads(ln))
+            recs.append(core.load_json(ln))
         except ValueError:
             continue
     start = max((i for i, r in enumerate(recs) if _is_prompt(r)), default=-1)
@@ -382,7 +382,7 @@ def turn_actions(transcript_path: str) -> dict:
                 args = None
             elif isinstance(args, str):
                 try:
-                    args = json.loads(args)
+                    args = core.load_json(args)
                 except ValueError:
                     args = {"input": args}
             if args is not None:

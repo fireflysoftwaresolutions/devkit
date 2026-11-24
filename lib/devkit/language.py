@@ -16,7 +16,6 @@ word shared by several languages counting for each a share, and answers None whe
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import unicodedata
@@ -146,8 +145,8 @@ _REPLY = ("<send_user_message_question_reply>", "</send_user_message_question_re
 def _answers(block: str) -> list:
     """The answers in one reply block's JSON ([{"question": …, "answer": …}]); [] when it is no such JSON."""
     try:
-        items = json.loads(block)
-    except (ValueError, RecursionError):
+        items = core.load_json(block)
+    except ValueError:
         return []
     found = []
     for item in items if isinstance(items, list) else [items]:
@@ -466,7 +465,7 @@ def developer_messages(transcript, max_bytes: int = MAX_BYTES):
             if b'"user' not in raw:
                 continue
             try:
-                e = json.loads(raw.decode("utf-8", "ignore"))
+                e = core.load_json(raw.decode("utf-8", "ignore"))
             except ValueError:
                 continue
             got = _human(e) if isinstance(e, dict) else None
@@ -486,8 +485,8 @@ def member_rollout(transcript) -> bool:
     developer's messages in it are not addressed to this agent."""
     try:
         with open(transcript, "rb") as fh:
-            first = json.loads(fh.readline(8 << 20) or b"null")
-    except (OSError, TypeError, ValueError, RecursionError):
+            first = core.load_json(fh.readline(8 << 20) or b"null")
+    except (OSError, TypeError, ValueError):
         return False
     p = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" else None
     if not isinstance(p, dict):

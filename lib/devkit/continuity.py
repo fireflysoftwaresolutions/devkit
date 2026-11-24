@@ -200,7 +200,7 @@ def _epoch(iso):
 
 def _boundary(raw: bytes):
     try:
-        d = json.loads(raw.decode("utf-8"))
+        d = core.load_json(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return None
     if not isinstance(d, dict) or d.get("type") != "system" or d.get("subtype") != "compact_boundary":
@@ -1078,7 +1078,7 @@ def _brief_head(path: str) -> str:
         return ""
     for raw in head.split(b"\n"):
         try:
-            d = json.loads(raw.decode("utf-8"))
+            d = core.load_json(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             continue
         if not isinstance(d, dict) or d.get("type") != "user":

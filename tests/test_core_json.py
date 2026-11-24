@@ -59,5 +59,47 @@ class DeepTeamFileTests(unittest.TestCase):
         self.assertEqual(core.read_json(self.write("cut.json", '{"a": '), "invalid"), "invalid")
 
 
+class LoadJsonErrorTests(unittest.TestCase):
+    """core.load_json's errors say what is wrong, so a refusal can name it: its own depth error, NaN and Infinity
+    when the caller reads text Node must parse too, and the parser's other errors as they are."""
+
+    def test_too_deep_raises_the_depth_error_and_cut_short_does_not(self):
+        for text in (deep_list(core.JSON_MAX_DEPTH + 1), deep_list(1_000_000)):
+            with self.assertRaises(core.JSONDepthError):
+                core.load_json(text)
+        with self.assertRaises(ValueError) as cut:
+            core.load_json('{"a": ')
+        self.assertNotIsInstance(cut.exception, core.JSONDepthError)
+        self.assertIsInstance(core.JSONDepthError("x"), ValueError)  # every caller that catches ValueError still does
+
+    def test_nan_and_infinity_are_refused_only_when_the_caller_asks(self):
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant):
+                text = '{"x": [1, ' + constant + "]}"
+                self.assertEqual(json.dumps(core.load_json(text)), '{"x": [1, ' + constant + "]}")
+                with self.assertRaises(core.JSONNonFiniteError):
+                    core.load_json(text, allow_nan=False)
+        self.assertEqual(core.load_json('{"x": 1e5, "NaN": "Infinity"}', allow_nan=False), {"x": 1e5, "NaN": "Infinity"})
+
+    def test_a_number_past_a_floats_range_is_refused_with_nan_and_infinity(self):
+        # Python reads 1e400 as inf and json.dumps writes it back as Infinity, which Node's JSON.parse refuses
+        for number in ("1e400", "-1e400", "1.5E+309"):
+            with self.subTest(number):
+                text = '{"x": ' + number + "}"
+                self.assertEqual(json.dumps(core.load_json(text)), '{"x": ' + ("-" if number[0] == "-" else "") +
+                                 "Infinity}")
+                with self.assertRaises(core.JSONNonFiniteError) as refused:
+                    core.load_json(text, allow_nan=False)
+                self.assertIn("past a float's range", str(refused.exception))
+        self.assertEqual(core.load_json('{"x": 1e308, "y": 1e-400}', allow_nan=False), {"x": 1e308, "y": 0.0})
+
+    def test_read_json_passes_allow_nan_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "s.json"
+            f.write_text('{"x": NaN}')
+            self.assertEqual(core.read_json(f, "unread", allow_nan=False), "unread")
+            self.assertEqual(list(core.read_json(f, "unread")), ["x"])
+
+
 if __name__ == "__main__":
     unittest.main()

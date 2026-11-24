@@ -333,8 +333,7 @@ VISUAL_OPEN = ("open", "reopened", "fixing", "fixed")  # the finding states that
 
 def _visual_json(path: Path):
     try:
-        import json
-        return json.loads(path.read_text(encoding="utf-8"))
+        return core.load_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 

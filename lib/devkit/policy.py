@@ -107,16 +107,44 @@ def codex_desired():
 
 # --------------------------------------------------------------------------- diff
 
+def claude_hooks() -> dict:
+    """devkit's Claude Code hooks as `dev install` writes them (setup.merge_hooks): {event: {command: (matcher, hook)}},
+    the hook with its type, command and timeout."""
+    from .setup import load_conf
+    return {event: {h["command"]: (g.get("matcher"), h) for g in groups for h in g["hooks"]}
+            for event, groups in load_conf("claude/settings.json")["hooks"].items()}
+
+
+def _same_matcher(a, b) -> bool:
+    """Do two hook matchers match the same? Claude Code reads no matcher, "" and "*" all as every one."""
+    return a == b or (a in (None, "", "*") and b in (None, "", "*"))
+
+
 def diff_claude(settings=None):
+    """The user settings' devkit-managed keys that differ from devkit's. A devkit hook counts only as devkit writes it
+    (claude_hooks): in a group of its event with its matcher, with the same type, timeout and no other field. Any
+    other matcher, type or timeout, longer or shorter, is drift, and so is any other field, "async": false included:
+    under a matcher that never matches, as another type, cut short or run in the background it would stop nothing.
+    So is any disableAllHooks but false (hooks_off), which turns every hook off."""
     s = settings if settings is not None else (read_json(CLAUDE_HOME / "settings.json", {}) or {})
+    if not isinstance(s, dict):  # JSON but no object (a list, a number): write_claude_settings leaves such a file as
+        return [Drift("claude", "settings.json", type(s).__name__, "a settings object")]  # it is, and repair names it
     flat, hooks = claude_desired()
     out = [Drift("claude", _key(p), _get(s, p), v) for p, v in flat.items() if _get(s, p) != v]
+    off = s.get("disableAllHooks", False)
+    if off is not False:
+        out.append(Drift("claude", "disableAllHooks", off, False))
     cur_hooks = s.get("hooks") or {}
+    written = claude_hooks()
     for event, cmds in hooks.items():
-        have = [h.get("command") for g in cur_hooks.get(event, []) for h in g.get("hooks", [])]
+        groups = cur_hooks.get(event, [])
+        have = [(g.get("matcher"), h) for g in groups for h in g.get("hooks", [])]
         for c in cmds:
-            if c not in have:
-                out.append(Drift("claude", f"hooks.{event}", MISSING, c))
+            matcher, want = written.get(event, {}).get(c) or (None, {"type": "command", "command": c})
+            if any(_same_matcher(m, matcher) and h == want for m, h in have):
+                continue
+            found = [dict(h, matcher=m) for m, h in have if isinstance(h, dict) and h.get("command") == c]
+            out.append(Drift("claude", f"hooks.{event}", found or MISSING, c))
     return out
 
 
@@ -210,6 +238,36 @@ DEVKIT_OFF = [
      "turns Codex hooks off"),
 ]
 
+SHOWN = 80  # how much of a value from a settings file a refusal or a doctor row prints
+
+# the string part is bounded: a longer one, or a value cut short, still reads as something other than false
+_HOOKS_OFF_JSON = re.compile(r'"disableAllHooks"\s*:\s*("(?:[^"\\]|\\.){0,%d}"|[^,}\s]{1,%d})' % (SHOWN, SHOWN))
+
+
+def shown(value: str, n: int = SHOWN) -> str:
+    """A value from a settings file as a refusal or a doctor row prints it: at most n characters, cut with an ellipsis."""
+    value = str(value)
+    return value if len(value) <= n else value[:n - 1] + "…"
+
+
+def hooks_off(text: str):
+    """What a Claude settings file's text sets disableAllHooks to, as JSON text cut to SHOWN characters, when it is
+    anything but false, which turns every hook off, devkit's included; None when it is false or not set. Text Python's
+    parser refuses (cut short, nested deeper than core.JSON_MAX_DEPTH, an integer of more digits than it converts) is
+    read for the key, \\u escapes undone, and fails closed: Claude Code (Node's JSON.parse) may still read the file, and
+    the text cannot tell the top level from a nested object or a string, so any value but false, wherever it stands,
+    reads as hooks off. A false there (nested, or inside a string) cannot hide a top-level true; a false alarm is
+    possible only for a file Python cannot parse."""
+    try:
+        data = core.load_json(text or "")
+    except ValueError:
+        return next((shown(v) for v in _HOOKS_OFF_JSON.findall(_unescape(text)) if v != "false"), None)
+    if not isinstance(data, dict):
+        return None
+    off = data.get("disableAllHooks", False)
+    return None if off is False else shown(json.dumps(off))
+
+
 # the DEVKIT_* keys a settings or shell startup file sets; DEV_ROOT counts with them: the handoff (policies, plans,
 # tasks) lives below it
 _KEY = r"(DEVKIT_[A-Za-z0-9_]*|DEV_ROOT)"
@@ -238,8 +296,8 @@ def devkit_env(text: str, toml: bool = False, shell: bool = False) -> dict:
                 for m in _KEY_SHELL.finditer(body)}
     if not toml:
         try:
-            data = json.loads(text)
-        except ValueError:
+            data = core.load_json(text)
+        except ValueError:  # not JSON (comments, cut short) or nested too deep: read the keys from the text
             data = None
         if isinstance(data, dict):
             env = data.get("env")
@@ -248,7 +306,7 @@ def devkit_env(text: str, toml: bool = False, shell: bool = False) -> dict:
     for m in (_KEY_TOML if toml else _KEY_JSON).finditer(_unescape(text)):
         v = m.group(2)
         try:
-            v = json.dumps(json.loads(v))
+            v = json.dumps(core.load_json(v))
         except ValueError:
             pass
         out[m.group(1)] = v
@@ -303,10 +361,20 @@ def _older_refuses(what: str, quiet: bool = False) -> bool:
     return bool(old)
 
 
+class Repaired(list):
+    """What repair restored, a list of Drift, and `left`: why it left the others as they were (a writer that refused:
+    the user settings it cannot parse or write), each naming the file and the fix. The caller checks `left`."""
+
+    def __init__(self, drifts=(), left=()):
+        super().__init__(drifts)
+        self.left = list(left)
+
+
 def repair(quiet=False, include_codex=True) -> list:
-    """Restore every drifted managed key. Returns the list of Drift that was repaired. A copy older than the pinned
-    release repairs nothing: what it would restore are its own, older values. The pinned release first retires the
-    other pinned copies (core.retire_other_pins), so a session that still runs one runs the pinned release instead."""
+    """Restore every drifted managed key. Returns the Drift that was repaired (Repaired: its `left` says what was not,
+    and why). A copy older than the pinned release repairs nothing: what it would restore are its own, older values.
+    The pinned release first retires the other pinned copies (core.retire_other_pins), so a session that still runs
+    one runs the pinned release instead."""
     from . import setup
     if _older_refuses("dev config repair", quiet):
         return []
@@ -318,10 +386,16 @@ def repair(quiet=False, include_codex=True) -> list:
             audit.record("install.retire", tilde(core.pin_root()), f"could not retire the other copies: {e}", "failed")
     drifts = diff(include_codex=include_codex)
     if not drifts:
-        return []
+        return Repaired()
     targets = {d.target for d in drifts}
+    left = []
     if "claude" in targets:
-        setup.write_claude_settings()
+        try:
+            setup.write_claude_settings()
+        except setup.SettingsNotWritten as e:  # the user settings left as they are: their drifts stay unrepaired
+            left.append(str(e))
+            drifts = [d for d in drifts if d.target != "claude"]
+            _log(f"left claude unrepaired: {e}")
     if "instructions" in targets:
         setup.write_agent_instructions(quiet=True)
     if "skills" in targets:
@@ -333,13 +407,14 @@ def repair(quiet=False, include_codex=True) -> list:
     for d in drifts:
         cur = "missing" if d.current is MISSING else json.dumps(d.current, ensure_ascii=False)
         _log(f"repaired {d.target} {d.key}: {cur} -> {json.dumps(d.desired, ensure_ascii=False)}")
-    try:
-        from . import gc
-        gc._log(f"config · restored {len(drifts)} devkit-managed setting(s): "
-                + ", ".join(sorted({f'{d.target}:{d.key}' for d in drifts}))[:300])
-    except Exception:
-        pass
-    return drifts
+    if drifts:
+        try:
+            from . import gc
+            gc._log(f"config · restored {len(drifts)} devkit-managed setting(s): "
+                    + ", ".join(sorted({f'{d.target}:{d.key}' for d in drifts}))[:300])
+        except Exception:
+            pass
+    return Repaired(drifts, left)
 
 
 # --------------------------------------------------------------------------- lock (Claude managed settings)
@@ -367,9 +442,40 @@ def lock_status() -> str:
     return "on" if cur == want else "stale"
 
 
+def _user_settings_refused(what: str) -> bool:
+    """True, said on stderr, when the user settings are a file devkit leaves as it is (setup.read_claude_settings):
+    lock and unlock then change nothing, the managed file included, rather than leave devkit's hooks in neither tier or
+    in both."""
+    import sys
+    from . import setup
+    try:
+        setup.read_claude_settings()
+    except setup.SettingsNotWritten as e:
+        print(f"{e} Nothing changed: {what} needs the user settings written too.", file=sys.stderr)
+        return True
+    return False
+
+
+def _user_settings_written(include_hooks: bool, done: str) -> bool:
+    """Write the user settings after the managed file changed (lock, unlock); False, said on stderr and logged, when
+    the write was refused."""
+    import sys
+    from . import setup
+    try:
+        setup.write_claude_settings(include_hooks=include_hooks)
+    except setup.SettingsNotWritten as e:
+        print(f"{e} ({done[0].upper()}{done[1:]}.)", file=sys.stderr)
+        _log(f"{done}, but the user settings were left unwritten: {e}")
+        return False
+    return True
+
+
 def lock() -> int:
-    """Install the managed-settings drop-in (asks for the admin password via sudo)."""
+    """Install the managed-settings drop-in (asks for the admin password via sudo). 1, with nothing changed, when the
+    user settings are a file devkit leaves as it is; 1 when their write fails once the drop-in is installed."""
     if _older_refuses("dev config lock"):
+        return 1
+    if _user_settings_refused("dev config lock"):
         return 1
     payload = json.dumps(managed_payload(), indent=2, ensure_ascii=False) + "\n"
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
@@ -379,18 +485,24 @@ def lock() -> int:
                           f'mkdir -p "{MANAGED_DIR}" && install -m 0644 -o root -g wheel "{tmp}" "{MANAGED_FILE}"'])
     os.unlink(tmp)
     if rc == 0:
-        from . import setup
-        setup.write_claude_settings(include_hooks=False)  # hooks now come from the managed tier only
+        # hooks now come from the managed tier only
+        if not _user_settings_written(False, "the managed-settings drop-in is installed"):
+            return 1
         _log("lock on: managed-settings drop-in installed")
     return rc
 
 
 def unlock() -> int:
+    """Put devkit's hooks back in the user settings, then remove the managed-settings drop-in. 1, the drop-in kept,
+    when the user settings are a file devkit leaves as it is or their write fails: the hooks go in before the drop-in
+    goes, so they are never in neither tier (a removal that fails leaves them in both, as a lock that fails does)."""
     if _older_refuses("dev config unlock"):
+        return 1
+    if _user_settings_refused("dev config unlock"):
+        return 1
+    if not _user_settings_written(True, "the managed-settings drop-in is kept"):
         return 1
     rc = subprocess.call(["sudo", "rm", "-f", str(MANAGED_FILE)])
     if rc == 0:
-        from . import setup
-        setup.write_claude_settings()
         _log("lock off: managed-settings drop-in removed")
     return rc

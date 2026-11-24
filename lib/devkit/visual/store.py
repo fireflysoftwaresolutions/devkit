@@ -307,7 +307,7 @@ def load(project: str, rid: str) -> dict:
     """The record `rid` (an audit, a capture, or a finding), its text stripped of control characters."""
     path = _path(project, rid)
     try:
-        doc = clean_record(json.loads(path.read_text(encoding="utf-8")))
+        doc = clean_record(core.load_json(path.read_text(encoding="utf-8")))
     except FileNotFoundError:
         raise VisualError(f"No {KINDS[rid[:2]][1]} {rid} in {project}.") from None
     except ValueError:
@@ -342,7 +342,7 @@ def _all(project: str, kind: str) -> list:
     out = []
     for path in sorted((records_dir(project) / KINDS[kind][0]).glob(f"{kind}-*.json")):
         try:
-            doc = clean_record(json.loads(path.read_text(encoding="utf-8")))
+            doc = clean_record(core.load_json(path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             continue
         if isinstance(doc, dict) and doc.get("id") == path.stem:

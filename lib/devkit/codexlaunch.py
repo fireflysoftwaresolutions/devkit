@@ -98,7 +98,7 @@ def lifecycle_events(path, thread_id: str, agent_ids) -> dict:
         if b'"SubAgentActivity"' not in line:
             continue
         try:
-            rec = json.loads(line)
+            rec = core.load_json(line)
             payload = rec.get("payload") if isinstance(rec, dict) else None
             if rec.get("type") != "event_msg" or not isinstance(payload, dict) or \
                     payload.get("type") != "item_completed" or payload.get("thread_id") != thread_id:
@@ -158,7 +158,7 @@ def session_meta(path) -> dict:
     try:
         with open(path, "rb") as fh:
             line = fh.readline(CODEX_META_MAX)
-        rec = json.loads(line) if line.strip() else {}
+        rec = core.load_json(line) if line.strip() else {}
     except (OSError, TypeError, ValueError):
         return {}
     meta = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "session_meta" else None
@@ -209,7 +209,7 @@ def spawn_calls(path, expected_meta=None, diagnostics=None) -> tuple:
         with open(path, "rb") as stream:
             before = os.fstat(stream.fileno())
             lines = _snapshot_lines(stream, before.st_size, deadline, CODEX_META_MAX)
-            first = json.loads(next(lines))
+            first = core.load_json(next(lines))
             meta = first.get("payload") if first.get("type") == "session_meta" else None
             if not isinstance(meta, dict) or expected_meta is not None and meta != expected_meta:
                 return incomplete("parent metadata changed or is incomplete")
@@ -217,7 +217,7 @@ def spawn_calls(path, expected_meta=None, diagnostics=None) -> tuple:
             for line in lines:
                 if b'"spawn_agent"' not in line and b'"SubAgentActivity"' not in line:
                     continue  # most of a rollout is neither; parsing it all would spend the deadline
-                record = json.loads(line)
+                record = core.load_json(line)
                 if time.monotonic() >= deadline:
                     raise ValueError("native recovery deadline exhausted during parsing")
                 if _timestamp(record) < created:
@@ -228,7 +228,7 @@ def spawn_calls(path, expected_meta=None, diagnostics=None) -> tuple:
                     cid = p.get("call_id")
                     if not cid or cid in seen:
                         return incomplete("duplicate or incomplete native launch call")
-                    args = json.loads(p.get("arguments") or "{}")
+                    args = core.load_json(p.get("arguments") or "{}")
                     if not isinstance(cid, str) or not isinstance(args, dict):
                         return incomplete("malformed native launch arguments")
                     seen.add(cid)

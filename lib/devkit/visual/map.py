@@ -149,7 +149,7 @@ def _read(path: Path):
     except FileNotFoundError:
         return None
     try:
-        doc = clean_record(json.loads(text))
+        doc = clean_record(core.load_json(text))
     except ValueError:
         doc = None
     if not isinstance(doc, dict) or not isinstance(doc.get("version"), int):
@@ -824,7 +824,7 @@ def apply(project, doc: dict, *, why, by=None) -> dict:
 
 def _record(path: Path):
     try:
-        doc = json.loads(path.read_text())
+        doc = core.load_json(path.read_text())
     except (OSError, ValueError):
         return None
     return doc if isinstance(doc, dict) else None
