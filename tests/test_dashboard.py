@@ -1392,23 +1392,31 @@ CHROME_HANGS_ALLOWED = 2
 
 
 def _chrome_once(url: str, width: int, height: int, budget: int, timeout: int) -> subprocess.CompletedProcess:
-    """One headless Chrome with a fresh profile, in its own process group. When it runs out of time, the whole group
-    (the browser and its GPU, network and renderer helpers) is killed and reaped, and TimeoutExpired is raised."""
-    with tempfile.TemporaryDirectory() as prof:
+    """One headless Chrome with a fresh profile, in its own process group. The call ends when the browser process does:
+    its output goes to files, not pipes, because its GPU, network and storage helpers inherit them and, on a loaded
+    Mac, outlive a browser that exited by 20 to 50 s; what is left of the group is then killed. When the browser runs
+    out of time, the whole group is killed and reaped, and TimeoutExpired is raised."""
+    with tempfile.TemporaryDirectory() as prof, tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         args = [CHROME, "--headless", "--use-mock-keychain", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
                 "--hide-scrollbars", f"--user-data-dir={prof}", f"--window-size={width},{height}",
                 f"--virtual-time-budget={budget}", "--dump-dom", url]
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        proc = subprocess.Popen(args, stdout=out, stderr=err, start_new_session=True)
         try:
-            out, err = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
+            hung = False
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            out, err = proc.communicate()
-            raise subprocess.TimeoutExpired(args, timeout, output=out, stderr=err) from None
-        return subprocess.CompletedProcess(args, proc.returncode, out, err)
+            hung = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # the group is gone (or its id already belongs to another process)
+        proc.wait()
+        out.seek(0)
+        err.seek(0)
+        stdout, stderr = out.read(), err.read()
+        if hung:
+            raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
 def run_chrome(url: str, width: int, height: int = 900, budget: int = 6000, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -1532,7 +1540,8 @@ def fixture_data(root: Path, now: float) -> dict:
 
 
 # A stand-in for Chrome: each call takes the next word of $FAKE_CHROME/plan. "hang" starts a helper process in its
-# group (as Chrome's renderers are), records both pids and sleeps; "answer" dumps a page with the probe's output.
+# group (as Chrome's renderers are), records both pids and sleeps; "answer" dumps a page with the probe's output;
+# "linger" dumps it, then exits as Chrome's teardown watchdog ends it while a helper still holds its output open.
 # Every call records the profile it was given.
 FAKE_CHROME = r"""#!%s
 import os, subprocess, sys, time
@@ -1547,6 +1556,12 @@ if plan[n] == "hang":
     sys.stderr.write("CVDisplayLinkCreateWithCGDisplay failed\n"); sys.stderr.flush()
     time.sleep(60)
 print('<html><body><pre id="probe-out">{&quot;ok&quot;: %%d}</pre></body></html>' %% (n + 1))
+if plan[n] == "linger":
+    sys.stdout.flush()
+    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    open(os.path.join(d, "pids"), "a").write("%%d %%d\n" %% (os.getpid(), helper.pid))
+    sys.stderr.write("Teardown watchdog expired; recording dump and terminating.\n")
+    sys.exit(2)
 """
 
 
@@ -1602,6 +1617,20 @@ class ChromeHarnessTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual([p for p in pids if self.alive(p)], [], "Chrome or its helper outlived the timeout")
 
+    # On a loaded Mac, Chrome's helpers outlive the browser by 20 to 50 s after its teardown watchdog ends it, and they
+    # hold its stdout and stderr open: a call that reads until the pipes close waits for them and calls Chrome hung
+    def test_a_browser_that_exited_is_read_without_waiting_for_its_helpers(self):
+        self.plan("linger", "answer")
+        started = time.monotonic()
+        self.assertEqual(chrome("file:///page.html", 800, timeout=10), {"ok": 1})
+        self.assertLess(time.monotonic() - started, 10, "run_chrome waited for the helpers of a browser that exited")
+        self.assertEqual(len(self.calls()), 1, "a browser that exited was taken for a hung one and started again")
+        pids = [int(p) for p in (self.dir / "pids").read_text().split()]
+        deadline = time.monotonic() + 5
+        while any(self.alive(p) for p in pids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual([p for p in pids if self.alive(p)], [], "the exited browser's helper was left running")
+
     def test_a_second_hang_fails_the_page(self):
         self.plan("hang", "hang", "answer")
         with self.assertRaisesRegex(AssertionError, r"did not finish in 1 s.*CVDisplayLink"):
@@ -1621,15 +1650,18 @@ class ChromeHarnessTests(unittest.TestCase):
 @unittest.skipUnless(CHROME, NO_CHROME)
 class HeadlessChromeTests(unittest.TestCase):
 
-    # The run's HOME has no login keychain: a Chrome that reaches for it stalls at exit and its teardown watchdog
-    # kills it (exit 2), or it hangs until the timeout, as every browser test did on CI's macOS runner for PR #6
-    def test_chrome_dumps_the_page_and_exits_cleanly_under_the_runs_home(self):
+    # The run's HOME has no login keychain: a Chrome that reaches for it blocks in the keychain's sign-in prompt, so its
+    # teardown never ends and its teardown watchdog kills it (exit 2), or it hangs until the timeout, as every browser
+    # test did on CI's macOS runner for PR #6. The mock keychain is what keeps it away. Chrome's exit status cannot tell
+    # that stall from a slow Mac: the watchdog is 10 s of wall clock, which a healthy Chrome also runs past when the
+    # helpers it waits for at exit get no CPU (7 runs in 60 with one busy loop per core), so the test reads the launch.
+    def test_chrome_dumps_the_page_under_the_runs_home_with_the_mock_keychain(self):
         with tempfile.TemporaryDirectory() as t:
             f = Path(t) / "page.html"
             f.write_text('<html><body><pre id="probe-out">{"ok": 1}</pre></body></html>', encoding="utf-8")
             res = run_chrome(f.as_uri(), 800, budget=1000, timeout=60)
-        self.assertEqual(res.returncode, 0, res.stderr[-1500:])
-        self.assertIn('<pre id="probe-out">{"ok": 1}</pre>', res.stdout)
+        self.assertIn('<pre id="probe-out">{"ok": 1}</pre>', res.stdout, res.stderr[-1500:])
+        self.assertIn("--use-mock-keychain", res.args, "Chrome under the run's HOME reaches for the login keychain")
 
     # Chrome's window is never narrower than 500: a phone width must still reach the page's media queries
     def test_a_phone_width_below_chromes_window_minimum_is_the_pages_own_width(self):
