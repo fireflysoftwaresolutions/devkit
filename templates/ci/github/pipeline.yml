@@ -12,7 +12,8 @@ name: @{wf_name}
 on:
 @{#release_wf}
   push:
-    tags: ["@{tag_glob}"]
+    tags:
+      @{tag_globs}
 @{/release_wf}
 @{^release_wf}
   pull_request:

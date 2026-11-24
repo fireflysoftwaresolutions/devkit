@@ -2852,6 +2852,8 @@ def _sample_tag(fmt: str) -> str:
     fmt = str(fmt or "")
     if "YY" in fmt:
         return fmt.replace("YY.MM.PATCH", "26.11.0")
+    if "MAJOR.MINOR.MICRO" in fmt:  # PEP 440: a pre-release, as dev release tags one
+        return fmt.split("MAJOR.MINOR.MICRO")[0] + "0.1.0a17"
     return fmt.replace("MAJOR.MINOR.PATCH", "1.2.3") or "v1.2.3"
 
 
@@ -4696,12 +4698,25 @@ TARGETS = {"github": ".github/workflows/ci.yml", "gitlab": ".gitlab-ci.yml", "bi
 
 
 def _tag_patterns(policy, root: Path) -> dict:
-    """The release tag patterns of the generated pipelines: tags spelled as dev release creates them
-    (delivery.release_tag), so the release workflow runs on every tag dev release pushes."""
+    """The release tag patterns of the generated pipelines: the release tags of the project's tag format, spelled as
+    dev release creates them (delivery.release_tag). CalVer: X.Y.Z. SemVer: X.Y.Z and its pre-releases (X.Y.Z-rc.1;
+    GitHub's patterns cannot name the + of build metadata). PEP 440: X.Y.Z with an aN, bN or rcN pre-release, a .postN
+    and a .devN, as dev release tags them (0.1.0a17). GitHub's filter patterns have no optional part, so GitHub gets
+    one pattern per form; GitLab gets one regular expression."""
     from . import delivery
     fmt = delivery.release_tag_format(root, policy)
     v = delivery.release_tag(root, "", policy)
-    return {"tag_format": fmt, "tag_glob": f"{v}[0-9]+.[0-9]+.[0-9]+", "tag_regex": f"/^{v}\\d+\\.\\d+\\.\\d+$/",
+    base, rx = f"{v}[0-9]+.[0-9]+.[0-9]+", f"{v}\\d+\\.\\d+\\.\\d+"
+    if "MAJOR.MINOR.MICRO" in fmt:  # PEP 440
+        globs = [base + pre + post + dev for pre in ("", "a[0-9]+", "b[0-9]+", "rc[0-9]+")
+                 for post in ("", ".post[0-9]+") for dev in ("", ".dev[0-9]+")]
+        rx += "(?:(?:a|b|rc)\\d+)?(?:\\.post\\d+)?(?:\\.dev\\d+)?"
+    elif "MAJOR.MINOR.PATCH" in fmt:  # SemVer
+        globs = [base, base + "-[0-9A-Za-z]*"]
+        rx += "(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?"
+    else:
+        globs = [base]
+    return {"tag_format": fmt, "tag_globs": [f'- "{g}"' for g in globs], "tag_regex": f"/^{rx}$/",
             "tag_bb": f"{v}*.*.*", "tag_az": f"{v}*"}
 
 

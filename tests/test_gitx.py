@@ -2450,9 +2450,9 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual((call[call.index("create") + 1], call[call.index("--title") + 1]), (want, want))
                 self.assertIn(f"released {want} ·", out)
                 workflow = pipelines.generate(s.repo, "github", policy=policy)[0][".github/workflows/release.yml"]
-                trigger = re.search(r'tags: \["([^"]+)"\]', workflow).group(1)
-                self.assertTrue(pipelines.gh_glob(trigger, want), trigger)
-                self.assertFalse(pipelines.gh_glob(trigger, other), trigger)
+                globs = pipelines.load_yaml(workflow)["on"]["push"]["tags"]
+                self.assertTrue(any(pipelines.gh_glob(g, want) for g in globs), globs)
+                self.assertFalse(any(pipelines.gh_glob(g, other) for g in globs), globs)
                 rc, _, err = dev("release", "--version", "26.11.4", "--dry-run")
                 self.assertEqual(rc, 2, err)
                 self.assertIn(f"tag {want} already exists", err)
