@@ -202,6 +202,12 @@ class SharedFolderStepNameTests(unittest.TestCase):
     "api-v2" and "API_V2" all wrote in scratchpad/<member id>-api-v2/, so one lane's files replaced another's. A plan
     refuses such a name, when it starts and when a step is added, and keeps what it had."""
 
+    def test_a_saved_plan_entry_that_is_not_a_step_names_no_twin(self):
+        # a run file another tool or a hand edit wrote can hold such an entry: dev crew brief must not crash on it
+        named = {"name": "Diseño"}
+        self.assertIs(pg.folder_twin(["junk", None, 7, named], "diseno"), named)
+        self.assertIsNone(pg.folder_twin(["junk", {"name": "web"}], "diseno"))
+
     def test_a_plan_refuses_a_step_whose_name_gives_another_steps_folder(self):
         with TempState():
             with self.assertRaises(pg.StepError) as at_start:

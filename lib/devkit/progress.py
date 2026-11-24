@@ -7149,7 +7149,8 @@ def folder_twin(plan, name, skip=None):
     both would write in one scratch folder; None when there is none. A plan made since such names were refused has
     none (_build_steps); one saved before may."""
     slug = step_slug(name)
-    return next((x for x in plan or [] if x is not skip and slug and step_slug(x.get("name")) == slug), None)
+    return next((x for x in plan or [] if isinstance(x, dict) and x is not skip and slug and
+                 step_slug(x.get("name")) == slug), None)
 
 
 def scratch_names(member: str, step: str = "") -> list:
