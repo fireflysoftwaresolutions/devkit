@@ -292,6 +292,12 @@ REVIEWED_DISPOSITIONS = (
 ''',
      "expressions": (r'''os.chmod(path, 0o700)''',),
      "reason": "owner-only 0700 on a folder this function just created; it adds no permission"},
+    {"rule": REVIEWED_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''  const named = new RegExp(`(?:^|[\\s=])${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/|\\s|$)`);
+''',
+     "expressions": (r'''new RegExp(`(?:^|[\\s=])${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/|\\s|$)`)''',),
+     "reason": "the capture's own temporary folder, every regex metacharacter escaped, between fixed anchors: the "
+               "pattern has no repetition an input could make backtrack"},
     {"rule": REVIEWED_RULE, "path": "lib/devkit/visual/crawl.cjs",
      "context": r'''      out += ch.replace(/[\\^$.|+()[\]{}]/g, '\\$&');
     }
