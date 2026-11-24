@@ -1928,6 +1928,17 @@ class LedgerFolderTests(TextPinCase):
         self.assertEqual(os.listdir(outside), [".toolu_k.contested"])
 
     # the hook's ledger writes (call_opened, call_note) never change the mode of a folder a link points to, nor
+    # write there
+    def test_a_ledger_write_never_goes_through_a_linked_session_folder(self):
+        outside = self.linked()
+        data = {"session_id": "s-link", "tool_use_id": "toolu_w", "tool_name": "Bash",
+                "tool_input": {"command": "git status"}}
+        with self.assertRaises(OSError):
+            pg.call_opened("claude", data)
+        with self.assertRaises(OSError):
+            pg._write_private(pg.CALLS / "s-link" / "toolu_w.json", {"ts": 1})
+        self.assertEqual((os.listdir(outside), oct(outside.stat().st_mode & 0o777)), ([], "0o755"))
+
     # a ledger entry, a kept record or the ledger's own folder that is a FIFO never blocks a reader: it reads as none
     def test_a_fifo_in_the_ledger_never_blocks_a_reader(self):
         import threading

@@ -27,6 +27,7 @@ Calibration: finished runs record estimate vs actual, so the next estimate is co
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -418,19 +419,51 @@ def _safe_name(s) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "", str(s or ""))[:120]
 
 
-def _write_private(path: Path, doc: dict):
-    """An atomic write, 0600 in 0700 folders, without a lock: each entry has one writer."""
-    for d in (path.parent.parent, path.parent):  # the ledger, and the session's folder in it
-        d.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+def _private_folder(name, parent: int | None = None) -> int:
+    """Folder `name` (in the open folder `parent`), made if missing, open and never through a link (O_NOFOLLOW): a
+    descriptor, its mode set to 0700 through it. OSError when it is a link, not a folder, or another user's."""
     try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(doc))
-        os.replace(tmp, path)
+        os.mkdir(name, 0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise OSError(errno.ENOTDIR, "not a folder of this user's own", str(name))
+        os.fchmod(fd, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        os.close(fd)
         raise
+    return fd
+
+
+def _write_private(path: Path, doc: dict):
+    """An atomic write, 0600 in 0700 folders, without a lock: each entry has one writer. The ledger (or the record's
+    own top folder) and the session's folder in it are opened without following a link, the first made by path, the
+    second in it, and the file is written and renamed through that open folder (dir_fd): a folder that is a link is
+    refused (OSError) before anything is made, changed or written where it points."""
+    path.parent.parent.parent.mkdir(parents=True, exist_ok=True)
+    top = _private_folder(str(path.parent.parent))
+    try:
+        folder = _private_folder(path.parent.name, top)
+    finally:
+        os.close(top)
+    tmp = f".{path.name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(doc))
+            os.replace(tmp, path.name, src_dir_fd=folder, dst_dir_fd=folder)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=folder)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(folder)
 
 
 # What a shell call may run and still write no file (call_reads): devkit's own commands that change only devkit's
