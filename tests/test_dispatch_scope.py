@@ -96,6 +96,26 @@ class BlankLetterScopeTests(unittest.TestCase):
             self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("scope"), ["lib/\u3131\u314f.py"])
 
 
+class BlankMarkScopeTests(unittest.TestCase):
+    # The combining grapheme joiner (U+034F), the Khmer inherent vowels (U+17B4, U+17B5), the Mongolian free variation
+    # selectors (U+180B to U+180D, U+180F) and the variation selectors (U+FE00 to U+FE0F, U+E0100 to U+E01EF) are
+    # nonspacing marks (Mn) that draw nothing, so a scope that holds one names another file than the one shown, and
+    # assign and delegate kept it. U+180F came in Unicode 14, so a Python with an older Unicode reads it as no
+    # character at all (Cn): each is refused by name, on every Python.
+    refused = PythonIndependentCharacterScopeTests.refused
+
+    def test_a_scope_with_a_mark_that_shows_as_nothing_is_refused(self):
+        marks = [0x034F, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F, *range(0xFE00, 0xFE10),
+                 0xE0100, 0xE0101, 0xE0150, 0xE01EE, 0xE01EF]
+        for code in marks:
+            with self.subTest(code=f"U+{code:04X}"):
+                self.refused(f"lib/a{chr(code)}b.py")
+        with TempState():  # a mark that shows names a real file: macOS stores an accented name decomposed, e + U+0301
+            pg.start("Feature", plan=["parser=30m"], now=T0)
+            pg.assign("parser", "Neo", scope="lib/cafe\u0301.py", now=T0 + 60)
+            self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("scope"), ["lib/cafe\u0301.py"])
+
+
 class AssignScopeTests(unittest.TestCase):
     def test_assign_refuses_a_scope_with_a_secret_and_saves_nothing(self):
         # assign saved the scope text unchecked: a token in it went into the run

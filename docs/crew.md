@@ -122,11 +122,16 @@ short version:
    repository by one rule: they refuse, saving nothing and quoting nothing, a scope that holds a secret, a URL, or
    a remote (any `:`), a `..` segment, a control or invisible character (such as U+202E, which turns the text around
    where it is shown, or a line separator), a space other than the plain space (U+0020), such as the no-break space
-   (U+00A0) or the thin space (U+2009), which shows as a plain one, a Hangul filler (U+115F, U+1160, U+3164, U+FFA0)
-   or the blank Braille pattern (U+2800), which show as nothing or as a space, or a path outside every checkout. A
-   code point with no character assigned is kept. Which code points those are depends on the Unicode version of the
-   Python that runs devkit, so a format character that a newer Unicode version added (such as U+0890, in Unicode 14)
-   is refused only by a Python whose Unicode version has it.
+   (U+00A0) or the thin space (U+2009), which shows as a plain one, a Hangul filler (U+115F, U+1160, U+3164, U+FFA0),
+   the blank Braille pattern (U+2800) or a mark that draws nothing (the combining grapheme joiner U+034F, the Khmer
+   inherent vowels U+17B4 and U+17B5, the four Mongolian free variation selectors, and the variation selectors
+   U+FE00 to U+FE0F and U+E0100 to U+E01EF), which show as nothing or as a space, or a path outside every checkout.
+   A combining mark that shows is kept, such as the acute accent (U+0301) in a filename that macOS stores
+   decomposed. A code point with no character assigned is kept too. Which code points those are depends on the
+   Unicode version of the Python that runs devkit, so a format character that a newer Unicode version added (such as
+   U+0890, in Unicode 14) is refused only by a Python whose Unicode version has it. The Hangul fillers, the blank
+   Braille pattern and the marks that draw nothing are named one by one, so every Python refuses them, the fourth
+   Mongolian free variation selector (U+180F, in Unicode 14) included.
 
    Outside the repository, a scope may name only these folders, as absolute or `~` paths: this project's plans
    folder in the handoff repository (`~/Development/.handoff/plans/<project id>/`), where the Software architect and

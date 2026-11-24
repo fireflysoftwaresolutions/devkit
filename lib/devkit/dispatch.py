@@ -157,14 +157,19 @@ SCOPE_HELP = ("--scope takes repository-relative paths or globs, such as lib/** 
 # of the Python that reads the scope: a format character a newer version added (U+0890, in Unicode 14) is Cn, and so
 # kept, on a Python whose Unicode is older.
 _INVISIBLE = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
-# Letters and symbols that show as nothing or as a space: the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0) and the
-# blank Braille pattern (U+2800). Their categories (Lo, So) hold real path characters, so they are named one by one.
-_BLANK = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+# Letters, symbols and marks that show as nothing or as a space: the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0),
+# the blank Braille pattern (U+2800), and the nonspacing marks that draw nothing: the combining grapheme joiner
+# (U+034F), the Khmer inherent vowels (U+17B4, U+17B5), the Mongolian free variation selectors (U+180B to U+180D,
+# U+180F) and the variation selectors (U+FE00 to U+FE0F, U+E0100 to U+E01EF). Their categories (Lo, So, Mn) hold real
+# path characters, such as the combining acute accent (U+0301) of a name macOS stores decomposed, so they are named
+# one by one, which also refuses them on a Python whose Unicode is older than one (U+180F came in Unicode 14).
+_BLANK = frozenset("\u115f\u1160\u3164\uffa0\u2800\u034f\u17b4\u17b5\u180b\u180c\u180d\u180f").union(
+    map(chr, range(0xFE00, 0xFE10)), map(chr, range(0xE0100, 0xE01F0)))
 
 
 def _lookalike(c: str) -> bool:
-    """A space separator (Zs) other than the plain space, or a blank letter or symbol (_BLANK): it shows as a plain
-    space, or as nothing, while the path holds another character."""
+    """A space separator (Zs) other than the plain space, or a blank letter, symbol or mark (_BLANK): it shows as a
+    plain space, or as nothing, while the path holds another character."""
     return c in _BLANK or (c != " " and unicodedata.category(c) == "Zs")
 
 
