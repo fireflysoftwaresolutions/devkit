@@ -4712,7 +4712,7 @@ def _tag_patterns(policy, root: Path) -> dict:
                  for post in ("", ".post[0-9]+") for dev in ("", ".dev[0-9]+")]
         rx += "(?:(?:a|b|rc)\\d+)?(?:\\.post\\d+)?(?:\\.dev\\d+)?"
     elif "MAJOR.MINOR.PATCH" in fmt:  # SemVer
-        globs = [base, base + "-[0-9A-Za-z]*"]
+        globs = [base, base + "-[0-9A-Za-z.-]+"]  # GitHub's * is any text, so the label is one bracket repeated
         rx += "(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?"
     else:
         globs = [base]
