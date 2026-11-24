@@ -999,7 +999,7 @@ REVIEWED = {
     ("gitx", "_only_skipped"): (1, TOOL),
     ("gitx", "ctx"): (1, TOOL),
     ("gitx", "gh_json"): (2, TOOL),
-    ("hooks", "_devkit_env_change"): (1, COPY + " (the DEVKIT_* values of devkit's own configuration)"),
+    ("hooks", "_devkit_env_fix"): (1, COPY + " (the DEVKIT_* values of devkit's own configuration)"),
     ("identity", "_read_kept"): (1, OWN),
     ("identity", "_read_used"): (1, OWN),
     ("identity", "read_uses"): (1, OWN),

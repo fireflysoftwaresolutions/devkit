@@ -1380,6 +1380,9 @@ def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: li
         _log(f"stop audit {agent}: {traceback.format_exc()[-300:]}")
 
 
+_UNREAD = object()  # config_change: a settings file core.read_json could not read
+
+
 def _quietly(component: str, fn, *args):
     """fn(*args) for a step a refusal goes on without (a log line, the background repair): its error recorded
     (_swallowed), never raised. -> its value, or None when it failed."""
@@ -1388,6 +1391,14 @@ def _quietly(component: str, fn, *args):
     except Exception as e:
         _swallowed(component, e)
         return None
+
+
+def _not_settings(value) -> str:
+    """What JSON that is not an object is, in the words of a refusal (config_change)."""
+    kind = ("JSON null" if value is None else "JSON true or false" if isinstance(value, bool) else
+            "a JSON number" if isinstance(value, (int, float)) else "a JSON string" if isinstance(value, str) else
+            "a JSON array")
+    return f"it is {kind}, not a settings object"
 
 
 def config_change(agent: str):
@@ -1417,20 +1428,28 @@ def _config_change(agent: str):
     project = data.get("source") in ("project_settings", "local_settings")
     # Claude Code reads its settings with Node's JSON.parse, which refuses NaN and Infinity: read as Python reads them,
     # they would pass a check of a file Claude Code then reads differently
-    settings = core.read_json(path, None, allow_nan=False)
-    if settings is None and not project and not os.path.lexists(path):
+    settings = core.read_json(path, _UNREAD, allow_nan=False)
+    if settings is _UNREAD and not project and not os.path.lexists(path):
         settings = {}  # no user settings: none of devkit's managed keys, checked as an empty file is
-    if settings is None:
+    if settings is _UNREAD:
         _refuse_unreadable(path, project)
         return
+    if not project and not isinstance(settings, dict):
+        _refuse_unchecked(path, project, _not_settings(settings))
     try:
         drift = [] if project else [d for d in policy.diff_claude(settings)
                                     if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
-        env_keys = _devkit_env_change(path, settings, managed=not project)
+        env_keys, fixed = _devkit_env_fix(path, settings, managed=not project)
     except Exception as e:  # a hook that crashed exits without blocking: the change would pass unchecked
-        _refuse_unchecked(path, project, e)
+        _refuse_unchecked(path, project, type(e).__name__)
     if not drift and not env_keys:
         return
+    unwritten = ""
+    if fixed is not None:
+        try:
+            core.replace_text(path, fixed)  # its own temporary name: sessions start at once
+        except OSError as e:  # still refused: the refusal says the values stay as the change left them
+            unwritten = f"{type(e).__name__}: {e.strerror or e}"
     ks = sorted({d.key for d in drift} | {f"env.{k}" for k in env_keys})
     keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
     if not project and core.older_copy():
@@ -1453,22 +1472,26 @@ def _config_change(agent: str):
     from . import audit
     audit.record("config.blocked", path, keys, "blocked")
     if project:
+        done = (f"refused {keys} in {path}, and could not remove them ({unwritten}): remove them from the file"
+                if unwritten else f"removed {keys} from {path}")
         print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings file "
-              f"sets them: removed {keys} from {path}. Change devkit's configuration with dev config.",
-              file=sys.stderr)
+              f"sets them: {done}. Change devkit's configuration with dev config.", file=sys.stderr)
         sys.exit(2)
     _quietly("config-change", policy._log, f"blocked change to devkit-managed keys: {keys}")
     _quietly("config-change", _spawn, ["config", "repair", "--quiet"])
+    more = (f" It could not put devkit's values back ({unwritten}) in {tilde(path)}: make the file writable, then run "
+            f"dev config repair." if unwritten else "")
     print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
-          f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`.",
-          file=sys.stderr)
+          f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`."
+          f"{more}", file=sys.stderr)
     sys.exit(2)
 
 
-def _refuse_unchecked(path: str, project: bool, error: Exception):
-    """Refuse a change to a settings file devkit read but could not check (config_change): its checks raised, on
-    JSON whose shape they do not take (not an object, a hooks event that is not a list) or on devkit's own
-    configuration (policy.claude_desired). Exit 2, recorded, and the file never rewritten: devkit names what to fix."""
+def _refuse_unchecked(path: str, project: bool, why: str):
+    """Refuse a change to a settings file devkit read but could not check (config_change): user settings that are not
+    a JSON object, or checks that raised (`why`: the error's name), on JSON whose shape they do not take (a hooks
+    event that is not a list) or on devkit's own configuration (policy.claude_desired). Exit 2, recorded, and the file
+    never rewritten: devkit names what to fix."""
     from . import audit, policy
     own = None
     if not project:  # the project's and local settings are checked against no configuration of devkit's
@@ -1484,9 +1507,9 @@ def _refuse_unchecked(path: str, project: bool, error: Exception):
         sys.exit(2)
     what = (f"{tilde(path)} for devkit's DEVKIT_* variables" if project else
             f"the settings it manages in {tilde(path)}")
-    _log(f"config-change blocked, settings devkit could not check: {type(error).__name__}")
+    _log(f"config-change blocked, settings devkit could not check: {why}")
     audit.record("config.blocked", path, "unchecked", "blocked")
-    print(f"devkit could not check {what} ({type(error).__name__}): refused the change, the file left "
+    print(f"devkit could not check {what} ({why}): refused the change, the file left "
           f"as it is. Make it a settings object as Claude Code documents it (hooks and env as objects); if it is one, "
           f"run dev doctor.", file=sys.stderr)
     sys.exit(2)
@@ -1577,10 +1600,20 @@ def _refuse_unread_user(path: str, why: str, more: str, keys: str = ""):
 
 def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (set,
-    changed or removed), put back to devkit's values in the file. [] when none differ. `managed`: the user
-    settings, where devkit manages some; a project's settings get none. A copy older than the pinned release reports
-    the user settings' variables but writes nothing: its values may be the older ones (the pinned release repairs).
-    A project's settings get every DEVKIT_* variable removed by any copy: that holds in every release."""
+    changed or removed), put back to devkit's values in the file (_devkit_env_fix). [] when none differ."""
+    changed, fixed = _devkit_env_fix(path, settings, managed)
+    if fixed is not None:
+        core.replace_text(path, fixed)  # its own temporary name: sessions start at once
+    return changed
+
+
+def _devkit_env_fix(path: str, settings: dict, managed: bool = True) -> tuple:
+    """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (set, changed or
+    removed), and the file's text with devkit's values put back, or None when it is not to be written. `managed`: the
+    user settings, where devkit manages some; a project's settings get none. A copy older than the pinned release
+    reports the user settings' variables but writes nothing: its values may be the older ones (the pinned release
+    repairs). A project's settings get every DEVKIT_* variable removed by any copy: that holds in every release.
+    -> (variables, text or None)."""
     from . import policy
     flat = policy.claude_desired()[0] if managed else {}
     want = {p[1]: json.dumps(v) for p, v in flat.items() if len(p) == 2 and p[0] == "env"
@@ -1588,15 +1621,15 @@ def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     try:
         have = policy.devkit_env(Path(path).read_text())
     except OSError:
-        return []
+        return [], None
     changed = sorted(k for k in set(want) | set(have) if want.get(k) != have.get(k))
-    if changed and (not managed or not core.older_copy()):
-        env = {k: v for k, v in (settings.get("env") or {}).items() if not str(k).startswith("DEVKIT_")}
-        settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
-        if not settings["env"]:
-            settings.pop("env")
-        core.replace_text(path, json.dumps(settings, indent=2) + "\n")  # its own temporary name: sessions start at once
-    return changed
+    if not changed or (managed and core.older_copy()):
+        return changed, None
+    env = {k: v for k, v in (settings.get("env") or {}).items() if not str(k).startswith("DEVKIT_")}
+    settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
+    if not settings["env"]:
+        settings.pop("env")
+    return changed, json.dumps(settings, indent=2) + "\n"
 
 
 def instructions_loaded(agent: str):

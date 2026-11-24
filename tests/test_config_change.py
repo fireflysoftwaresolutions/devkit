@@ -402,6 +402,14 @@ class ConfigChangeTests(unittest.TestCase):
                 self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unreadable")
         self.assertEqual(self.spawned, [])
 
+    def test_a_settings_file_that_is_json_null_is_refused_as_no_settings_object(self):
+        self.settings.write_text("null")
+        code, err = self.change_written()
+        self.assertEqual(code, 2)
+        self.assertIn("(it is JSON null, not a settings object)", err)
+        self.assertEqual(self.settings.read_text(), "null")
+        self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unchecked")
+
     @unittest.skipUnless(hasattr(sys, "get_int_max_str_digits"), "Python before 3.11 reads any integer")
     def test_a_number_python_cannot_read_is_named_as_such(self):
         text = '{"x": ' + "1" * 5000 + "}"
@@ -412,6 +420,39 @@ class ConfigChangeTests(unittest.TestCase):
                       "integer string conversion: value has 5000 digits)", err)
         self.assertNotIn("nests deeper", err)
         self.assertEqual(self.settings.read_text(), text)
+
+    def test_a_devkit_variable_devkit_cannot_remove_is_refused_with_the_reason(self):
+        s = managed_settings()
+        s["env"] = dict(s.get("env") or {}, DEVKIT_GUARD="off")
+        self.settings.write_text(json.dumps(s))
+        before = self.settings.read_bytes()
+        self.settings.parent.chmod(0o555)  # its own temporary file cannot be made next to it
+        self.addCleanup(self.settings.parent.chmod, 0o755)
+        code, err = self.change_written()
+        self.assertEqual(code, 2)
+        self.assertIn("env.DEVKIT_GUARD", err)
+        self.assertIn("could not put devkit's values back (PermissionError", err)
+        self.assertNotIn("Make it a settings object", err)
+        self.assertEqual(self.settings.read_bytes(), before)
+        self.assertIn("env.DEVKIT_GUARD", audit.records(1, action="config.blocked")[-1]["detail"])
+
+    def test_a_devkit_variable_devkit_cannot_remove_from_project_settings_is_refused_with_the_reason(self):
+        f = self.root / "repo" / ".claude" / "settings.local.json"
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps({"env": {"DEVKIT_HOME": "/var/tmp/x"}}))
+        before = f.read_bytes()
+        f.parent.chmod(0o555)
+        self.addCleanup(f.parent.chmod, 0o755)
+        payload = {"session_id": "s1", "hook_event_name": "ConfigChange", "source": "local_settings",
+                   "file_path": str(f)}
+        err = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stderr(err), \
+                self.assertRaises(SystemExit) as done:
+            hooks.config_change("claude")
+        self.assertEqual(done.exception.code, 2)
+        self.assertIn("refused env.DEVKIT_HOME", err.getvalue())
+        self.assertIn("could not remove them (PermissionError", err.getvalue())
+        self.assertEqual(f.read_bytes(), before)
 
     def test_the_hook_listens_to_project_and_local_settings_changes(self):
         import re
