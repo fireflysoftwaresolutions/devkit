@@ -107,16 +107,41 @@ def codex_desired():
 
 # --------------------------------------------------------------------------- diff
 
+def claude_hooks() -> dict:
+    """devkit's Claude Code hooks as `dev install` writes them (setup.merge_hooks): {event: {command: (matcher, hook)}},
+    the hook with its type, command and timeout."""
+    from .setup import load_conf
+    return {event: {h["command"]: (g.get("matcher"), h) for g in groups for h in g["hooks"]}
+            for event, groups in load_conf("claude/settings.json")["hooks"].items()}
+
+
+def _same_matcher(a, b) -> bool:
+    """Do two hook matchers match the same? Claude Code reads no matcher, "" and "*" all as every one."""
+    return a == b or (a in (None, "", "*") and b in (None, "", "*"))
+
+
 def diff_claude(settings=None):
+    """The user settings' devkit-managed keys that differ from devkit's. A devkit hook counts only as devkit writes it
+    (claude_hooks): in a group of its event with its matcher, with the same type, timeout and no other field. Under a
+    matcher that never matches, as another type, with a shorter timeout or run in the background ("async") it would
+    stop nothing, so it is drift. So is any disableAllHooks but false, which turns every hook off."""
     s = settings if settings is not None else (read_json(CLAUDE_HOME / "settings.json", {}) or {})
     flat, hooks = claude_desired()
     out = [Drift("claude", _key(p), _get(s, p), v) for p, v in flat.items() if _get(s, p) != v]
+    off = s.get("disableAllHooks", False)
+    if off is not False:
+        out.append(Drift("claude", "disableAllHooks", off, False))
     cur_hooks = s.get("hooks") or {}
+    written = claude_hooks()
     for event, cmds in hooks.items():
-        have = [h.get("command") for g in cur_hooks.get(event, []) for h in g.get("hooks", [])]
+        groups = cur_hooks.get(event, [])
+        have = [(g.get("matcher"), h) for g in groups for h in g.get("hooks", [])]
         for c in cmds:
-            if c not in have:
-                out.append(Drift("claude", f"hooks.{event}", MISSING, c))
+            matcher, want = written.get(event, {}).get(c) or (None, {"type": "command", "command": c})
+            if any(_same_matcher(m, matcher) and h == want for m, h in have):
+                continue
+            found = [dict(h, matcher=m) for m, h in have if isinstance(h, dict) and h.get("command") == c]
+            out.append(Drift("claude", f"hooks.{event}", found or MISSING, c))
     return out
 
 

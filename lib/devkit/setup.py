@@ -1554,6 +1554,8 @@ def write_claude_settings(include_hooks=True):
     plugins = load_conf("claude/plugins.json")
     new = core.deep_merge(cur, {k: v for k, v in frag.items() if k != "hooks"})
     new.pop("includeCoAuthoredBy", None)  # deprecated since Claude Code 2.0.62; `attribution` replaces it
+    if new.get("disableAllHooks", False) is not False:
+        new.pop("disableAllHooks")  # it turns devkit's hooks off too (policy.diff_claude): only false is left
     new["hooks"] = merge_hooks(cur.get("hooks") or {}, frag.get("hooks") or {} if include_hooks else {})
     if not new["hooks"]:
         new.pop("hooks")

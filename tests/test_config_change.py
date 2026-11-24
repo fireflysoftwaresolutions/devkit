@@ -5,9 +5,11 @@
 # it) is refused with exit 2, the refusal is audited, and the variables go back to what devkit manages.
 # Run: python3 -m unittest tests.test_config_change
 import contextlib
+import copy
 import hashlib
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -16,7 +18,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, hooks, policy  # noqa: E402
+from devkit import audit, core, hooks, policy, setup  # noqa: E402
+
+REAL_SPAWN = hooks._spawn
 
 
 def pin_release(home: Path, version: str, record_version: str = None) -> Path:
@@ -34,15 +38,16 @@ def pin_release(home: Path, version: str, record_version: str = None) -> Path:
 
 
 def managed_settings() -> dict:
-    # the user settings exactly as devkit manages them: no drift in any managed key
-    flat, commands = policy.claude_desired()
+    # the user settings exactly as devkit manages them: no drift in any managed key, its hooks as dev install writes
+    # them (each with its matcher, type and timeout)
+    flat, _ = policy.claude_desired()
     out = {}
     for path, v in flat.items():
         d = out
         for k in path[:-1]:
             d = d.setdefault(k, {})
         d[path[-1]] = v
-    out["hooks"] = {ev: [{"hooks": [{"type": "command", "command": c} for c in cs]}] for ev, cs in commands.items()}
+    out["hooks"] = copy.deepcopy(setup.load_conf("claude/settings.json")["hooks"])
     return out
 
 
@@ -277,6 +282,79 @@ class ConfigChangeTests(unittest.TestCase):
         self.assertIn("Restart", json.loads(out.getvalue())["systemMessage"])
         self.assertIn("26.11.5", audit.records(1, action="config.repair-skipped")[-1]["detail"])
 
+    # The refusal is the control: whatever devkit's logging, its background repair or its own code does around it, a
+    # change it refuses exits 2. hooks.run turns any other exception into exit 0, which lets the change pass.
+    def unlocked(self):
+        p = mock.patch.object(policy, "lock_status", lambda: "off")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def drifted(self) -> dict:
+        s = managed_settings()
+        s.pop("permissions")
+        return s
+
+    # devkit's hooks count only as dev install writes them: under a matcher that never matches, as another type, with
+    # another timeout or run in the background, they never stop anything, and disableAllHooks turns them all off.
+    def test_devkit_hooks_that_differ_from_what_devkit_writes_are_refused(self):
+        self.unlocked()
+
+        def under(change):
+            s = managed_settings()
+            for group in s["hooks"]["PreToolUse"]:
+                change(group, group["hooks"][0])
+            return s
+
+        cases = {"a matcher that never matches": lambda g, h: g.update(matcher="NoSuchTool"),
+                 "no matcher where devkit has one": lambda g, h: g.pop("matcher"),
+                 "a type that is not command": lambda g, h: h.update(type="prompt"),
+                 "no type": lambda g, h: h.pop("type"),
+                 "another timeout": lambda g, h: h.update(timeout=0.001),
+                 "run in the background": lambda g, h: h.update({"async": True})}
+        for name, change in cases.items():
+            with self.subTest(name):
+                code, err = self.change(under(change))
+                self.assertEqual(code, 2, name)
+                self.assertIn("devkit manages these settings: hooks.PreToolUse.", err)
+        with self.subTest("a matcher where devkit has none, matching everything"):
+            s = managed_settings()
+            s["hooks"]["Stop"][0]["matcher"] = "*"
+            self.assertEqual(self.change(s), (0, ""))
+
+    def test_disable_all_hooks_is_refused_with_the_lock_on_or_off(self):
+        for lock in ("off", "on"):
+            for value in (True, "true", 1):
+                with self.subTest(lock=lock, value=value), mock.patch.object(policy, "lock_status", lambda: lock):
+                    s = managed_settings()
+                    s["disableAllHooks"] = value
+                    code, err = self.change(s)
+                    self.assertEqual(code, 2)
+                    self.assertIn("devkit manages these settings: disableAllHooks.", err)
+        self.unlocked()
+        s = managed_settings()
+        s["disableAllHooks"] = False
+        self.assertEqual(self.change(s), (0, ""))
+
+    def test_repair_drops_disable_all_hooks_and_puts_devkit_hooks_back_as_it_writes_them(self):
+        s = managed_settings()
+        s["disableAllHooks"] = True
+        s["hooks"]["PreToolUse"][0]["matcher"] = "NoSuchTool"
+        s["hooks"]["Stop"][0]["hooks"][0]["type"] = "prompt"
+        self.settings.write_text(json.dumps(s))
+        self.assertEqual(sorted(d.key for d in policy.diff_claude(s) if d.key[:5] in ("hooks", "disab")),
+                         ["disableAllHooks", "hooks.PreToolUse", "hooks.Stop"])
+        with mock.patch.object(setup, "CLAUDE_HOME", self.settings.parent), \
+                mock.patch.object(setup, "STATE", self.root / "state"):
+            setup.write_claude_settings()
+            after = json.loads(self.settings.read_text())
+            self.assertNotIn("disableAllHooks", after)
+            self.assertEqual([d.key for d in policy.diff_claude(after) if d.key[:5] in ("hooks", "disab")], [])
+            after["disableAllHooks"] = False  # false turns nothing off: it stays as the developer wrote it
+            self.settings.write_text(json.dumps(after))
+            setup.write_claude_settings()
+            self.assertIs(json.loads(self.settings.read_text())["disableAllHooks"], False)
+
+    # Claude Code reads its settings with Node's JSON.parse, which refuses NaN and Infinity; Python's json reads them.
     def test_the_hook_listens_to_project_and_local_settings_changes(self):
         import re
         root = Path(__file__).resolve().parents[1]
