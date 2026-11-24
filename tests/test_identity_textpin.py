@@ -1347,6 +1347,37 @@ class TextPinRecordFailureTests(TextPinCase):
         self.closed(lead)
         self.assertFalse(os.path.lexists(flag))
 
+    # anything planted at the call's contest flag while the pin's marker cannot be made is contest enough: the
+    # member's retry is still refused once the tech lead's shell is gone
+    def planted_at_the_contest_flag(self, kind):
+        lead, lead_shell, forger = self.raced()
+        flag = identity.contest_path("s1", lead["tool_use_id"])
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "folder":
+            flag.mkdir()
+        elif kind == "dangling-link":
+            os.symlink(self.root / "nowhere", flag)
+        else:
+            os.mkfifo(flag)
+        with self.no_marker():
+            rc, out = self.in_shell(forger, *LEAD_ARGS)
+            self.assertEqual(rc, 2, out)
+            del self.argvs[lead_shell]
+            self.starts[lead_shell] = None
+            rc, out = self.in_shell(forger, *LEAD_ARGS)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        self.assertEqual(identity._contest_mark(pg.call_entry(lead)), "ledger")
+
+    def test_a_folder_planted_at_the_contest_flag_still_refuses_a_later_claimant(self):
+        self.planted_at_the_contest_flag("folder")
+
+    def test_a_dangling_link_planted_at_the_contest_flag_still_refuses_a_later_claimant(self):
+        self.planted_at_the_contest_flag("dangling-link")
+
+    def test_a_fifo_planted_at_the_contest_flag_still_refuses_a_later_claimant(self):
+        self.planted_at_the_contest_flag("fifo")
+
     # a later call that was interrupted (its result says so) but whose shell ignored the signal and took the tech
     # lead's call form is still that later call: the tech lead's call is contested, never taken
     def test_a_surviving_shell_of_an_interrupted_later_call_never_passes_as_the_tech_leads(self):
@@ -2096,25 +2127,28 @@ class LedgerFolderTests(TextPinCase):
                 self.assertEqual(flagged(), before + 1)
         self.assertEqual(target.read_text(), "t")
 
-    # a dangling link or a folder at a call's use mark is no use mark: the PostToolUse hook flags no unexplained use
-    # of the tech lead's token for it, while a regular file there is one
-    def test_only_a_regular_file_counts_as_a_use_mark(self):
+    # anything planted at a call's use mark before its token's real first use (a dangling link, a folder, a FIFO)
+    # keeps that use from writing its mark, and counts as the mark: the PostToolUse hook still flags the unexplained
+    # use of the tech lead's token, since something planted there is itself suspect
+    def test_something_planted_at_the_use_mark_still_flags_the_unexplained_use(self):
         from devkit import hooks
-        for sid, kind in (("s-link", "dangling-link"), ("s-dir", "folder"), ("s-file", "file")):
-            folder = pg.CALLS / sid
-            folder.mkdir(parents=True)
-            mark = folder / ".toolu_u.used"
+        sids = []
+        for i, kind in enumerate(("dangling-link", "folder", "fifo")):
+            sid, tid = f"s-{kind}", f"toolu_{i}"
+            (pg.CALLS / sid).mkdir(parents=True)
+            mark = identity.used_path(sid, tid)
             if kind == "dangling-link":
                 os.symlink(self.root / "nowhere", mark)
             elif kind == "folder":
                 mark.mkdir()
             else:
-                mark.write_text(json.dumps({"pid": 1, "start": 1.0, "inode": 1}))
-            entry = {"pin": str(self.root / "no-pin"), "caller": "main", "cmd": "git status", "agent": "claude",
-                     "ts": time.time(), "session": sid, "tool_use_id": "toolu_u"}
-            hooks._pin_audits(entry, {"session_id": sid, "tool_use_id": "toolu_u", "hook_event_name": "PostToolUse"},
-                              "")
-        self.assertEqual([r["ref"]["session"] for r in self.records("caller.token-unexplained-use")], ["s-file"])
+                os.mkfifo(mark)
+            identity._mark_used(sid, tid, 4242, 1.0, 7)  # the token's real first use
+            entry = {"pin": str(self.root / "no-pin"), "caller": "main", "cmd": "python3 x.py", "agent": "claude",
+                     "ts": time.time(), "session": sid, "tool_use_id": tid}
+            hooks._pin_audits(entry, {"session_id": sid, "tool_use_id": tid, "hook_event_name": "PostToolUse"}, "")
+            sids.append(sid)
+        self.assertEqual([r["ref"]["session"] for r in self.records("caller.token-unexplained-use")], sids)
 
     # an audit that cannot be written is recorded as a swallowed devkit error, never lost silently
     def test_a_contest_audit_that_fails_is_reported(self):

@@ -630,16 +630,15 @@ def _drop_marks(sid: str, tid: str):
 
 
 def _in_ledger(sid: str, name: str) -> bool:
-    """Is there a regular file named `name` in session `sid`'s folder, opened without following a link
-    (ledger_folder)? A link (never followed), a folder, a FIFO or anything else there is no mark and no kept record.
-    False when that folder cannot be opened so."""
-    import stat
+    """Is there anything named `name` (a link counts, never followed) in session `sid`'s folder, opened without
+    following a link (ledger_folder)? False when that folder cannot be opened so."""
     try:
         folder = ledger_folder(sid)
     except OSError:
         return False
     try:
-        return stat.S_ISREG(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode)
+        os.stat(name, dir_fd=folder, follow_symlinks=False)
+        return True
     except OSError:
         return False
     finally:
