@@ -150,7 +150,7 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   whose only change is a helper no test calls is left out. The import recorder finds a Python child behind a runner
   that starts a shell or `env` (`timeout 30 bash -c "python -I …"`), and no longer flags the words of `echo` or
   `printf`.
-- `dev test prove` rebuilds each helper changed inside a Python or JavaScript test module from its own base text,
+- `dev test prove` rebuilds each helper changed inside a Python test module from its own base text,
   matched by class and name, and checks the result; a test that reads a name only the change's helper edit gives cannot
   be proven, and a helper the test framework calls (`run`, `__init__`, a `name=` fixture, `pytestmark`, `load_tests`,
   a pytest hook) reaches every test.
@@ -201,25 +201,22 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   `dev lesson` says why), a deeply nested presence file from another Mac is skipped instead of breaking the dashboard's
   team view, and `dev crew set <member> procedure` refuses nested values instead of writing a team crew file every
   reader then ignored.
-- `dev test prove` rebuilds a changed Python or JavaScript test module only when its code outside the tests differs
-  from the base inside the bodies of helpers that both sides hold in the same places (a fix in a property getter beside
-  its setter, or in one of two `beforeEach` hooks), so the run without your change gets exactly the base module with
-  your tests in it, never base helpers mixed with the module's other changes. Any other change keeps the module as it
-  is now: a test that fails without the production change proves it, and one that passes is `cannot be proven`,
-  named by the module's first difference. In a rebuilt module only an assertion failure counts as proof; another
-  error is `cannot be proven`, naming what it raised. JavaScript test modules with thousands of nested `describe`
-  blocks or declarations are read in linear time.
-- `dev test prove` keeps a changed test module as it is now, naming the cause, when it holds a line break devkit's
-  readers do not see (a carriage return without a new line; in JavaScript also U+2028 or U+2029) or a JavaScript helper
-  line indented no deeper than the helper; it runs a test that failed on an error once more from a fresh copy; and it
-  no longer counts pytest-timeout's `Failed: Timeout` as an assertion failure.
-- `dev test prove` rebuilds a JavaScript or TypeScript test module only when Node itself reads each helper body and
-  test it cut as one whole function body, so a construct devkit's reader misreads keeps the module instead of
-  proving falsely; postfix `++` and `--` before a division, braces inside a template expression, and HTML-like
-  comments in `.cjs` files are read correctly. Each run has its own temporary folder, a test that failed on an error
-  is run again from a fresh copy and proves when it fails on an assertion or with the same error type and message
-  as the run without the change, a read-only folder left in the copy no longer crashes the run, and
-  pytest-timeout's current `Timeout (>1.0s)` message is never an assertion.
+- `dev test prove` rebuilds a changed Python test module only when its code outside the tests differs from the base
+  inside the bodies of helpers that both sides hold in the same places (a fix in a property getter beside its setter),
+  so the run without your change gets exactly the base module with your tests in it, never base helpers mixed with
+  the module's other changes. Any other change keeps the module as it is now: a test that fails without the
+  production change proves it, and one that passes is `cannot be proven`, named by the module's first difference. In
+  a rebuilt module only an assertion failure counts as proof; another error is `cannot be proven`, naming what it
+  raised. A module holding a carriage return without a new line is kept, naming the cause.
+- `dev test prove` rebuilds only Python test modules. A JavaScript or TypeScript test module whose code outside its
+  tests changed runs as it is now without your change: a test that fails there proves the change, and one that passes
+  is `cannot be proven`, naming why. devkit's own JavaScript reader could misread where a template literal ends and put
+  a base fixture back under a new test, which then read as proven.
+- `dev test prove` runs a test that failed on an error once more from a fresh copy, with its own temporary folder,
+  and counts that rerun as proof only on an assertion failure: a folder the first run left in the home folder, beside
+  the copy, or at a fixed path no longer proves a change the test never reaches. It removes folders a stopped test
+  left unreadable one inside another before the rerun, no longer crashes on a read-only folder in the copy, and never
+  counts pytest-timeout's `Failed: Timeout` message, in either form, as an assertion.
 - `dev visual verify`, `compare`, and the marks, `dev doctor`'s pinned npm packages row, and the packages step ask
   `npm root -g` again when it fails or prints nothing, keep a good answer for the process, and say `npm root -g gave
   no folder` instead of reporting no browser or every pinned package as not installed. Each try waits at most 30 s
