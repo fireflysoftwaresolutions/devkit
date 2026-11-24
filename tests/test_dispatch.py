@@ -1,20 +1,23 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Who does what: routing, delegation between crew members, declines and dispatch of ready work."""
+import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import dispatch  # noqa: E402
+from devkit import audit, dispatch, messaging  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState, member_call, repo_with_worktrees  # noqa: E402
 
 T0 = 1_800_000_000.0
+SECRET = "ghp_" + "a1B2" * 10  # the shape of a GitHub token, which a message body may not hold
 
 
 def m(minutes):
@@ -178,6 +181,54 @@ class DelegationTests(unittest.TestCase):
             r = dispatch.ready(pg.load_run("claude", "s1"))
             self.assertEqual((r["launch"], len(r["queued"])), ([], 2))
 
+    def test_a_plan_with_several_ready_steps_and_free_slots_says_to_launch_their_members_in_parallel(self):
+        # the tech lead used 2 of 10 slots at kickoff and ran 5 small steps one after another: dev progress start and
+        # dev progress add print the ready steps with the member the RACI makes Responsible for each
+        with TempState():
+            run = pg.start("Feature", plan=["api=30m [backend]", "ui=30m [frontend]", "docs=20m after api [docs]"],
+                           now=m(0))
+            text = "\n".join(dispatch.parallel_hint(run, now=m(0)))
+            self.assertIn("2 steps are ready", text)
+            self.assertIn("launch them in parallel, in one message", text)
+            self.assertIn("api · Backend engineer (Tank) · dev progress assign api --to tank --activity backend", text)
+            self.assertIn("ui · Frontend engineer (Trinity) · dev progress assign ui --to trinity --activity frontend",
+                          text)
+            self.assertNotIn("docs", text)  # it waits for api
+            for i, who in enumerate(("neo", "mouse", "dozer", "link")):  # every slot busy: nothing to launch now
+                launch(f"b{i}", f"devkit:{who}", f"{who.title()}: x", m(1))
+            self.assertEqual(dispatch.parallel_hint(pg.load_run("claude", "s1"), now=m(1)), [])
+
+    def test_the_parallel_hint_reads_only_a_declared_kind_of_work_as_the_tech_lead_starts_steps(self):
+        # no step declares its kind of work, so they are the tech lead's own and the first one runs as his; the hint
+        # gave all three, the running one too, to the members their words suggest
+        with TempState():
+            run = pg.start("Feature", plan=["build the REST API endpoint=30m", "build the React component=30m",
+                                            "write the README docs=20m"], now=m(0))
+            self.assertEqual(run["plan"][0]["state"], "running")
+            self.assertEqual(dispatch.parallel_hint(run, now=m(0)), [])
+
+    def test_the_parallel_hint_leaves_out_a_step_the_tech_lead_began(self):
+        with TempState():
+            pg.start("Feature", plan=["api=30m [backend]", "ui=30m [frontend]", "docs=20m [docs]"], now=m(0))
+            run = pg.begin("api", now=m(1))
+            text = "\n".join(dispatch.parallel_hint(run, now=m(1)))
+            self.assertIn("2 steps are ready", text)
+            self.assertNotIn("api ·", text)
+            self.assertIn("ui · Frontend engineer (Trinity)", text)
+            self.assertIn("docs · Technical writer (Ghost)", text)
+
+    def test_a_parallel_hint_that_fails_prints_nothing_after_the_run_is_saved(self):
+        # dev progress start prints the hint after it saved the run: an error in it must not fail the command
+        with TempState():
+            run = pg.start("Feature", plan=["api=30m [backend]", "ui=30m [frontend]"], now=m(0))
+            with mock.patch.object(pg, "slot_budget", side_effect=OSError("the quota record cannot be read")):
+                self.assertEqual(dispatch.parallel_hint(run, now=m(0)), [])
+
+    def test_one_ready_step_needs_no_parallel_hint(self):
+        with TempState():
+            run = pg.start("Feature", plan=["api=30m [backend]", "docs=20m after api [docs]"], now=m(0))
+            self.assertEqual(dispatch.parallel_hint(run, now=m(0)), [])
+
     def test_decline_returns_the_step_to_morpheus(self):
         with TempState():
             pg.start("Feature", plan=["parser=30m"], now=m(0))
@@ -190,6 +241,91 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual((s["state"], s["owner"], s["label"]), ("pending", "main", ""))
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
             self.assertIn("declined", ctx)
+
+    def test_a_delegation_whose_notice_is_refused_saves_nothing_however_often_it_is_tried(self):
+        # the step was saved before the notice failed (here a secret in the task), so nobody was told of it and a
+        # second try added “… (2)”
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a1", "devkit:neo", "Neo: parser", m(1))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            sent = len(pg.load_run("claude", "s1").get("messages") or [])
+            for i in range(2):
+                with self.assertRaisesRegex(messaging.MessageError, "secret"):
+                    dispatch.delegate(f"rotate the key {SECRET}", to="Dozer", from_agent="a1", now=m(2 + i))
+            run = pg.load_run("claude", "s1")
+            self.assertEqual([s["name"] for s in run["plan"]], ["parser"])
+            self.assertEqual(len(run.get("messages") or []), sent)
+            self.assertEqual(audit.query(action="crew.delegate"), [])
+
+    def test_a_delegated_task_with_a_secret_past_what_its_notice_quotes_is_refused_whole(self):
+        # the notice quotes the task's first 200 characters, which alone were checked, while the step keeps 1,500
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a1", "devkit:neo", "Neo: parser", m(1))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            task = "add the export column " + "and its index " * 15 + SECRET
+            with self.assertRaisesRegex(messaging.MessageError, "secret"):
+                dispatch.delegate(task, to="Dozer", from_agent="a1", now=m(2))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["parser"])
+
+    def test_a_delegated_task_with_a_secret_is_refused_when_nobody_is_told(self):
+        # the tech lead delegates to a member with no lane at work: no notice, so nothing checked the saved task
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            with self.assertRaisesRegex(messaging.MessageError, "secret"):
+                dispatch.delegate(f"rotate the key {SECRET}", to="Dozer", now=m(2))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["parser"])
+
+    def test_a_delegation_refused_by_a_full_message_store_leaves_no_record_of_the_claim_it_never_saved(self):
+        # the Database engineer's free lane claimed the step, and the audit trail kept that claim, before the notice
+        # to the lane was refused: a claim of a step the run never saved
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a1", "devkit:neo", "Neo: parser", m(1))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            claims = len(audit.query(action="crew.claim"))
+            full = len(messaging.encoded(pg.load_run("claude", "s1")))
+            with mock.patch.object(messaging, "STORE_MAX", full), \
+                    self.assertRaisesRegex(messaging.MessageError, "capacity"):
+                dispatch.delegate("add the export column", to="Dozer", from_agent="a1", now=m(2))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["parser"])
+            self.assertEqual(len(audit.query(action="crew.claim")), claims)
+            dispatch.delegate("add the export column", to="Dozer", from_agent="a1", now=m(3))  # saved: recorded
+            self.assertEqual(len(audit.query(action="crew.claim")), claims + 1)
+
+    def test_a_delegated_scope_with_a_secret_is_refused_and_saves_nothing(self):
+        # --scope was saved unchecked: a token in a URL went into the run as the step's scope
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            with self.assertRaises(pg.StepError) as e:
+                dispatch.delegate("add the export column", to="Ghost", scope=f"https://u:{SECRET}@h/x", now=m(2))
+            self.assertNotIn(SECRET, str(e.exception))
+            run = pg.load_run("claude", "s1")
+            self.assertEqual([s["name"] for s in run["plan"]], ["parser"])
+            self.assertNotIn(SECRET, json.dumps(run))
+
+    def test_a_delegated_scope_that_is_not_a_repository_path_is_refused(self):
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            for scope in ("https://example.com/x", "git@host:org/repo", "../other/**", "lib/**, docs/a\nb.md",
+                          f"{d}/notes/**"):
+                with self.subTest(scope=scope), self.assertRaisesRegex(pg.StepError, "repository-relative"):
+                    dispatch.delegate("add the export column", to="Ghost", scope=scope, now=m(2))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["parser"])
+
+    def test_a_decline_whose_notice_is_refused_leaves_the_step_with_its_member(self):
+        # the step went back to the tech lead before the notice failed, so the tech lead was never told
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            dispatch.delegate("add the export column", to="Dozer", now=m(2))
+            step = pg.load_run("claude", "s1")["plan"][-1]["name"]
+            with self.assertRaisesRegex(messaging.MessageError, "secret"):
+                dispatch.decline(step, f"the key {SECRET} is wrong", from_agent="a2", now=m(3))
+            s = pg.load_run("claude", "s1")["plan"][-1]
+            self.assertEqual((s["owner"], s["state"], s["label"]), ("a2", "running", "Dozer"))
+            self.assertEqual(audit.query(action="crew.decline"), [])
 
     def test_a_forged_lane_variable_cannot_decline_another_lanes_step(self):
         # a member's child shell gave the lane variable the owner's id; no open call of that lane backs it, so the
@@ -208,6 +344,21 @@ class DelegationTests(unittest.TestCase):
                 s = dispatch.decline(step, "it needs a migration plan", from_agent=os.environ["DEVKIT_FROM_AGENT"],
                                      now=m(4))
             self.assertEqual((s["state"], s["owner"]), ("pending", "main"))
+
+    def test_a_command_that_holds_its_audit_records_holds_none_of_another_threads(self):
+        # the held records were one list for the whole process: a record another thread wrote during a delegation
+        # waited for that command's end, and was dropped with the records of a delegation that was refused
+        with TempState():
+            seen = None
+            with self.assertRaises(RuntimeError):
+                with pg._audits_held():
+                    t = threading.Thread(target=pg._audit, args=("crew.delegate", "from another thread", "x"))
+                    t.start()
+                    t.join()
+                    seen = [r["target"] for r in audit.query(action="crew.delegate")]
+                    raise RuntimeError("the notice was refused")
+            self.assertEqual(seen, ["from another thread"])
+            self.assertEqual([r["target"] for r in audit.query(action="crew.delegate")], ["from another thread"])
 
     def test_route_the_whole_plan(self):
         with TempState():

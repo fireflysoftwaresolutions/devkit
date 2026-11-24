@@ -26,6 +26,7 @@ Calibration: finished runs record estimate vs actual, so the next estimate is co
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -37,6 +38,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -1456,12 +1458,21 @@ def _resolve_after(plan, s, refs) -> list:
 def _build_steps(items, plan) -> list:
     """parse_plan items -> their new steps, with `after` resolved against `plan` plus the new steps. The plan they make
     together is validated (validate_plan) before anything changes: on error, `plan` is untouched. A declared kind of
-    work ([id] in the spec) is stored on its step as explicit; an unknown id is refused."""
+    work ([id] in the spec) is stored on its step as explicit; an unknown id is refused. A new step whose name gives
+    the scratch folder of a step of `plan` or of an earlier new step (folder_twin) is refused; two steps of `plan`
+    saved before that rule may share one, and the plan still takes other steps."""
     new = [_new_step(it[0], it[1]) for it in items]
     full = list(plan or []) + new
     dup = _duplicate_name(full)
     if dup:
         raise StepError(f"two steps are named “{dup}”: give each step its own name, so `after` can name it")
+    for k in range(len(full) - len(new), len(full)):
+        s = full[k]
+        twin = folder_twin(full[:k], s["name"])
+        if twin:
+            raise StepError(f"“{twin['name']}” and “{s['name']}” differ only in case, accents, spaces or punctuation, "
+                            f"so the lanes of both would write in one scratch folder (scratchpad/<member id>-"
+                            f"{step_slug(s['name'])}/): give each step a name of its own")
     for s, it in zip(new, items):
         s["after"] = _resolve_after(full, s, it[2])
         if len(it) > 3 and it[3]:
@@ -1925,10 +1936,17 @@ def _rechecked(run, s) -> bool:
     return False
 
 
-def _finish_step(run, s, now, agent, sid):
+def _finish_step(run, s, now, agent, sid, by: str = "main"):
+    """Step `s` ends done now, closed by `by` (a lane's id, or "main" for the tech lead), which it keeps
+    (`closed_by`, _closer). Its work ends now too (`ended`, approvals.saw), unless it ended unverified before: then
+    this is a close of that work, which keeps when the work ended."""
     if s.get("state") == "done":
         return
-    s.update(state="done", finished=now)
+    if s.get("state") == "unverified":
+        s.setdefault("ended", s.get("unverified_at") or now)
+    else:
+        s["ended"] = now
+    s.update(state="done", finished=now, closed_by=str(by or "main")[:80])
     _rechecked(run, s)
     s["started"] = s.get("started") or now
     record("step", agent, sid, s["name"], step_minutes(run, s, now) * 60, run.get("project", ""),
@@ -1937,16 +1955,45 @@ def _finish_step(run, s, now, agent, sid):
 
 
 def _advance_main(run, now):
-    """Keep one main step running: the first ready one (its dependencies done) not handed to a subagent. Before that,
-    each lane that is free claims what waits for it (_claim_free_lanes)."""
+    """In the tech lead's own call, or a hook of the main session (never a member's call: _member_close claims for
+    the free lanes only), keep one main step running: the first ready one (its dependencies done) not handed to a
+    subagent that is the tech lead's own work (_main_may_start). Before that, each lane that is free claims what
+    waits for it (_claim_free_lanes)."""
     _claim_free_lanes(run, now)
     plan = run.get("plan") or []
     if any(s.get("state") == "running" and (s.get("owner") or "main") == "main" for s in plan):
         return
-    nxt = next((s for s in ready(run) if (s.get("owner") or "main") == "main" and not s.get("label")), None)
+    nxt = next((s for s in ready(run) if (s.get("owner") or "main") == "main" and not s.get("label")
+                and _main_may_start(s)), None)
     if nxt:
         nxt.update(state="running", started=now)
         coord._history(run, nxt, "pending", "running", "main", "the tech lead's next ready step", now)
+
+
+def declared_responsible(s: dict):
+    """The ids of the members the crew's RACI makes Responsible for the kind of work step `s` declares; None when it
+    declares none the RACI knows, or the roster cannot be read: the step is the tech lead's own until it is
+    assigned. Only a declared kind decides, never the step's words: the one rule the tech lead's own steps
+    (_main_may_start) and the parallel launch hint (dispatch.parallel_hint) read."""
+    if not s.get("activity"):
+        return None
+    from . import raci
+    try:
+        act = raci.activity(s["activity"])
+    except Exception:
+        return None  # a roster that cannot be read changes nothing
+    return None if act is None else list(act.get("R") or [])
+
+
+def _main_may_start(s: dict) -> bool:
+    """May devkit start step `s` as the tech lead's own? Never a review, which waits for its reviewer, and a step
+    that declares its kind of work only when the crew's RACI makes the tech lead Responsible for it
+    (declared_responsible); a step that declares none is the tech lead's own until it is assigned."""
+    if is_review_step(s):
+        return False
+    from . import approvals
+    ids = declared_responsible(s)
+    return ids is None or approvals.MAIN in ids
 
 
 def _main_only(from_agent, what: str, cwd: str | None = None):
@@ -2028,12 +2075,16 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
     description names, and the first of the member's working lanes that is free takes it, oldest intent first
     (_route_to_lane; never a lane busy with another step, nor one whose member ended or went stale, working_agents,
     which takes it when it works again); its time is that subagent's time. `scope`: the files it owns (comma-separated globs); the pre-tool hook advises that subagent when
-    it edits outside them, and `dev crew owner` names it as their holder. The crew's RACI must make the member
-    Responsible for the step's kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id
-    from dev crew raci, which then decides whatever language the step is written in."""
+    it edits outside them, and `dev crew owner` names it as their holder. A scope is paths in the repository, or in
+    this project's plans folder or the member's own scratch folders for this step (scratchpad/<member id>-<step>/
+    and scratchpad/<member id>/), by the rule `dev crew delegate` refuses one by
+    (dispatch._scope_entries, dispatch._repository_globs). The crew's RACI
+    must make the member Responsible for the step's kind of work; `why` overrides it, recorded. `activity`: the
+    step's kind of work, an id from dev crew raci, which then decides whatever language the step is written in."""
+    from . import dispatch
     _main_only(from_agent, "assigns the plan's steps", cwd)
     activity = _activity_id(activity) if activity else ""
-    globs = [x.strip() for x in scope.split(",") if x.strip()] if scope else []
+    globs = dispatch._scope_entries(scope or "")
     now = now or time.time()
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
@@ -2042,9 +2093,17 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         if not s:
             raise ValueError(f"no step “{which}” in the plan")
         checkout = _scope_checkout(globs, run.get("project") or "", cwd)
-        globs, rewrites = _scope_globs(globs, run.get("project") or "", cwd)
-        _tell_rewrites(run, s["name"], rewrites, now)
+        try:
+            from . import crew
+            member = (crew._for_label(label) or {}).get("id") or ""
+        except Exception:
+            member = ""  # a broken roster names no member, so the scope may name no scratch folder
+        own = "" if folder_twin(run["plan"], s["name"], skip=s) else s["name"]  # a folder two steps share is neither's
+        globs, rewrites = dispatch._repository_globs(globs, run.get("project") or "", cwd, member=member,
+                                                     session=(agent, sid), step=own)
+        _tell_rewrites(run, s["name"], rewrites, now, checkout)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
+        _refuse_own_review(run, s, label)
         owner = s.get("owner") or "main"
         if owner in run.get("agents", {}):
             _remember_step(run["agents"][owner], s)
@@ -2062,18 +2121,13 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         live = working_agents(run, now, own=True)  # one that ended or went stale takes no step and holds no files
         if globs:
             top = checkout or _scope_top(run, cwd)
+            _tell_own_overlap(run, s, label, globs, checkout, top, now)
             for aid, lane in live:
                 held = coord.scope(run, aid)  # the files of the steps it runs, never a stored copy
                 if not _label_matches(label, lane) and _same_checkout(checkout, _lane_checkout(run, aid)):
                     clash = list(dict.fromkeys(g for g in globs for h in held if _globs_overlap(g, h, top)))
                     if clash:
-                        from . import crew
-                        raise StepError(f"{', '.join(clash)} overlaps the files "
-                                        f"{crew.who(lane.get('persona') or lane.get('label'))} owns while working "
-                                        f"({', '.join(held)}). Give each member different files, or "
-                                        f"wait until they finish; for members in different worktrees, give each "
-                                        f"scope as paths in its worktree (<worktree>/lib/**): scopes of two "
-                                        f"checkouts do not clash.")
+                        raise StepError(_scope_clash(run, aid, lane, clash, globs, checkout, top))
             s["scope"] = globs
             if checkout:
                 s["checkout"] = checkout
@@ -2091,6 +2145,76 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
     return run
 
 
+def _tell_own_overlap(run: dict, s: dict, label: str, globs: list, checkout: str, top: str, now: float):
+    """Tell the tech lead when the scope `globs` that step `s` gets overlaps the scope of another step of the same
+    member (`label`) that is open, or done with its approval still owed (approvals_owed): one lane may run both, and
+    a file both scopes hold counts as the work of the step the lane runs when it writes it (_worked_on_since), except
+    while a review of the done one is at work, when it counts as that step's rework. The overlap check of two working
+    lanes refuses such a scope between members; within one member it only warns."""
+    def member(lab):
+        return member_id(lab) or str(lab or "").strip().lower()
+    owed = []
+
+    def unsettled(x):  # open, or done and still owed its approval
+        if x.get("state") != "done":
+            return x.get("state") not in DONE
+        if not owed:
+            owed.append({n for _, names in approvals_owed(run) for n in names})
+        return x.get("name") in owed[0]
+    me = member(label)
+    mine = [x for x in run.get("plan") or [] if x is not s and x.get("label") and member(x["label"]) == me
+            and _same_checkout(checkout, x.get("checkout") or "") and unsettled(x)]
+    both = [x["name"] for x in mine if any(_globs_overlap(g, h, top) for g in globs for h in x.get("scope") or []
+                                           if isinstance(h, str) and h)]
+    if both:
+        from . import crew
+        _post(run, "devkit", "main", f"the scope of “{s['name']}” overlaps the scope of {_quoted_and(both)}, which "
+              f"{crew.who(label)} also has: a file both hold counts as the work of the step its lane runs when it "
+              f"writes it, and as rework of a finished step while a review of that step is at work. Give each step "
+              f"its own files when you can", now, from_name="devkit")
+
+
+def member_id(name):
+    """The id of the crew member a persona, a launch description or a label names ("Neo", "Neo: the parser",
+    "devkit:neo" -> "neo"), as approvals.doer reads one; None when it names none or the roster cannot be read. The
+    rule coord compares a reviewer and the authors of the work it reviews by (coord.independent)."""
+    from . import crew
+    try:
+        m = crew._for_label(name)
+    except Exception:
+        return None
+    return m["id"] if m else None
+
+
+def _refuse_own_review(run: dict, s: dict, label: str):
+    """A review step goes to no member whose lane ran a step it follows, nor to a label that names no crew member
+    (coord.independent): StepError naming that work and what to do, and one that says so when the roster cannot be
+    read. No --why overrides it: an author's review approves nothing of its own work."""
+    if not is_review_step(s):
+        return
+    from . import crew
+    if coord.independent(run, s, label, who=member_id, review=is_review_step):
+        return
+    try:
+        mem = crew._for_label(label)
+    except Exception as e:  # the roster went unreadable since the review rule read it
+        raise StepError(f"“{s['name']}” is a review, and devkit cannot read the crew roster to tell whether “{label}” "
+                        f"did the work it reviews ({e}): fix the roster, then assign it again") from None
+    if not mem:
+        raise StepError(f"“{s['name']}” is a review, and “{label}” names no crew member, so devkit cannot show it is "
+                        f"not the author of the work it reviews: give it to a member (dev crew raci review names who "
+                        f"reviews)")
+    raise StepError(f"“{s['name']}” reviews {_quoted_and(_own_work(run, s, label))}, {crew.who(mem)}'s own work: a "
+                    f"member never reviews its own work. Give it to another member (dev crew raci review names who "
+                    f"reviews), or skip it (dev progress skip \"{s['name']}\" --why \"…\")")
+
+
+def _own_work(run: dict, s: dict, reviewer) -> list:
+    """The names of the steps review `s` follows that the member of `reviewer` (a lane, or a member's name or label)
+    ran (coord.own_work, coord.independent's test)."""
+    return coord.own_work(run, s, reviewer, who=member_id, review=is_review_step)
+
+
 def _scope_top(run: dict, cwd: str | None) -> str:
     """The checkout a run's repository-relative scope globs count from (lanescope.scope_base)."""
     try:
@@ -2103,6 +2227,54 @@ def _scope_top(run: dict, cwd: str | None) -> str:
 def _lane_checkout(run: dict, aid: str) -> str:
     """The checkout the scope of lane `aid` counts in: that of the steps it runs (_scope_checkout), '' for none."""
     return next((x.get("checkout") for x in coord.held(run, aid) if x.get("checkout")), "")
+
+
+def lane_home(run: dict, aid: str) -> str:
+    """The checkout lane `aid`'s scope counts in, a helper's from the member above it (lane_chain): '' when its
+    scope names none, and counts in every checkout of the repository."""
+    return next((h for h in (_lane_checkout(run, k) for k in lane_chain(run, aid)) if h), "")
+
+
+def _scope_clash(run: dict, aid: str, lane: dict, clash: list, globs: list, checkout: str, top: str) -> str:
+    """Why assign refuses `globs` (counted in `checkout`, '' for every checkout) as overlapping working lane `aid`,
+    and what to do: where each scope counts, and when the two members can work in two worktrees, the assign commands
+    that bind each scope to its own (_scope_checkout), including the working lane's step."""
+    from . import crew
+    held, theirs = coord.scope(run, aid), _lane_checkout(run, aid)
+    who = crew.who(lane.get("persona") or lane.get("label"))
+    head = f"{', '.join(clash)} overlaps the files {who} owns while working ({', '.join(held)})"
+    if checkout or theirs:  # one is bound, or both are and to the same checkout (_same_checkout)
+        if checkout and theirs:
+            return f"{head}: both scopes count in {core.tilde(checkout)}. Give each member different files, or " \
+                   "wait until they finish."
+        if not checkout:
+            return (f"{head} in {core.tilde(theirs)}. This scope names no checkout, so it counts in every one: if "
+                    f"this member works in another worktree, give its paths there (--scope "
+                    f"\"{_in_worktree(globs)}\"); else give each member different files, or wait until "
+                    "they finish.")
+    step = next((x for x in coord.held(run, aid) if any(_globs_overlap(g, h, top) for g in clash
+                                                        for h in x.get("scope") or [])), None)
+    bind = ",".join(g if g.startswith(("/", "~")) else f"<their worktree>/{g}" for g in (step or {}).get("scope") or [])
+    if checkout:
+        where = f"{who}'s scope names no checkout, so it holds {', '.join(held)} in every checkout, " \
+                f"{core.tilde(checkout)} too"
+    else:
+        where = "neither scope names a checkout, so each holds its files in every checkout"
+    label = (step or {}).get("label") or ""
+    mem = crew._for_label(label) if label and ":" not in label else None  # a launch description binds one lane
+    fix = (f"dev progress assign {shlex.quote(step['name'])} --to {mem['id'] if mem else shlex.quote(label or who)} "
+           f"--scope "
+           f"\"{bind}\", then this "
+           "assign again" + ("" if checkout else f" with --scope \"{_in_worktree(globs)}\"")) if step else \
+        "give each scope as paths in its worktree (--scope \"<worktree>/<glob>\")"
+    return f"{head}: {where}. Give each member different files, or wait until they finish; if they work in " \
+           f"different worktrees, bind each scope to its own: {fix}."
+
+
+def _in_worktree(globs: list) -> str:
+    """Each repository-relative glob as a path in the member's worktree, for an assign it can run: "<worktree>/a,
+    <worktree>/b" (one placeholder for the first glob only left the others counting in every checkout)."""
+    return ",".join(f"<worktree>/{g}" for g in globs)
 
 
 def _tell_unqueued(run: dict, s: dict, lanes: list, label: str, now: float):
@@ -2192,17 +2364,19 @@ def _exact_intent(run, s, aid):
 
 def _queued_for(run: dict, aid: str) -> list:
     """The pending steps whose intent may go to lane `aid` (bound to it, or to its member), in the order it claims
-    them (coord.claimable): answered blocked steps first, then those bound to it, then its member's, oldest first."""
+    them (coord.claimable): answered blocked steps first, then those bound to it, then its member's, oldest first.
+    Never a review of work its member did (coord.independent): no queue, yield or naming gives it to that lane."""
     lane = (run.get("agents") or {}).get(aid) or {}
     marks = []
     for i, x in enumerate(run.get("plan") or []):
         it = coord.intent(x) if x.get("state") == "pending" else None
-        if not it:
+        if not it or (is_review_step(x) and not coord.independent(run, x, lane, who=member_id,
+                                                                    review=is_review_step)):
             continue
         other = (run.get("agents") or {}).get(it["lane"]) or {} if it["lane"] else {}
         if it["lane"] == aid or (it["lane"] and other.get("state") != "running" and _label_matches(it["member"], lane)
                                  and (lane.get("parent") or "main") == "main") \
-                or (not it["lane"] and _label_matches(it["member"], lane)
+                or (not it["lane"] and _label_matches(it["member"], lane) and aid not in (x.get("yielded") or [])
                                  and (lane.get("parent") or "main") == "main" and not lane.get("follow_up")):
             marks.append((0 if it["front"] else 1 if it["lane"] else 2, it["ts"] or 0, i, x))
     return [x for *_, x in sorted(marks, key=lambda t: t[:3])]
@@ -2247,16 +2421,44 @@ def lane_wait(run: dict, s: dict, live: list) -> str:
             f"dev progress step --step \"{name}\" closes it")
 
 
-def _launch_named(run: dict, aid: str, lane: dict):
-    """The step of its member that lane `aid`'s launch description names best, alone (as _bind_step scores it),
-    among the pending steps that may go to it; None when it names none of them, or two equally."""
+def launch_step(run: dict, aid: str):
+    """The open step of lane `aid` its launch is about: of the steps it owns that are not done, those that did not
+    join it later (`joined`: a review that joined a reviewer's lane), the one its launch description names best
+    (_name_score), else the first in plan order; None when it owns none. A Codex member's start context comes from it
+    (codexlaunch.brief_context)."""
+    mine = [s for s in (run or {}).get("plan") or [] if s.get("owner") == aid and s.get("state") not in DONE]
+    own = [s for s in mine if s.get("joined") != aid] or mine
+    if not own:
+        return None
+    task = _task_text((((run or {}).get("agents") or {}).get(aid) or {}).get("label") or "")
+    return max(own, key=lambda s: _name_score(task, s["name"]))  # the first of equals
+
+
+def _launch_names(run: dict, aid: str, lane: dict) -> list:
+    """The steps of its member that lane `aid`'s launch description names (as _bind_step scores it), among the
+    pending steps that may go to it, in the order the lane takes them: the one it names best; [] when it names none
+    of them, or two equally but not fully. Steps it names fully (every word of the name, or the whole name) are each
+    named, so one launch for `review-api and review-ui` takes both as its own. The steps the lane took as named count
+    too: a launch that names one of them better, or as well but not fully, names no step still waiting (one word left
+    in common, such as "review" once "review-ui" is taken, names no "review-api"); a step that only joined the lane
+    never counts."""
     task = _task_text(lane.get("label") or "")
     scored = [(_name_score(task, x["name"]), x["name"]) for x in _queued_for(run, aid)]
     if not scored:
-        return None
+        return []
     best = max(sc for sc, _ in scored)
     top = [n for sc, n in scored if sc == best]
-    return top[0] if best[1] and len(top) == 1 else None
+    fully = best[0] or (best[1] and best[2] == 1.0)
+    took = [_name_score(task, x["name"]) for x in coord.held(run, aid) if x.get("joined") != aid]
+    if any(sc > best or (sc == best and not fully) for sc in took):
+        return []
+    return top if best[1] and (len(top) == 1 or fully) else []
+
+
+def _launch_named(run: dict, aid: str, lane: dict):
+    """The step lane `aid` takes first as its launch's own (_launch_names), or None."""
+    names = _launch_names(run, aid, lane)
+    return names[0] if names else None
 
 
 def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True, told=()) -> list:
@@ -2270,13 +2472,13 @@ def _claim_lane(run: dict, aid: str, now: float, member_wide: bool = True, told=
     taken = []
     while coord.can_claim(lane) and len(taken) < 20:
         named = _launch_named(run, aid, lane)
-        s = coord.claimable(run, aid, named, member_wide, review=is_review_step)
+        s = coord.claimable(run, aid, named, member_wide, review=is_review_step, who=member_id)
         if s is None:
             break
         who = crew.who(lane.get("persona") or s.get("label") or "")
         why = (f"{who}'s launch names it" if s["name"] == named else f"{who} holds no other step now: it took this "
                f"step, the oldest waiting for it")
-        coord.claim(run, aid, now, why, named, member_wide, review=is_review_step)
+        coord.claim(run, aid, now, why, named, member_wide, review=is_review_step, who=member_id)
         _remember_step(lane, s)
         lane.pop("handed_over", None)
         _audit("crew.claim", s["name"], why, project=run.get("project") or "", agent_id=aid[:16])
@@ -2303,7 +2505,8 @@ def _claim_free_lanes(run: dict, now: float, told=()):
     agents = run.get("agents") or {}
     states = None
     for aid in sorted(agents, key=lambda k: (agents[k].get("started") or 0, k)):
-        if not coord.can_claim(agents[aid]) or coord.claimable(run, aid, review=is_review_step) is None:
+        if not coord.can_claim(agents[aid]) or coord.claimable(run, aid, review=is_review_step,
+                                                               who=member_id) is None:
             continue
         if states is None:
             states = lane_states(run, now, own=True)
@@ -2354,15 +2557,64 @@ def _member_close_refused(run: dict, st: dict, aid: str, check: str, running=())
     if st.get("state") == "pending" and any(st is x for x in _queued_for(run, aid)):
         before = _closes_before(run, aid, st)
         if before:
+            first = _by_name(run.get("plan") or []).get(before[0]) or {}
+            lane = (run.get("agents") or {}).get(aid) or {}
+            why = "" if first.get("joined") != aid else \
+                (f" (your launch does not name “{name}”, so it waits its turn in your member's queue)"
+                 if name not in _launch_names(run, aid, lane) else
+                 " (it joined your lane from your member's queue, but your lane recorded work on it, so it does not "
+                 "give way to a step of your brief)")
             return (f"“{name}” joins your lane once {_quoted_and(before)} close{'s' if len(before) == 1 else ''}, so it "
                     f"cannot close yet and devkit recorded nothing: close “{before[0]}” first (dev progress step "
-                    f"\"…\" --step \"{before[0]}\" --check \"…\"), then run this again")
+                    f"\"…\" --step \"{before[0]}\" --check \"…\"), then run this again{why}")
         deps = deps_open(run, st)
         return (f"“{name}” waits for {', '.join(deps)}, so it cannot close yet and devkit recorded nothing: it joins "
                 f"your lane once {'that is' if len(deps) == 1 else 'they are'} done; run this again then")
-    holder = "the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"
+    lane = (run.get("agents") or {}).get(aid) or {}
+    if st.get("state") == "pending" and is_review_step(st) and _label_matches(st.get("label") or "", lane) \
+            and not coord.independent(run, st, lane, who=member_id, review=is_review_step):
+        from . import crew
+        did = _own_work(run, st, lane)
+        if not did:
+            return (f"“{name}” is a review, and devkit cannot tell which crew member your lane is, so it never "
+                    f"joins your lane and devkit recorded nothing: the tech lead gives the review to a member's own "
+                    f"launch (dev crew brief)")
+        me = lane.get("persona") or lane.get("label") or ""
+        return (f"“{name}” reviews {_quoted_and(did)}, {crew.who(me)}'s own work, so it never "
+                f"joins your lane and devkit recorded nothing: a member never reviews its own work, and the tech lead "
+                f"gives the review to another member (dev crew raci review names who reviews)")
+    holder ="the tech lead's" if (st.get("owner") or "main") == "main" else f"{_name_of(run, st['owner'])}'s"
     return (f"“{name}” is not your step ({holder}), so devkit cannot close it and recorded nothing: ask the tech lead "
             f"to assign it to you (dev crew ask \"…\"), or record your work without --step")
+
+
+def _yield_for(run: dict, st: dict, aid: str, now: float) -> list:
+    """A member's `dev progress step --step <st>` names a step its launch names (_launch_names, among the steps
+    queued for its lane) whose dependencies are done, while every step the lane runs only joined it by its member's
+    queue (`joined`) and has no update from the lane: those yield, back to pending, first for their member's next
+    lane (a front intent) and never again for this one (`yielded`), and the lane takes `st`, so a member closes a
+    step its brief named in any order. A joined step the lane recorded anything on stays: the lane works on it; and a
+    step its launch does not name waits its turn in the queue, and nothing yields for a step the lane may not take
+    (_may_take). -> the names of the steps that yielded"""
+    lane = (run.get("agents") or {}).get(aid) or {}
+    if st.get("state") != "pending" or deps_open(run, st) or st["name"] not in _launch_names(run, aid, lane):
+        return []
+    worked = {u.get("step") for u in lane.get("updates") or [] if isinstance(u, dict) and u.get("step")}
+    held = [x for x in coord.held(run, aid) if x is not st]
+    if not held or any(x.get("joined") != aid or x["name"] in worked for x in held) or not _may_take(run, aid, st):
+        return []  # nothing yields, nor is logged, for a step the lane may not take
+    who = lane.get("persona") or "the member"
+    for x in held:
+        x.update(owner="main", state="pending", started=None)
+        x.pop("joined", None)
+        x["yielded"] = list(dict.fromkeys((x.get("yielded") or []) + [aid]))
+        coord.set_intent(run, x, coord.member_of(x.get("label")) or who, None, now, front=True)
+        _log_change(run, x, "running", "pending", "devkit", f"{who} closes “{st['name']}” by name, and this step only "
+                    f"joined its lane by the queue with no update from it: it yields, first for its member's next "
+                    f"lane", now)
+    _take_step(run, aid, st, now)
+    _log_change(run, st, "pending", "running", "devkit", f"{who}'s dev progress step names it", now)
+    return [x["name"] for x in held]
 
 
 def _open_step_of(run: dict, aid: str, s: dict | None = None):
@@ -2373,14 +2625,28 @@ def _open_step_of(run: dict, aid: str, s: dict | None = None):
     return next((x for x in coord.held(run, aid) if x is not s and not (review and is_review_step(x))), None)
 
 
-def _take_step(run: dict, aid: str, s: dict, now: float):
-    """Lane `aid` takes step `s`: it owns it and runs it, its scope is the step's while it runs (lane_scope), and its
-    member's step closes reach the plan."""
-    s.update(owner=aid, state="running", started=s.get("started") or now)
-    coord.drop_intent(s)
+def _may_take(run: dict, aid: str, s: dict) -> bool:
+    """May lane `aid` take step `s`? Not a review of its member's own work, nor a review for a lane devkit cannot
+    name as a crew member (coord.independent). The rule _take_step applies, which a caller checks before it changes
+    anything for the take."""
+    lane = (run.get("agents") or {}).get(aid) or {}
+    return not (is_review_step(s) and not coord.independent(run, s, lane, who=member_id, review=is_review_step))
+
+
+def _take_step(run: dict, aid: str, s: dict, now: float) -> bool:
+    """Lane `aid` takes step `s`: it owns it and runs it from now (`taken`), its scope is the step's while it runs
+    (lane_scope), and its member's step closes reach the plan. Never a review of its member's own work, nor a review
+    for a lane devkit cannot name as a crew member (coord.independent), whichever caller asks: then nothing changes.
+    -> whether it took it"""
+    if not _may_take(run, aid, s):
+        return False
     lane = run["agents"][aid]
+    s.update(owner=aid, state="running", started=s.get("started") or now, taken=now)
+    coord.add_author(s, aid)
+    coord.drop_intent(s)
     _remember_step(lane, s)
     lane.pop("handed_over", None)
+    return True
 
 
 def _remember_step(lane: dict, step: dict):
@@ -2408,11 +2674,12 @@ def _checkouts(base: str) -> list:
 def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
     """Step scopes count from the run's repository: the edit advice matches a member's file by its path relative to
     the checkout that holds it (hooks._scope_advice), so an absolute or ~ glob inside a checkout never matched.
-    -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the
-    tech lead; absolute globs outside the repository (a scratch folder, the project's plans) as given; a glob that
-    names a whole checkout (`<worktree>/**`, `<worktree>/`) as that checkout's top-level entries (_checkout_entries),
-    never a bare `**`. A glob is rewritten only when that is exact: its fixed folder (the part before the first
-    wildcard) lies in one checkout.
+    -> (globs, rewrites): such a glob in its repository-relative form, with "old → new" for the tech lead; absolute
+    globs outside the repository as given, which its callers keep only in this project's plans folder or the
+    member's own scratch folders for the step (dispatch._repository_globs); a glob that names
+    a whole checkout (`<worktree>/**`, `<worktree>/`) as that checkout's top-level entries (_checkout_entries), never
+    a bare `**`. A glob is rewritten only when that is exact: its fixed folder (the part before the first wildcard)
+    lies in one checkout.
     Raises StepError when it is not: the fixed folder holds checkouts (a wildcard or the folder spans several), or it
     is a managed worktree folder of the project with no checkout there (a removed worktree, a typo). A guess there
     could cover files the tech lead did not name, or keep a scope that never matches."""
@@ -2496,12 +2763,16 @@ def _checkout_entries(top: str) -> list:
     return sorted(f"{h}/**" if folder else h for h, folder in heads.items())
 
 
-def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
-    """Tell the tech lead which globs of a step's scope _scope_globs kept repository-relative (assign, delegate)."""
+def _tell_rewrites(run: dict, step: str, rewrites: list, now: float, checkout: str = ""):
+    """Tell the tech lead which globs of a step's scope _scope_globs kept repository-relative (assign, delegate), and
+    where the scope counts: only in `checkout` when it is bound to the one checkout its paths name (_scope_checkout),
+    else in every checkout of the repository."""
     if rewrites:
+        repo = run.get("project") or "the repository"
+        where = (f"It holds those files only in {core.tilde(checkout)}: the same paths in another checkout of {repo} "
+                 f"are not its." if checkout else f"It holds those files in every checkout of {repo}.")
         _post(run, "devkit", "main", f"the scope of “{step}” is kept repository-relative, the form the edit advice "
-              f"matches: {'; '.join(rewrites)}. It holds those files in every checkout of "
-              f"{run.get('project') or 'the repository'}.", now, from_name="devkit")
+              f"matches: {'; '.join(rewrites)}. {where}", now, from_name="devkit")
 
 
 # How a lane's scope glob holds a path. The edit check (in_scope), the holders of a path (scope_holders) and the
@@ -2801,7 +3072,7 @@ def _holder(run: dict, aid: str, lane: dict, globs, facts, now: float, alive, ow
     return {"who": who, "member": m["id"] if m else None, "lane": aid, "agent": run.get("agent") or "claude",
             "session": str(run.get("session") or ""), "run": run.get("goal") or "",
             "step": (st or {}).get("name") or "", "scope": sorted(g for g in globs if isinstance(g, str)),
-            "own": own, "to": to, "do": do, **lv}
+            "checkout": lane_home(run, aid), "own": own, "to": to, "do": do, **lv}
 
 
 def scope_holders(path, agent: str, sid: str, cwd: str | None = None, me: str = "main", now: float | None = None,
@@ -2887,9 +3158,14 @@ def owner_text(rows: list, now: float | None = None) -> str:
             lines.append(f"  {h['who']} · {h['state']}{why} · last activity {_clock(h['last'], now)}")
             where = "this session's run" if h.get("own") else f"session {h['session'][:12]}"
             lines.append(ui.dim(f"    run «{str(h['run'])[:60]}» · {where}" + (f" · step {h['step']}" if h['step'] else "")
-                                + f" · scope {', '.join(h['scope'])}"))
+                                + f" · scope {', '.join(h['scope'])}" + _in_checkout(h.get("checkout"))))
             lines.append(f"    {h['do']}")
     return "\n".join(lines)
+
+
+def _in_checkout(checkout) -> str:
+    """" in <checkout>" for a scope bound to one checkout (lane_home), '' for one that counts in every checkout."""
+    return f" in {core.tilde(checkout)}" if checkout else ""
 
 
 def close_quiet_lanes(run: dict, why: str, now: float | None = None, alive=None) -> list:
@@ -3060,37 +3336,65 @@ def _ask_into(agent: str, sid: str, text: str, to, frm: str, now: float, kind: s
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        before = len(run.get("messages") or [])
-        m = _post(run, frm, _addr(run, to or "", now, pending_launch=pending_launch), text, now,
-                  kind=kind if kind in ("notice", "answer") else "", request_id=request_id)
-        if len(run.get("messages") or []) == before:  # its request key sent it before: that message, once
+        m, new = _ask_in(run, text, to, frm, now, kind, request_id, pending_launch)
+        if not new:  # its request key sent it before: that message, once
             return m
-        if m["to"].startswith("name:"):
-            m["pending_launch"] = str(to)
-        told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
-        if told:  # never silently: the sender learns with its next tool call that nobody reads it now
-            _post(run, "devkit", frm, told, now, from_name="devkit", kind="notice")
         _save(run, touch_session=False)
-    _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
-           type=kind, count=len(m["text"]))
-    _notify_message(agent, sid, m)
+    _asked(agent, sid, run, m, kind)
     return m
 
 
-def _message_request_key(value, cwd=None, args=()):
+def _ask_in(run: dict, text: str, to, frm: str, now: float, kind: str = "message", request_id="",
+            pending_launch=False) -> tuple:
+    """crew_ask's message, added to `run` inside the caller's transaction, so a command's change and its notice about
+    that change are saved together or not at all: a MessageError (a secret, a body too large, a full message store)
+    refuses the whole command before it saves anything, and nobody is left untold of a saved change. The caller
+    saves, then records a new message with _asked. -> (the message, whether it is new: not when its request key sent
+    it before)."""
+    before = len(run.get("messages") or [])
+    m = _post(run, frm, _addr(run, to or "", now, pending_launch=pending_launch), text, now,
+              kind=kind if kind in ("notice", "answer") else "", request_id=request_id)
+    if len(run.get("messages") or []) == before:
+        return m, False
+    if m["to"].startswith("name:"):
+        m["pending_launch"] = str(to)
+    told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
+    if told:  # never silently: the sender learns with its next tool call that nobody reads it now
+        _post(run, "devkit", frm, told, now, from_name="devkit", kind="notice")
+    return m, True
+
+
+def _asked(agent: str, sid: str, run: dict, m: dict, kind: str = "message"):
+    """A new message of `run` (_ask_in), once its run is saved: its audit record (its kind and length, never its
+    text) and the desktop alert."""
+    _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
+           type=kind, count=len(m["text"]))
+    _notify_message(agent, sid, m)
+
+
+def _request_call(cwd=None) -> str:
+    """The one open tool call that typed this command, as the first part of a request key ("native:<id>"); '' with
+    none or several. A command that sends inside its transaction looks it up before it (_message_request_key)."""
+    from . import identity
+    found = identity._find(cwd, None, None, settle=False)
+    return f"native:{found.calls[0]}" if len(found.calls) == 1 else ""
+
+
+def _message_request_key(value, cwd=None, args=(), call=None):
     """The idempotency key of a send: the caller's --request-id, else the one open tool call that typed this command
     with a digest of what it sends (`args`: the command, its target and its body), so two sends in one shell call are
-    two messages while the same send repeated in that call is one; with no single open call, a fresh key."""
-    from . import identity, messaging
+    two messages while the same send repeated in that call is one; with no single open call, a fresh key. `call`:
+    _request_call, looked up already."""
+    from . import messaging
     if value:
         if not isinstance(value, str) or len(value) > 200 or any(ord(c) < 32 for c in value):
             raise messaging.MessageError("invalid_text", "invalid request key")
         return value
-    found = identity._find(cwd, None, None, settle=False)
-    if len(found.calls) != 1:
+    call = _request_call(cwd) if call is None else call
+    if not call:
         return str(uuid.uuid4())
     digest = hashlib.sha256(messaging.encoded([str(a) for a in args])).hexdigest()[:32]
-    return f"native:{found.calls[0]}:{digest}"
+    return f"{call}:{digest}"
 
 
 def _notify_message(agent, sid, message):
@@ -4124,7 +4428,8 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     """The tech lead withdraws a pending decision (`dev crew withdraw <id> --why`): state withdrawn, with the reason
     in the run's history and the audit trail. A step blocked on it runs again, or waits for a new launch when its
     member ended or went stale (_release); the original asking lane is told to go on without an answer when its run
-    still lists that lane as running, or when the step it blocked waits for a new launch. Its replacement does not
+    still lists that lane as running, or when the step it blocked waits for a new launch, in the same save: a notice
+    that cannot be sent (_ask_in) refuses the withdrawal, and the decision stays pending. Its replacement does not
     inherit the notice (_reply_to). Never the developer's answer: it approves no step, and it takes no answer
     later."""
     _main_only(from_agent, "withdraws decisions", cwd)
@@ -4132,9 +4437,12 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     why = " ".join(str(why or "").split())
     if not why:
         raise StepError("say why: dev crew withdraw <id> --why \"…\" (it goes into the run's history and the audit)")
+    from . import messaging
+    messaging.validate_body(why)  # the whole reason the run keeps, whether or not a notice quotes it
     agent, sid = current_session(cwd)
     decision_id = _own_decision_id(decision_id, agent, sid, "withdrawn")
-    with _tx(agent, sid):
+    call, notice = _request_call(cwd), None
+    with _audits_held(), _tx(agent, sid):  # a refused notice leaves no record of the steps it would free
         run = normalize(load_run(agent, sid) or {})
         d = _decision(run, decision_id)
         if not d:
@@ -4150,12 +4458,18 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
             and (lane.get("state") == "running" or bool(back))  # it may wait, or the launch that takes its step will
         if not tell:
             _ended_asker_notice(run, d.get("from") or "", f"the withdrawal of their decision {d['id']}", now)
+        else:  # keep the original recipient even if another lane takes its step; saved with the withdrawal or neither
+            to = _reply_to(run, d["from"], now)
+            text = (f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
+                    f"developer's answer.")
+            m, new = _ask_in(run, text, to, "main", now, "notice",
+                             _message_request_key("", cwd, ("crew ask", "notice", to or "", False, text), call))
+            notice = m if new else None
         _save(run, touch_session=False)
     _audit("crew.withdrawn", d["id"], why[:300], "withdrawn", project=run.get("project") or "", by="morpheus",
            why=why[:300], was="pending", session=f"{agent}:{sid}")
-    if tell:  # keep the original recipient even if another lane takes its step
-        crew_ask(f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
-                 f"developer's answer.", to=_reply_to(run, d["from"], now), cwd=cwd, now=now, kind="notice")
+    if notice:
+        _asked(agent, sid, run, notice, "notice")
     return dict(d, sent_back=[dict(s) for s in back])  # for the command's own lines; never saved
 
 
@@ -4617,7 +4931,8 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
     """Mark a step as started now (parallel work the main agent does itself). The run remembers it (`begun`), so the
     tech lead's next `dev progress step` without --step closes that step or nothing (_refuse_other_than_begun).
     Refused for a step already done or skipped: there is nothing to begin, and the refusal says how to add evidence
-    to it or reopen it."""
+    to it or reopen it. A member's blocked step goes back as an answer returns it (coord.unblock): to its lane when
+    that lane is free, else first in that lane's or its member's queue, so a lane never runs it beside another."""
     _main_only(from_agent, "starts the plan's steps", cwd)
     now = now or time.time()
     agent, sid = current_session(cwd)
@@ -4635,7 +4950,15 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
             raise StepError(f"step “{s['name']}” waits for {', '.join(waiting)}, not done yet: it starts when "
                             f"{'that is' if len(waiting) == 1 else 'they are'} done. If the order really changed, "
                             f"skip what it waits for: dev progress skip \"{waiting[0]}\" --why \"…\"")
-        old = s.get("state")
+        old, owner = s.get("state"), s.get("owner") or "main"
+        if old == "blocked" and owner != "main":
+            lane = (run.get("agents") or {}).get(owner)
+            live = isinstance(lane, dict) and lane.get("state") == "running"
+            gone = lane_gone(owner, lane, lane_states(run, now, own=True) if live else {})
+            coord.unblock(run, s, not gone, now, "the tech lead began it (dev progress begin)", review=is_review_step)
+            _claim_free_lanes(run, now)
+            _save(run)
+            return run
         s.update(state="running", started=s.get("started") or now)
         if old != "running":
             _log_change(run, s, old, "running", "main", "the tech lead began it (dev progress begin)", now)
@@ -4723,12 +5046,45 @@ def _matches(text: str, step: dict) -> bool:
 
 
 def _audit(action: str, target: str, detail: str = "", outcome: str = "ok", **extra):
-    """Every coordination event goes to the audit trail too (dev audit; published to the handoff repository)."""
+    """Every coordination event goes to the audit trail too (dev audit; published to the handoff repository). Inside
+    _audits_held, the record waits for the end of that block."""
+    blocks = _held_blocks()
+    if blocks:
+        blocks[-1].append((action, target, detail, outcome, extra))
+        return
     try:
         from . import audit
         audit.record(action, target, detail, outcome, **extra)
     except Exception:
         pass
+
+
+_HELD_AUDITS = threading.local()  # per thread: a command's block never holds another thread's records
+
+
+def _held_blocks() -> list:
+    """This thread's open _audits_held blocks, innermost last: each the records it holds."""
+    blocks = getattr(_HELD_AUDITS, "blocks", None)
+    if blocks is None:
+        blocks = _HELD_AUDITS.blocks = []
+    return blocks
+
+
+@contextlib.contextmanager
+def _audits_held():
+    """Around a command's transaction that can still be refused after it changed the run in memory (a notice that
+    cannot be sent, _ask_in): the audit records written inside are recorded when the block ends without an error, and
+    dropped when it raises, so the audit trail never records a change the run never saved."""
+    held, blocks = [], _held_blocks()
+    blocks.append(held)
+    try:
+        yield
+    except BaseException:
+        blocks.pop()
+        raise
+    blocks.pop()
+    for action, target, detail, outcome, extra in held:
+        _audit(action, target, detail, outcome, **extra)
 
 
 def mark_calls(marks: dict | None = None) -> dict:
@@ -4898,8 +5254,9 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                 previous = run.get("agents", {}).get(s["owner"])
                 if previous is not None:
                     _remember_step(previous, s)
+                coord.add_author(s, previous_owner)  # its work stays that lane's (coord.independent, approvals.doer)
                 s["owner"] = "main"  # back to Morpheus, still assigned to its member: dev crew next launches it again
-            if old in DONE:
+            if old in DONE + ("unverified",):  # its work restarts: what ran on the old version is checked again
                 _recheck_dependents(run, s, now)
             if not s.get("label") and not deps_open(run, s):
                 for x in run["plan"]:  # the reopened step becomes the main lane's current one
@@ -4918,6 +5275,7 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                     s["owner"] = "main"
             s.pop("untimed", None)
             s["reopened"] = (s.get("reopened") or 0) + 1
+            _drop_held_verdicts(run, s, now)
         _log_change(run, s, old, s["state"], "main", why, now)
         run["step"] = sum(1 for x in run["plan"] if x.get("state") in ("done", "skipped"))
         run["updates"].append({"ts": round(now), "kind": "reopen" if not skip else "skip", "text": why,
@@ -4925,6 +5283,22 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _drop_held_verdicts(run: dict, s: dict, now: float):
+    """Step `s` is reopened: the `--approves` verdicts lanes hold on it (_approve_later) saw its old work, so each is
+    dropped, and each member still at work is told to give it again once the new work ends. Its other steps keep
+    theirs."""
+    for aid, lane in (run.get("agents") or {}).items():
+        held = lane.get("verdicts") if isinstance(lane, dict) else None
+        if not held or not any(s["name"] in (v.get("steps") or []) for v in held):
+            continue
+        kept = [dict(v, steps=[n for n in v.get("steps") or [] if n != s["name"]]) for v in held]
+        lane["verdicts"] = [v for v in kept if v["steps"]]
+        if lane.get("state") == "running":
+            _post(run, "devkit", aid, f"devkit: the tech lead reopened “{s['name']}”, so your verdict on it (dev "
+                  f"progress step --approves) no longer counts: give it again once its new work ends", now,
+                  from_name="devkit", kind="notice")
 
 
 def confirm(which, why: str, cwd: str | None = None, now: float | None = None, from_agent: str | None = None) -> dict:
@@ -4966,8 +5340,10 @@ def confirm(which, why: str, cwd: str | None = None, now: float | None = None, f
 
 
 def _recheck_dependents(run, s, now):
-    """`s` was done (or skipped) and is open again. Its dependents, direct and further down, that are done or running
-    stay so, flagged `recheck`: their work used the old version. A main-lane step running on `s` waits for it again."""
+    """`s` was done, skipped or unverified and its work starts again (a reopen, or a new launch that takes unverified
+    work). Its dependents, direct and further down, that are done or running stay so, flagged `recheck`: their work,
+    such as a review running on unverified work, used the old version. A main-lane step running on `s` waits for it
+    again."""
     plan = run.get("plan") or []
     down, frontier = [], [s["name"]]
     while frontier:
@@ -5044,16 +5420,39 @@ def approvals_owed(run: dict) -> list:
         return []
 
 
-def _approve(run: dict, by: str, approves: str, check: str, now: float):
+def _approve(run: dict, by: str, approves: str, check: str, now: float, agent: str = "", sid: str = "") -> str:
     """The tech lead's `dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's
-    Check, recorded at once; a member's waits in its lane (_approve_later). ApprovalError becomes
-    StepError."""
+    Check, recorded at once; a member's waits in its lane (_approve_later). A ✓ on a step that ended unverified,
+    from its approver, closes it (_close_approved). ApprovalError becomes StepError. -> the line that says which
+    unverified steps the ✓ closed and why each was unverified ('' for none), which the command prints."""
     from . import approvals
     try:
-        approvals.record(run, by, approves, approvals.verdict_of(check), now, check=check,
-                         doer_of=lambda s: member_of_step(run, s))
+        entry = approvals.record(run, by, approves, approvals.verdict_of(check), now, check=check,
+                                 doer_of=lambda s: member_of_step(run, s), unverified=True)
     except approvals.ApprovalError as e:
         raise StepError(str(e))
+    steps = _by_name(run.get("plan") or [])
+    closes = [approvals.unverified_reason(steps.get(n) or {"name": n}) for n in entry.get("closes") or []]
+    _close_approved(run, entry, "main", "the tech lead", now, agent, sid)
+    return f"your ✓ closed {'; '.join(closes)}" if closes else ""
+
+
+def _close_approved(run: dict, entry: dict, by: str, who: str, now: float, agent: str, sid: str):
+    """The unverified steps an approval's ✓ closes (approvals.record's `closes`) end done, at the verdict's time, with
+    the verdict as their evidence, as a review step's ✓ closes the unverified work it follows (_verified_by_review).
+    Never dated before the step last ended unverified (`unverified_at`): its finish is the time its approvals count
+    from (approvals.owed). Work on the step since it ended unverified (_worked_on_since) ends at this close, so a
+    review begun before neither closes nor approves it (approvals.saw)."""
+    steps = _by_name(run.get("plan") or [])
+    for n in entry.get("closes") or []:
+        x = steps.get(n)
+        if not x or x.get("state") != "unverified":
+            continue
+        at = max(entry["ts"], x.get("unverified_at") or 0)
+        if _worked_on_since(run, x, x.get("unverified_at") or 0, sid):
+            x["ended"] = at
+        _finish_step(run, x, at, agent, sid, by)
+        _log_change(run, x, "unverified", "done", by, f"approved by {who}: {entry.get('check') or ''}", now)
 
 
 def _approve_later(run: dict, lane: dict, by: str, approves: str, check: str, now: float) -> str:
@@ -5064,16 +5463,20 @@ def _approve_later(run: dict, lane: dict, by: str, approves: str, check: str, no
     from . import approvals
     try:  # on a copy: nothing is recorded yet
         entry = approvals.record({**run, "approvals": list(run.get("approvals") or [])}, by, approves,
-                                 approvals.verdict_of(check), now, check=check, doer_of=lambda s: member_of_step(run, s))
+                                 approvals.verdict_of(check), now, check=check, doer_of=lambda s: member_of_step(run, s),
+                                 unverified=True)
     except approvals.ApprovalError as e:
         raise StepError(str(e))
     lane["verdicts"] = (lane.get("verdicts") or [])[-19:] + [{"ts": now, "by": by, "steps": entry["steps"],
                                                               "check": str(check)[:300]}]
     names = ", ".join(f"“{n}”" for n in entry["steps"])
-    return f"your verdict on {names} counts once your report passes the crew gates"
+    steps = _by_name(run.get("plan") or [])
+    closes = "; ".join(approvals.unverified_reason(steps.get(n) or {"name": n}) for n in entry.get("closes") or [])
+    return f"your verdict on {names} counts once your report passes the crew gates" + \
+        (f", and then closes {closes}" if closes else "")
 
 
-def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
+def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float, agent: str = "", sid: str = ""):
     """At a lane's end, the `--approves` verdicts its member gave (_approve_later): each is recorded as given, at the
     time it was given (approvals.record), when the crew gates passed this stop cleanly (`passed`), and is not counted
     otherwise, with the reason in the history of each step it named and in the audit trail, so that work stays owed
@@ -5096,9 +5499,17 @@ def _lane_verdicts(run: dict, lane: dict, aid: str, passed: bool, now: float):
             _audit("crew.approval-refused", ", ".join(names) or "?", why, "refused", project=run.get("project") or "")
             continue
         try:
-            approvals.record(run, v["by"], names, approvals.verdict_of(v.get("check")), v["ts"], check=v.get("check"),
-                             doer_of=lambda s_: member_of_step(run, s_))
+            entry = approvals.record(run, v["by"], names, approvals.verdict_of(v.get("check")), v["ts"],
+                                     check=v.get("check"), doer_of=lambda s_: member_of_step(run, s_), unverified=True)
+            from . import crew
+            _close_approved(run, entry, aid, crew.who(who), now, agent, sid)
         except (approvals.ApprovalError, KeyError, TypeError) as e:
+            for n in names:  # the step says why the verdict did not count, as one the gates did not pass does
+                run.setdefault("history", []).append({
+                    "ts": round(now), "step": n, "from": steps[n].get("state") or "-",
+                    "to": steps[n].get("state") or "-", "by": aid,
+                    "why": f"{who}'s verdict on it (dev progress step --approves) is not counted: {e}"[:300]})
+            run["history"] = (run.get("history") or [])[-200:]
             _audit("crew.approval-refused", ", ".join(names) or "?", str(e)[:300], "refused",
                    project=run.get("project") or "")
 
@@ -5140,7 +5551,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     developer, unless `force`; the decisions still pending (moot ones too) and the questions still waiting for an
     answer close with the run."""
     now = now or time.time()
-    closed, closed_msgs = [], []
+    closed, closed_msgs, approved = [], [], ""
     agent, sid = current_session(cwd)
     from_agent = _as_lane(from_agent, cwd)
     if kind == "done" and not from_agent:
@@ -5172,6 +5583,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                     raise StepError("your lane runs several steps (" + ", ".join(x["name"] for x in builds) +
                                     "): say which with --step; devkit recorded nothing")
                 named = builds[0] if builds else None
+            if kind == "step" and named and not implicit and str(check or "").strip():
+                _yield_for(run, named, from_agent, now)  # a step of its brief closes past steps that only joined
             refused = _member_close_refused(run, named, from_agent, check, running) \
                 if kind == "step" and named and (not implicit or str(check or "").strip()) else ""
             if refused:
@@ -5214,9 +5627,11 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in DONE)
             _save(run)
             if outcome:
-                # for the command's own line; never saved: the steps whose state this record changed, and the
-                # verdict it leaves for the crew gates
-                run["lane_outcome"] = dict(outcome, changed=coord.changes(before, run), held=bool(held))
+                # for the command's own line; never saved: the steps of this lane whose state this record changed
+                # (one another lane took meanwhile is not the member's), and the verdict it leaves for the crew gates
+                mine = {x["name"] for x in run.get("plan") or [] if x.get("owner") == from_agent}
+                run["lane_outcome"] = dict(outcome, changed=[c for c in coord.changes(before, run) if c[0] in mine],
+                                           held=bool(held))
             return run
         run = normalize(run or {})
         plan = run["plan"]
@@ -5245,13 +5660,15 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             else:
                 gone = check_close(run, target, text, explicit, force, now)
             old_state = target.get("state")
+            if old_state == "unverified" and _worked_on_since(run, target, target.get("unverified_at") or 0, sid):
+                target["ended"] = now  # work redone since it ended unverified: a review begun before never saw it
             _finish_step(run, target, now, agent, sid)
             if (_by_name(plan).get(run.get("begun") or "") or {}).get("state", "done") in DONE:
                 run.pop("begun", None)  # the begun step is closed: the next step without --step is free again
             _log_change(run, target, old_state, "done", "main",
                         f"{gone}; closed on the tech lead's evidence: {check or text}" if gone else check or text, now)
             if approves:
-                _approve(run, "morpheus", approves, check, now)
+                approved = _approve(run, "morpheus", approves, check, now, agent, sid)
             _advance_main(run, now)
             run["state"] = "running"
         elif kind == "blocked":
@@ -5317,6 +5734,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     _publish()
     if kind in ("blocked", "done"):
         notify(f"{run.get('project') or 'devkit'} · {kind}", text)
+    if approved:
+        run["approve_outcome"] = approved  # for the command's own line; never saved
     return run
 
 
@@ -6124,9 +6543,20 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     if st is not None and st.get("state") == "unverified":
         if deps_open(run, st) or coord.busy(run, aid, st, review=is_review_step):
             return  # a dependency was reopened since: dev progress reopen gives it back once that is done
+        if is_review_step(st) and not coord.independent(run, st, lane, who=member_id, review=is_review_step):
+            did = _own_work(run, st, lane)
+            _post(run, "devkit", "main", f"{who} started as “{label}”, which names the review “{st['name']}”"
+                  + (f" of {_quoted_and(did)}, its own work" if did else ", and devkit cannot tell which crew member "
+                     "it is") + f": the review stays unverified and this lane does not take it. Give it to another "
+                  f"member: dev progress reopen \"{st['name']}\" --why \"…\", then dev progress assign "
+                  f"\"{st['name']}\" --to <member>", now, from_name="devkit")
+            _claim_lane(run, aid, now)
+            return
+        if not _take_step(run, aid, st, now):
+            return
         st.pop("recheck", None)  # it is redone now
         st["reopened"] = (st.get("reopened") or 0) + 1
-        _take_step(run, aid, st, now)
+        _recheck_dependents(run, st, now)  # as a reopen: what ran on the old version is checked again
         _log_change(run, st, "unverified", "running", aid, f"a new launch of {who}, “{label}”, names it: the new "
                     f"lane works on it again", now)
         return
@@ -6251,7 +6681,8 @@ def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
     carries neither the launch's tool_use_id nor a meta file yet, so an agent that starts before its launch's
     result binds at its first hook, when the meta file exists. A known agent whose lane had stopped resumes it at
     a tool call (SendMessage); `resume=False` at its stop. The usual case, a bound working lane, costs one read of
-    the run."""
+    the run. -> True when this call changed the session record: the agent claimed its launch now, so its lane knows
+    its step from here on (the hook then makes the lane's scratch folder, hooks._bind_member)."""
     aid, sid = str(data.get("agent_id") or ""), data.get("session_id") or "-"
     if not AGENT_ID.fullmatch(aid):
         return
@@ -6272,12 +6703,15 @@ def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
         _attach(agent, sid, s, data, aid, kind, now or time.time(), start=False, resume=resume)
         if json.dumps(s, sort_keys=True) != before:
             state.replace(f, s)
+            return True
+    return False
 
 
 def launch_result(agent: str, data: dict, now: float | None = None):
     """PostToolUse of a subagent launch: its result names the agent it started (`tool_response.agentId`) next to
     the launch's tool_use_id, an exact binding without the meta file. A background launch's result comes
-    together with its SubagentStart, in either order; a foreground launch's only when the agent has ended."""
+    together with its SubagentStart, in either order; a foreground launch's only when the agent has ended. -> the id
+    of the agent it bound now, whose lane knows its step from here on, else None."""
     resp = data.get("tool_response")
     aid = str(resp.get("agentId") or "") if isinstance(resp, dict) else ""
     tid, sid = str(data.get("tool_use_id") or ""), data.get("session_id") or "-"
@@ -6304,6 +6738,7 @@ def launch_result(agent: str, data: dict, now: float | None = None):
         _run_event(agent, sid, lambda run: _lane_event(run, aid, kind, tid, rec, "exact", now, False, False,
                                                        own=False) if sub is not None or aid in run["agents"] else None)
         state.replace(f, s)
+        return aid
 
 
 def launch_failed(agent: str, data: dict, now: float | None = None):
@@ -6780,6 +7215,121 @@ def in_scope(rel_path: str, layers: list) -> bool:
     return all(_in_globs(rel_path, layer) for layer in layers)
 
 
+# --------------------------------------------------------------------------- scratch folders
+#
+# Each crew lane keeps its temporary files in a folder of its own in the session's scratchpad, so no lane replaces or
+# deletes another's: scratchpad/<member id>-<step>/ for a lane that runs a plan step, so two lanes of one member never
+# share one, and the member's plain scratchpad/<member id>/ for a lane that runs none. session_scratchpad says where
+# a session's scratchpad is and scratch_names which folders in it a lane writes in. They own the rule: the hook makes
+# the lane's folder (hooks._make_scratch_folder), Codex's registration lets the lane write there (codexlaunch), a
+# step's scope may name it (dispatch._outside_folders), and a brief names it (crew.brief_text).
+
+_SCRATCH_MEMBER = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def claude_tmp() -> Path:
+    """Where Claude Code keeps its per-session folders, scratchpads among them."""
+    return Path("/tmp") / f"claude-{os.getuid()}"
+
+
+def codex_app_folder(root) -> bool:
+    """True when `root` is a chat's folder of Codex in the ChatGPT app: an absolute path under ~/Documents/Codex,
+    never that folder itself."""
+    app = core.HOME / "Documents" / "Codex"
+    return isinstance(root, str) and os.path.isabs(root) and core.is_under(root, app) and \
+        core.real(root) != core.real(app)
+
+
+def session_scratchpad(agent: str, sid: str, transcript: str | None = None, root: str | None = None) -> str:
+    """The scratchpad of session `sid`, which holds the scratch folder of each of its crew lanes (scratch_names):
+    Claude Code's <tmp>/claude-<uid>/<the folder of the session's transcript>/<session id>/scratchpad, the ChatGPT
+    app's <the chat's folder>/work/scratchpad, and the Codex CLI's <dev>/.tmp/codex/<session id>/scratchpad.
+    `transcript` (Claude Code's transcript of the session) and `root` (the folder a Codex session works in) come from
+    the caller's trusted source, a hook's own event or a checked session record; without them, from devkit's own
+    records, never from a path a caller names: the transcript where the harness writes it (harness_transcript) and
+    the session record's folder. '' when devkit cannot tell."""
+    sid = str(sid or "")
+    if not _SESSION_ID.fullmatch(sid):
+        return ""
+    if agent == "claude":
+        transcript = harness_transcript(agent, sid) if transcript is None else transcript
+        return str(claude_tmp() / Path(transcript).parent.name / sid / "scratchpad") if transcript else ""
+    if agent == "codex":
+        if root is None:
+            rec = core.read_json(session_path(agent, sid), {})
+            root = rec.get("cwd") if isinstance(rec, dict) else None
+        if codex_app_folder(root):
+            return str(Path(root) / "work" / "scratchpad")
+        return str(core.TMP_ROOT / "codex" / sid / "scratchpad")
+    return ""
+
+
+def step_slug(name) -> str:
+    """Step name `name` in lowercase letters, digits and hyphens ("Session graph (v2)" -> "session-graph-v2"), the
+    form it takes in its lanes' scratch folder (scratch_names) and, with underscores, as a Codex task name
+    (crew.codex_task_name). Two steps of a plan never share it (_build_steps); '' for no name."""
+    from . import crew
+    return crew.codex_task_name(str(name or "")).replace("_", "-")
+
+
+def folder_twin(plan, name, skip=None):
+    """The step of `plan`, other than `skip`, whose name has the same slug as `name` (step_slug), so the lanes of
+    both would write in one scratch folder; None when there is none. A plan made since such names were refused has
+    none (_build_steps); one saved before may."""
+    slug = step_slug(name)
+    return next((x for x in plan or [] if isinstance(x, dict) and x is not skip and slug and
+                 step_slug(x.get("name")) == slug), None)
+
+
+def scratch_names(member: str, step: str = "") -> list:
+    """The folders of the session scratchpad that crew member `member`'s lane on plan step `step` writes in, its own
+    first: <member id>-<step> (the step's name in lowercase letters, digits and hyphens: "Session graph (v2)" ->
+    "session-graph-v2", step_slug), then the member's plain <member id>; the plain one alone without a step. [] when
+    `member` is not a plain member id."""
+    member = str(member or "")
+    if not _SCRATCH_MEMBER.fullmatch(member):
+        return []
+    slug = step_slug(step)
+    return [f"{member}-{slug}", member] if slug else [member]
+
+
+def lane_scratch(run: dict, aid: str) -> list:
+    """The folders lane `aid` writes in (scratch_names of its crew member): the folder of the step it runs
+    (launch_step) first, then that of each other step it has run (`assigned_steps`), latest first, so the folder its
+    brief named stays its own after another step joins it, then the member's plain folder. A past step's folder stays
+    the lane's only while no other live lane owns that step (a reopened step another lane took), and a step whose
+    name gives another step's folder (folder_twin, a run saved before such names were refused) has none: its lane
+    writes in the member's plain folder, the one `dev progress assign` lets its scope name. A helper writes in the
+    folders of the member that launched it. [] for a lane that names no crew member."""
+    chain = lane_chain(run, aid)
+    if not chain:
+        return []
+    head = run["agents"][chain[-1]]
+    try:
+        from . import crew
+        m = crew.member(head["persona"]) if head.get("persona") else None
+    except Exception:
+        m = None
+    if not m or m.get("main"):
+        return []
+    plan, agents = run.get("plan") or [], run.get("agents") or {}
+
+    def own(name):  # its folder is this lane's: no other live lane owns the step, and no other step gives that folder
+        x = next((p for p in plan if isinstance(p, dict) and p.get("name") == name), None)
+        owner = (x or {}).get("owner") or "main"
+        theirs = owner != "main" and owner not in chain and (agents.get(owner) or {}).get("state") == "running"
+        return not theirs and not folder_twin(plan, name, skip=x)
+
+    step = launch_step(run, chain[-1])
+    steps = ([step["name"]] if step else []) + [n for n in reversed(head.get("assigned_steps") or [])
+                                                 if isinstance(n, str) and n]
+    out = []
+    for name in steps:
+        if own(name):
+            out += [f for f in scratch_names(m["id"], name)[:-1] if f not in out]
+    return out + scratch_names(m["id"])
+
+
 def launch_depth(sess: dict, run: dict | None, parent: str) -> int:
     """How deep a launch by `parent` (an agent_id, or main) sits: 1 for Morpheus's, its parent's depth + 1 for a
     subagent's. A parent devkit has no record of counts as depth 1."""
@@ -7133,7 +7683,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             passed = _passed_now(token, lane or {}, now)
             spent.append(passed)
             _end_lane_steps(run, lane or {}, aid, report, now, agent, rsid, passed=passed)
-            _lane_verdicts(run, lane or {}, aid, passed, now)
+            _lane_verdicts(run, lane or {}, aid, passed, now, agent, rsid)
             # what the gates still found goes in the session's own run, once
             # a run that does not list the lane names the member from the stop's own agent type
             _tell_uncounted(run, lane or {"persona": kind}, now, findings if rsid == sid else "")
@@ -7343,35 +7893,47 @@ def other_writes_for(run: dict, st: dict) -> list:
     return out
 
 
-def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str, sid: str, aid: str) -> list:
+def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str, sid: str, aid: str) -> tuple:
     """A review step (approvals.is_review, the rule deps_open and from_review use too) that ended done with Check ✓:
     the unverified steps it comes after whose approver is its member (approvals.approver, never their own work) end
     done, the review being their evidence, so from_review records the approval on them. Any other unverified step
-    stays so, for Morpheus to close with evidence (and its own approver to approve). -> the names of the steps it
-    closed."""
+    stays so, for Morpheus to close with evidence (and its own approver to approve), and so does one whose work ended
+    after the review began (approvals.saw) or got work since it began (_worked_on_since): Morpheus is told to have that
+    new work reviewed, and the review approves no done step it did not see either. -> (the names of the steps it
+    closed, the names of those it did not see), which from_review takes."""
     from . import approvals, raci
     if not approvals.is_review(st):
-        return []
+        return [], []
     try:
         if approvals.verdict_of(check) != "approved":
-            return []
+            return [], []
     except approvals.ApprovalError:
-        return []
+        return [], []
     who = member_of_step(run, st)
     if not who:
-        return []
-    steps, out = _by_name(run.get("plan")), []
+        return [], []
+    steps, out, unseen = _by_name(run.get("plan")), [], []
+    began = approvals.began(run, st)
     for n in st.get("after") or []:
         x = steps.get(n)
-        if not x or x.get("state") != "unverified":
+        if not x or x.get("state") not in ("unverified", "done"):
             continue
-        did = member_of_step(run, x)
-        if did == who or approvals.approver(raci.step_activity(x), did) != who:
+        did = approvals.doers(run, x)  # every member who did it, kept across a reopen: none of them approves it
+        if who in did or approvals.approver(raci.step_activity(x), did) != who:
             continue
-        _finish_step(run, x, now, agent, sid)
-        _log_change(run, x, "unverified", "done", aid, f"verified by the review “{st['name']}”: {check}", now)
-        out.append(n)
-    return out
+        if not approvals.saw(run, st, x) or (began is not None and _worked_on_since(run, x, began, sid)):
+            unseen.append(n)
+            continue
+        if x.get("state") == "unverified":
+            _finish_step(run, x, now, agent, sid, aid)
+            _log_change(run, x, "unverified", "done", aid, f"verified by the review “{st['name']}”: {check}", now)
+            out.append(n)
+    if unseen:
+        _post(run, "devkit", "main", f"“{st['name']}” began before {_quoted_and(unseen)} last ended, so its ✓ neither "
+              f"closes nor approves {'it' if len(unseen) == 1 else 'them'}: have the new work reviewed (dev progress "
+              f"add \"review=20m after {unseen[0]}\", then dev progress assign review --to <member>)", now,
+              from_name="devkit")
+    return out, unseen
 
 
 def _steps_about(lane: dict, aid: str, report: str, mine: list) -> list:
@@ -7396,9 +7958,17 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
                     passed: bool = False):
     """A lane's end at its SubagentStop: the steps its evidence is about end as its report or its last Check says
     (_end_member_step); any other step it holds goes back to pending, still its member's, with the reason in its
-    history, so a lane's ✓ never closes work it did not do. `passed`: the crew gates passed this
-    stop cleanly (their token, _passed_now); without it, its review steps approve nothing (_end_member_step)."""
+    history, so a lane's ✓ never closes work it did not do. A done step of the lane that got work after its close
+    (_worked_on_since: after a close by an approval, a review or the tech lead, the work of the lanes that ran it or
+    his on its files; after the lane's own close, only work on its scope or that names it) ends unverified again
+    (_unverify_reworked). `passed`: the crew gates passed this stop cleanly (their token, _passed_now); without it,
+    its review steps approve nothing (_end_member_step)."""
     mine = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
+    for st in [x for x in run.get("plan") or [] if x.get("owner") == aid and x.get("state") == "done"]:
+        by = _closer(run, st)
+        worker = _worked_on_since(run, st, st.get("finished") or 0, sid) if by else ""
+        if worker:
+            _unverify_reworked(run, st, worker, by, now)
     about = _steps_about(lane, aid, report, mine)
     who = lane.get("persona") or "the subagent"
     from . import approvals
@@ -7417,6 +7987,36 @@ def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, ag
                     f"progress step names this step: it waits for its member's next lane", now)
 
 
+def _closer(run: dict, st: dict) -> str:
+    """Who last closed done step `st`: a lane's id (its own, an approval's or a review's), or "main" for the tech
+    lead, as the close kept it (`closed_by`, _finish_step); for a step closed before steps kept it, the run's history,
+    and '' when that no longer says."""
+    if st.get("closed_by"):
+        return str(st["closed_by"])
+    last = next((h for h in reversed(run.get("history") or []) if h.get("step") == st.get("name")
+                 and h.get("to") == "done"), None)
+    return str((last or {}).get("by") or "")
+
+
+def _unverify_reworked(run: dict, st: dict, worker: str, by: str, now: float):
+    """Done step `st`, which `by` closed, got work from `worker` (a lane that ran it, or "main" for the tech lead)
+    after that close (_worked_on_since): that close, and the verdicts given before it, saw older work. It ends
+    unverified again now (approvals.mark_unverified), so a verdict counts only once given after its next close
+    (approvals.owed, saw), and the tech lead is told."""
+    from . import approvals, crew
+    who = crew.who("main" if worker == "main" else _name_of(run, worker))
+    after = "after closing it" if worker == by else \
+        f"after {crew.who('main' if by == 'main' else _name_of(run, by))} closed it"
+    approvals.mark_unverified(st, now, f"{who} worked on it {after}")
+    st["finished"] = None
+    _log_change(run, st, "done", "unverified", "devkit", f"{who} worked on it {after}, so that close saw older work",
+                now)
+    _post(run, "devkit", "main", f"{who} worked on “{st['name']}” {after}, so that close and the verdicts given "
+          f"before it saw older work: “{st['name']}” is unverified again. Close it with evidence, or have the new work "
+          f"reviewed (dev progress add \"review=20m after {st['name']}\", then dev progress assign review --to "
+          f"<member>)", now, from_name="devkit")
+
+
 def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str,
                      closing: bool = False, passed: bool = False):
     """A member's step at its SubagentStop: done with the evidence of its report's Check or its last
@@ -7427,8 +8027,11 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     write leaves its ending to its report. A review step ends done only when the crew gates passed this stop cleanly
     (`passed`, their token): sent back and then let through unjudged, findings only recorded, a gate that could not
     judge, a stop that never reached them or whose token the session record did not take end it unverified, since
-    its Check is no approval. Other steps end as their evidence says. `closing`: the member closes it itself while
-    it works on (_member_close), which never happens to a review step."""
+    its Check is no approval. Other steps end as their evidence says. A done close of a step that ended unverified,
+    by its report's ✓ or its own `dev progress step` ✓, ends its work at this close (decision D46), so a review begun
+    before neither closes nor approves it (approvals.saw); a stop that leaves it unverified keeps when its work ended,
+    unless it got work since (_worked_on_since). `closing`: the member closes it itself while it works on
+    (_member_close), which never happens to a review step."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
@@ -7444,17 +8047,179 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     if state_ != "done":
         if approvals.is_review(st) and _review_verdict(lane, st, report) == "changes":
             st["verdict"] = "changes"  # finished, changes requested: the fix after it may start (coord.deps_open)
-        st["state"] = "unverified"
+        if old == "unverified" and not _worked_on_since(run, st, st.get("unverified_at") or 0, sid):
+            st["unverified_why"] = str(why or "")[:300]  # its work is the one a verdict since saw: it keeps its time
+        else:
+            approvals.mark_unverified(st, now, why)
         _log_change(run, st, old, "unverified", aid, f"{who} {'closed it' if closing else 'stopped'}; unverified: "
                     f"{why}", now)
         return
-    _finish_step(run, st, now, agent, sid)
+    if old == "unverified":
+        st["ended"] = now  # its author's word on it comes after its unverified end: a review begun before never saw it
+    _finish_step(run, st, now, agent, sid, aid)
     _log_change(run, st, old, "done", aid, f"{who} {'closed it' if closing else 'finished'}; {why}", now)
     try:
-        _verified_by_review(run, st, check, now, agent, sid, aid)
-        approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_))
+        closed, unseen = _verified_by_review(run, st, check, now, agent, sid, aid)
+        approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_), closed=closed,
+                              unseen=unseen)
     except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
+
+
+def _worked_on_since(run: dict, st: dict, since: float, sid: str) -> str:
+    """Who worked on step `st` after `since`: one rule for every close and stop of the step (the tech lead's close, an
+    approval's or a review's ✓, its author's stop, the stop of a lane whose step was closed). -> the id of a lane that
+    ran it (coord.authors), for its own work or a helper's it launched (lane_chain); "main" for the tech lead; ''
+    for nobody. Work counts only when it is the step's:
+    - a `dev progress step` or note of such a lane that names the step; or one that names no step, or a step the lane
+      does not hold, while the lane held no other open step when it gave it (its work may be this one's: _held_then).
+      Updates carry whole seconds, so one within a second of `since` is the update that ended it;
+    - a file such a lane wrote with an edit tool (the session's edit record, edits_since; none without `sid`) or with a
+      shell call that write detection recorded (`scope_writes`, a review-only or read-only lane's), or the tech lead
+      wrote with an edit tool, that is the step's: a file of its scope in a checkout of the project (_edit_in_scope),
+      or one its lanes edited for it, from its start to when its work ended (`ended`). A file a lane wrote while it
+      held another open step (_held_then) is that step's when that step's scope holds it, even where this step's
+      scope holds it too (two steps of one member whose scopes overlap), and so is any file outside this step's
+      scope; but a file of this step's scope written while a review of it was at work (_review_at_work) is this
+      step's whichever step the lane ran, since that review may not have seen it. A step with no scope also takes
+      any file a lane wrote while it held no other open step, unless a scope of that lane's other steps holds it.
+      A build lane's shell writes are recorded nowhere, so they count only through its updates;
+    - after a lane that ran the step closed it itself (_closer), its later work counts only when it names the step or
+      is a file of its scope: the rest is its next step's (decision D45). The tech lead's edits of its files count
+      whoever closed it."""
+    plan, agents = run.get("plan") or [], run.get("agents") or {}
+    authors = coord.authors(st)
+    lanes = {k: a for k in agents for a in [next((x for x in lane_chain(run, k) if x in authors), "")] if a}
+    scope = [g for g in st.get("scope") or [] if isinstance(g, str) and g]
+    closer = _closer(run, st) if st.get("state") == "done" else ""
+    closed_at = st.get("finished") or 0
+    tops = []
+
+    def checkouts():
+        if not tops:
+            tops.append(_project_checkouts(run, st))
+        return tops[0]
+
+    def own_close(who, ts):  # after a lane's own close, its work counts only on the step itself
+        return who != "main" and who == closer and ts > closed_at
+
+    def others(a):
+        return [x for x in plan if x is not st and x.get("owner") == a]
+
+    def busy(a, ts):  # the lane held another open step when it did this work, not when the close or stop asks
+        return any(_held_then(x, ts) for x in others(a))
+
+    def held(path, globs, rel):
+        return _in_globs(path, globs) if rel else _edit_in_scope(path, globs, checkouts())
+
+    edits = edits_since(sid, 0) if sid else []
+    start, upto = (st.get("started") or 0) - EDIT_SLACK, min(st.get("ended") or since, since)
+    files = {core.real(e["path"]) for e in edits if str(e.get("caller") or "") in lanes and e.get("path")
+             and start <= (e.get("ts") or 0) <= upto}
+
+    reviews = []
+
+    def reviewed_then(ts):  # a review of the step was at work at `ts`: it may not see what was written then
+        if not reviews:
+            reviews.append([r for r in plan if st.get("name") in (r.get("after") or []) and is_review_step(r)])
+        return any(_review_at_work(run, r, ts) for r in reviews[0])
+
+    def counts(who, ts, path, rel=False):
+        mine = bool(scope) and held(path, scope, rel)
+        if mine and reviewed_then(ts):
+            return True  # its rework while its review is at work, whichever step the lane ran then
+        held_then = [x for x in others(who) if _held_then(x, ts)] if who != "main" else []
+        theirs = [[g for g in x.get("scope") or [] if isinstance(g, str) and g] for x in held_then]
+        if any(globs and held(path, globs, rel) for globs in theirs):
+            return False  # the step the lane ran then holds it, even where this step's scope holds it too
+        if mine:
+            return True
+        if own_close(who, ts) or held_then:
+            return False  # a file outside its scope, written while the lane ran another step, is that step's
+        if any(_edited(f, path) for f in files) if rel else core.real(path) in files:
+            return True
+        if who == "main" or scope:
+            return False
+        return not held(path, [g for x in others(who) for g in x.get("scope") or []], rel)
+
+    for k, a in lanes.items():
+        lane = agents.get(k) or {}
+        for u in lane.get("updates") or []:
+            ts = (u.get("ts") or 0) if isinstance(u, dict) else 0
+            if ts <= since + 1:
+                continue
+            if u.get("step") == st.get("name") or (not own_close(a, ts) and not busy(a, ts) and
+                                                    u.get("step") not in {x["name"] for x in others(a)}):
+                return a
+        writes = lane.get("scope_writes") or {}
+        if (writes.get("ts") or 0) > since and any(counts(a, writes["ts"], p, rel=True)
+                                                   for p in writes.get("paths") or []):
+            return a
+    for e in edits:
+        who, ts = str(e.get("caller") or ""), e.get("ts") or 0
+        who = "main" if who == "main" else lanes.get(who, "")
+        if who and ts > since and e.get("path") and counts(who, ts, str(e["path"])):
+            return who
+    return ""
+
+
+def _review_at_work(run: dict, r: dict, ts: float) -> bool:
+    """Was review step `r` at work at time `ts`: begun by then (approvals.began) and not ended by then? One still
+    running or blocked has not ended; a done or skipped one ended when it finished, an unverified one when it ended
+    (`ended`). A pending review, which no lane holds, is at work on nothing: the lane that takes it sees the files as
+    they are then; so is one queued in its lane behind an earlier review the lane has not given its verdict on."""
+    from . import approvals
+    if r.get("state") == "pending":
+        return False
+    since = approvals.began(run, r)
+    if since is None or since > ts:
+        return False
+    if r.get("state") in DONE:
+        end = r.get("finished")
+    elif r.get("state") == "unverified":
+        end = r.get("ended") or r.get("unverified_at")
+    else:
+        return True
+    return not isinstance(end, (int, float)) or end > ts
+
+
+def _held_then(x: dict, ts: float) -> bool:
+    """Did its lane hold step `x` (one it owns) open at time `ts`? Only when the lane took it (`taken`; for a step
+    recorded before steps kept it, when it started) at or before `ts`, and it had not finished by then: a step done
+    or skipped by `ts` held nothing, nor one assigned to the lane later. An open step with neither time counts as
+    held."""
+    since = next((t for t in (x.get("taken"), x.get("started")) if isinstance(t, (int, float))), None)
+    if since is not None and since > ts:
+        return False
+    if x.get("state") in DONE:
+        return not isinstance(x.get("finished"), (int, float)) or x["finished"] > ts
+    return True
+
+
+def _project_checkouts(run: dict, st: dict | None = None) -> list:
+    """The checkouts a step's repository-relative scope names files in, deepest first: the one its scope is bound to
+    (`checkout`, _scope_checkout), else every checkout of the run's repository (_checkouts, found from the run's own
+    checkout, lanescope.run_checkout); [] when none is known."""
+    if st and st.get("checkout"):
+        return [core.real(st["checkout"])]
+    from . import lanescope
+    base = lanescope.run_checkout(run)
+    return _checkouts(base) if base else []
+
+
+def _edit_in_scope(path: str, globs: list, tops: list) -> bool:
+    """Does a scope hold the file an edit call names? An absolute or ~ glob holds the path as it is; a
+    repository-relative one holds it by its path relative to the checkout of `tops` (_project_checkouts, deepest
+    first) that holds it, so the same path in another repository is not the step's, and nothing outside them. A
+    relative edit path (a patch with no folder) is taken as repository-relative."""
+    p = str(path or "").replace("\\", "/")
+    rel = p
+    if p.startswith("/"):
+        ap = core.real(p)
+        top = next((t for t in tops if core.is_under(ap, t)), "")
+        rel = os.path.relpath(ap, top) if top else ""
+    return any(scope_match(p, g) if g.startswith(("/", "~")) else bool(rel) and scope_match(rel, g)
+               for g in globs if isinstance(g, str) and g)
 
 
 def _review_verdict(lane: dict, st: dict, report: str) -> str:
@@ -7495,7 +8260,7 @@ def _member_close(run: dict, st: dict, lane: dict, aid: str, u: dict, now: float
                        f"report passes the crew gates, and the step closes with your report"}
     _end_member_step(run, st, dict(lane, updates=[u]), aid, "", now, agent, sid, closing=True)
     run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in DONE)
-    _advance_main(run, now)
+    _claim_free_lanes(run, now)  # never the tech lead's next step: that starts in the tech lead's own call
     return {"step": name, "state": st.get("state"), "closed": True, "why": ""}
 
 

@@ -80,6 +80,23 @@ class MemberRecordTests(Scenario):
         self.assertTrue(out.startswith(ui.WARN), out)
         self.assertIn("is done already", out)
 
+    def test_a_step_its_launch_does_not_name_never_makes_a_joined_step_give_way(self):
+        # Neo, launched for x, took z from its member's queue; its dev progress step --step w, a step its launch never
+        # named, made z give way and closed w
+        pg.start("Fix", plan=["x=30m", "z=30m", "w=30m"], now=self.m(0))
+        for name in ("x", "z", "w"):
+            pg.assign(name, "Neo", why="test", now=self.m(0))
+        launch("a_neo", "devkit:neo", "Neo: x", at=self.m(1))
+        pg.step("x done", which="x", check="✓ ok", from_agent="a_neo", now=self.m(10))
+        self.assertEqual(self.held("z"), ("a_neo", "running"))  # joined by its member's queue
+        rc, out, err = self.cli("a_neo", "w done", "--step", "w", "--check", "✓ ok")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("“w” joins your lane once “z” closes", err)
+        self.assertIn("your launch does not name “w”, so it waits its turn in your member's queue", err)
+        self.assertNotIn("recorded work on it", err)
+        self.assertEqual((self.held("z"), self.held("w")), (("a_neo", "running"), ("main", "pending")))
+        self.sound()
+
     def test_a_record_naming_two_running_steps_is_refused_without_step(self):
         pg.start("Review", plan=["api=30m", "review=20m [review]"], now=self.m(0))
         pg.assign("api", "Tank", why="test", now=self.m(0))
@@ -118,6 +135,22 @@ class QueueTests(Scenario):
                                                                                        ["a_tank"]))
         self.resume("a_tank", self.m(12))
         self.assertEqual((self.held("export"), self.held("import")), (("a_tank", "running"), ("main", "pending")))
+        self.sound()
+
+    def test_a_resumed_lane_takes_the_step_assigned_to_its_member_and_the_dispatcher_names_that_step(self):
+        # the member's lane ended with its step done and was resumed (SendMessage); the tech lead assigned it the
+        # next step: its lane takes it, and `dev crew next` says the lane works on it, not on the step its launch named
+        import contextlib
+        import io
+        from devkit import cli
+        self.end("a_tank", "api", self.m(50))
+        self.resume("a_tank", self.m(52))
+        pg.assign("export", "Tank", scope="export/**", why="test", now=self.m(53))
+        self.assertEqual(self.held("export"), ("a_tank", "running"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["crew", "next"])
+        self.assertIn("Backend engineer (Tank) · export · scope export/**", out.getvalue())
         self.sound()
 
     def test_a_new_launch_naming_a_step_bound_to_an_ended_lane_takes_it(self):
@@ -167,6 +200,19 @@ class BlockTests(Scenario):
         pg.step("export", which="export", check="✓ 3", from_agent="a_tank", now=self.m(10))
         self.assertEqual(self.held("api"), ("a_tank", "running"))
         self.sound()
+
+    def test_the_tech_lead_beginning_a_blocked_step_whose_lane_moved_on_queues_it_first_for_that_lane(self):
+        # the tech lead blocked api; Tank's lane took export; his dev progress begin api, while Tank asked whether to
+        # go on, put api back running in that lane beside export
+        pg.step("waits for the developer", kind="blocked", which="api", now=self.m(2))
+        pg.assign("export", "Tank", scope="export/**", why="test", now=self.m(3))
+        self.assertEqual(self.held("export"), ("a_tank", "running"))
+        pg.begin("api", now=self.m(4))
+        self.assertEqual((self.held("api"), pg._queued_lanes(self.run_()["plan"][0])), (("main", "pending"),
+                                                                                       ["a_tank"]))
+        self.sound()
+        pg.step("export", which="export", check="✓ 3", from_agent="a_tank", now=self.m(10))
+        self.assertEqual(self.held("api"), ("a_tank", "running"))
 
     def test_an_answer_after_the_lane_ended_goes_to_the_members_next_lane(self):
         d = pg.crew_decision("CSV or JSON?", options="A: csv | B: json", recommend="A", from_agent="a_tank",
@@ -220,6 +266,111 @@ class VerdictNoticeTests(Scenario):
         self.assertEqual(len(told), 1, told)
         self.assertIn("“review”", told[0])
         self.assertIn("“api”", told[0])
+
+
+class ReviewIndependenceTests(Scenario):
+    def test_a_members_close_starts_no_step_of_the_tech_lead_and_a_review_waits_for_its_reviewer(self):
+        # a member closed its step, devkit started the review of that work as the tech lead's step in the member's
+        # own call (written by: main), and the member's line said "“review-skills” is your step now"
+        pg.start("Skills", plan=["skills=30m", "review-skills=20m [review] after skills"], now=self.m(0))
+        pg.assign("skills", "Tank", why="test", now=self.m(0))
+        launch("a_tank", "devkit:tank", "Tank: skills", at=self.m(1))
+        seen = len(self.run_().get("history") or [])
+        rc, out, err = self.cli("a_tank", "skills done", "--step", "skills", "--check", "✓ 12 tests pass")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("review-skills", out)
+        self.assertEqual(self.held("review-skills"), ("main", "pending"))
+        self.assertEqual([h for h in self.run_()["history"][seen:] if h.get("by") == "main"], [])
+        pg.add_step("wrap=5m", now=self.m(20))  # the tech lead's own call starts their own next step, not a review
+        self.assertEqual((self.held("wrap"), self.held("review-skills")), (("main", "running"), ("main", "pending")))
+        self.sound()
+
+    def test_the_tech_lead_starts_no_step_another_member_is_responsible_for(self):
+        pg.start("Export", plan=["plan=10m [plan]", "api=30m [backend] after plan"], now=self.m(0))
+        pg.step("planned", which="plan", check="✓ plan written", now=self.m(5))
+        self.assertEqual(self.held("api"), ("main", "pending"))  # the Backend engineer's work waits for its launch
+
+    def test_a_member_that_did_the_work_is_neither_given_nor_takes_its_review(self):
+        pg.start("Fix", plan=["x=30m", "review-x=20m [review] after x", "y=30m", "review-y=20m [review] after y"],
+                 now=self.m(0))
+        pg.assign("review-x", "Neo", why="a second look", now=self.m(0))  # nobody did x yet
+        pg.assign("x", "Neo", why="test", now=self.m(0))
+        launch("a_neo", "devkit:neo", "Neo: x", at=self.m(1))
+        pg.step("x done", which="x", check="✓ 3 tests pass", from_agent="a_neo", now=self.m(10))
+        self.assertEqual(self.held("x"), ("a_neo", "done"))
+        self.assertEqual(self.held("review-x"), ("main", "pending"))  # its author's lane does not take it
+        launch("a_neo2", "devkit:neo", "Neo: review-x", at=self.m(11))
+        self.assertEqual(self.held("review-x"), ("main", "pending"))  # nor a new lane of the same member
+        self.sound()
+        pg.assign("y", "Neo: x", why="test", now=self.m(12))
+        with self.assertRaises(pg.StepError) as e:
+            pg.assign("review-y", "Neo", why="a second look", now=self.m(13))
+        self.assertIn("own work", str(e.exception))
+        self.assertIn("“y”", str(e.exception))
+
+    def test_an_author_naming_the_review_of_its_work_neither_takes_nor_closes_it(self):
+        # Neo was given review-x before anyone did x, then did x; its lane took z from the queue, and its
+        # dev progress step --step review-x made z give way and took the review of its own work
+        pg.start("Fix", plan=["x=30m", "z=30m", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("review-x", "Neo", why="a second look", now=self.m(0))  # nobody did x yet
+        pg.assign("x", "Neo", why="test", now=self.m(0))
+        pg.assign("z", "Neo", why="test", now=self.m(0))
+        launch("a_neo", "devkit:neo", "Neo: x", at=self.m(1))
+        rc, out, err = self.cli("a_neo", "reviewed my own work", "--step", "review-x", "--check", "✓ approved")
+        self.assertEqual(rc, 2, out)  # while x runs, the review does not join the lane once x closes either
+        self.assertIn("so it never joins your lane", err)
+        pg.step("x done", which="x", check="ok", from_agent="a_neo", now=self.m(10))
+        self.assertEqual(self.held("z"), ("a_neo", "running"))  # joined by its member's queue
+        rc, out, err = self.cli("a_neo", "reviewed my own work", "--step", "review-x", "--check", "✓ approved")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("“review-x” reviews “x”, Senior engineer (Neo)'s own work, so it never joins your lane", err)
+        self.assertNotIn("assign it to you", err)
+        self.assertEqual((self.held("review-x"), self.held("z")), (("main", "pending"), ("a_neo", "running")))
+        self.sound()
+
+
+class BriefedStepTests(Scenario):
+    # the Software architect, launched for approve-stack-skills-spike and the sandbox spike, closed the first; its lane
+    # then took product-model-spec, an older step of its member that its brief never named, and its dev progress
+    # step --step approve-sandbox-spike was refused until product-model-spec closed
+    def setUp(self):
+        super().setUp()
+        pg.start("Sweep", plan=["sandbox-spike=30m", "approve-stack-skills-spike=20m", "product-model-spec=30m",
+                                "approve-sandbox-spike=20m after sandbox-spike"], now=self.m(0))
+        pg.assign("sandbox-spike", "Niobe", why="test", now=self.m(0))
+        launch("a_nio", "devkit:niobe", "Niobe: sandbox-spike", at=self.m(1))
+        for name in ("product-model-spec", "approve-stack-skills-spike", "approve-sandbox-spike"):
+            pg.assign(name, "Architect", why="test", now=self.m(2))
+        launch("a_arch", "devkit:architect", "The Architect: approve-stack-skills-spike and sandbox spike",
+               at=self.m(3))
+        pg.step("stack skills approved", which="approve-stack-skills-spike", check="✓ note approved",
+                from_agent="a_arch", now=self.m(10))
+        self.assertEqual(self.held("product-model-spec"), ("a_arch", "running"))  # joined by the queue
+        pg.step("sandbox probed", which="sandbox-spike", check="✓ probes pass", from_agent="a_nio", now=self.m(12))
+
+    def test_the_lane_closes_its_briefed_step_and_the_queued_one_yields(self):
+        rc, out, err = self.cli("a_arch", "sandbox spike approved", "--step", "approve-sandbox-spike", "--check",
+                                "✓ note approved with four conditions")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("closed “approve-sandbox-spike” (done)", out)
+        run = self.run_()
+        spec = next(s for s in run["plan"] if s["name"] == "product-model-spec")
+        self.assertEqual((spec["owner"], spec["state"], spec.get("joined")), ("main", "pending", None))
+        self.assertEqual((pg.coord.intent(spec)["lane"], pg.coord.intent(spec)["front"]), (None, True))
+        self.assertIn("approve-sandbox-spike", [h for h in run["history"] if h["step"] == "product-model-spec"][-1]
+                      ["why"])
+        self.sound()
+        launch("a_arch2", "devkit:architect", "The Architect: the product model", at=self.m(20))
+        self.assertEqual(self.held("product-model-spec"), ("a_arch2", "running"))  # the member's next lane, first
+
+    def test_a_queued_step_the_lane_worked_on_does_not_yield(self):
+        pg.note("read the product notes", which="product-model-spec", from_agent="a_arch", now=self.m(13))
+        rc, out, err = self.cli("a_arch", "sandbox spike approved", "--step", "approve-sandbox-spike", "--check",
+                                "✓ note approved")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("close “product-model-spec” first", err)
+        self.assertIn("your lane recorded work on it, so it does not give way to a step of your brief", err)
+        self.assertEqual(self.held("product-model-spec"), ("a_arch", "running"))
 
 
 class ReviewVerdictTests(Scenario):

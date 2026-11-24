@@ -27,6 +27,7 @@ RULES = {
     "I-intent": "only a pending step carries an intent",
     "I-claim": "a free running lane never leaves a step waiting for it",
     "I-history": "the run's count of closed steps and each step's last history entry match the plan",
+    "I-independent": "a review never runs in a lane of the member that did the work it follows",
     "fix-after-changes": "the step after a review that asked for changes does not wait for that review",
     "named-step-claimed": "a launch that names a step waiting for its member is no follow-up of a finished one",
 }
@@ -40,19 +41,27 @@ QA_PROPOSE = model.propose  # the hunt patches model.propose with the one below
 
 
 def propose(rng, w=None):
-    """The QA engineer's proposals, and now and then the reviewer asking for changes on the review it runs, or a
-    launch of the Backend engineer whose description names a finished step of its and some other words."""
+    """The QA engineer's proposals, and now and then the reviewer asking for changes on the review it runs, a
+    launch of the Backend engineer whose description names a finished step of its and some other words, or the
+    Backend engineer, who builds “api”, at work on the review of it (CoordWorld.author)."""
     if w is not None and rng.random() < 0.15:
         return {"do": "reject", "member": "seraph", "step": "review", "how": "role", "named": True, "clean": True}
     if w is not None and rng.random() < 0.1:
         return {"do": "generic", "member": "tank", "step": "api docs", "how": "role", "named": False, "clean": True}
+    if w is not None and rng.random() < 0.15:
+        return {"do": "author", "member": "tank", "step": "review", "how": "role", "named": True, "clean": True}
     return QA_PROPOSE(rng, w)
+
+
+AUTHOR = {"assign": "the tech lead gives Tank the review", "launch": "launch Tank “Tank: api and review”",
+          "step": "Tank's dev progress step --step review"}
 
 
 def show(seq: list) -> str:
     """model.show, with this hunt's own actions."""
     own = {"reject": lambda x: "Seraph asks for changes on review",
-           "generic": lambda x: f"launch Tank “Tank: {x.get('used')}”"}
+           "generic": lambda x: f"launch Tank “Tank: {x.get('used')}”",
+           "author": lambda x: AUTHOR.get(x.get("used"), "Tank and the review")}
     return " → ".join(f"{i}. {own[x['do']](x)}" if x["do"] in own else
                       f"{i}. " + model.show([x]).split(". ", 1)[1] for i, x in enumerate(seq, 1))
 
@@ -63,6 +72,8 @@ class CoordWorld(model.World):
     def act(self, a):
         if a["do"] == "generic":
             return self.generic(a)
+        if a["do"] == "author":
+            return self.author(a)
         if a["do"] != "reject":
             return super().act(a)
         aid = self.live("seraph")
@@ -116,9 +127,47 @@ class CoordWorld(model.World):
         self.check(a, before, None)
         return True
 
+    def author(self, a):
+        """The Backend engineer at work on the review of “api”, the step it builds: the first of these that applies.
+        The tech lead gives it the review while no lane of it has worked on api (refused after); a launch of it
+        names api and the review; its lane names the review in a ✓ record (refused while the review is not its)."""
+        member, name = "tank", model.MEMBERS["tank"][0]
+        plan = self.plan()
+        if plan["review"].get("state") != "pending":
+            return False
+        before = {k: v.get("state") for k, v in plan.items()}
+        self.close_member_call(member)
+        aid = self.live(member)
+        if not (plan["review"].get("label") or "").lower().startswith(member):
+            a["used"] = "assign"
+            if self.main(["progress", "assign", "review", "--to", name],
+                         lambda: pg.assign("review", name, why="model", now=self.now())) is None:
+                return False
+        elif not aid:
+            if self.lanes.get(member) and self.lanes[member] not in self.ended:
+                return False
+            a["used"], aid = "launch", f"a{member}r{self.k}"
+            try:
+                model.launch(aid, member if self.host == "codex" else f"devkit:{member}", f"{name}: api and review",
+                             at=self.now(), agent=self.host)
+            except AssertionError:  # Codex's admission refused the launch (a slot, the order): nothing started
+                return False
+            self.lanes[member] = aid
+            self.ended.discard(aid)
+        else:
+            a["used"] = "step"
+            try:
+                pg.step("review done", which="review", check="✓ 12 tests pass", from_agent=aid, now=self.now())
+            except pg.StepError:
+                return False
+            self.commands.setdefault(aid, []).append(
+                'dev progress step "review done" --step review --check "✓ 12 tests pass"')
+        self.check(a, before, None)
+        return True
+
     def check(self, a, before, expect):
         super().check(a, before, expect)
-        for v in coord.check(self.run_(), time.time(), review=pg.is_review_step):
+        for v in coord.check(self.run_(), time.time(), review=pg.is_review_step, who=pg.member_id):
             self.flag(v.split(":", 1)[0], v)
 
 
@@ -155,6 +204,9 @@ class CoordModelTests(unittest.TestCase):
 
     def test_a_lane_runs_one_step_besides_reviews(self):
         self.holds("I-one-step")
+
+    def test_a_review_never_runs_in_a_lane_of_its_author(self):
+        self.holds("I-independent")
 
     def test_a_lanes_scope_comes_from_its_running_steps(self):
         self.holds("I-scope")

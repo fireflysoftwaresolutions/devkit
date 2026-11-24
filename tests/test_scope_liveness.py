@@ -190,6 +190,30 @@ class OwnerCommandTests(OwnerCase):
         self.assertEqual(rc, 0)
         self.assertTrue(all(r["free"] for r in out))
 
+    def test_two_members_typing_the_same_owner_command_get_every_holder_and_what_to_do(self):
+        # the open calls of two members of this session hold this very command and no lane mark says whose it is:
+        # devkit acts as neither, so it leaves no lane out of the answer (the caller's own may be one) and says
+        # why and how to ask again, instead of stopping on a crash of its own
+        self.fixture()
+        launch("a_tank", "devkit:tank", "Tank: api", self.now)
+        argv = ["crew", "owner", str(self.repo / "lib/parser/d.py"), "--json"]
+        (pg.CALLS / "s1").mkdir(parents=True, exist_ok=True)
+        for n, aid in enumerate(("a_neo", "a_tank")):
+            (pg.CALLS / "s1" / f"toolu_{n}.json").write_text(json.dumps(
+                {"tool_use_id": f"toolu_{n}", "caller": aid, "ts": self.now, "ttl": 3600, "cmd": "dev " + " ".join(argv)}))
+        out, err, back = io.StringIO(), io.StringIO(), os.getcwd()
+        self.addCleanup(os.chdir, back)
+        os.chdir(self.repo)
+        with mock.patch.dict(os.environ), mock.patch.object(sys, "argv", ["dev", *argv]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            os.environ.pop("DEVKIT_FROM_AGENT", None)
+            rc = cli.main(argv)
+        self.assertEqual(rc, 1, err.getvalue())
+        [row] = json.loads(out.getvalue())
+        self.assertEqual([h["who"] for h in row["holders"]], ["Senior engineer (Neo)"])
+        self.assertIn("Backend engineer (Tank)", err.getvalue())
+        self.assertIn("as a command of its own", err.getvalue())
+
 
 class StatusTests(OwnerCase):
     def test_dev_status_lists_no_ended_member_and_marks_a_stale_one(self):

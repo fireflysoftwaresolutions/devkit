@@ -181,6 +181,25 @@ class WaitWakesTests(WatchCase):
         self.assertEqual(rows[:1], ["expired"], listed)
         self.assertNotIn("live", rows, listed)
 
+    def test_a_run_whose_mode_origin_cannot_be_read_waits_and_shows_its_decision(self):
+        # a mode devkit cannot read takes no decision by itself, even when the saved mode is auto, and the wait still
+        # runs: the 26.11.21 crash (registry #47) came from reading it in a wait
+        from devkit import core
+        self.run_with_member()
+        pg.crew_decision("Ship on Friday?", options="A: yes | B: no", recommend="A", from_agent="a1", now=self.t0)
+        path = pg.run_path("claude", "s1")
+        run = json.loads(path.read_text())
+        run["mode_source"] = "someday"
+        path.write_text(json.dumps(run))
+        self.world()
+        auto = dict(core.CFG, work=dict(core.CFG.get("work") or {}, mode="auto"))
+        with mock.patch.object(core, "config_snapshot", return_value=(auto, [])):
+            rc, out, err = dev("watch", "--wait", "--timeout", "2")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("decision D1", out)
+        self.assertIn("waits for the developer", out)
+        self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["state"], "pending")
+
     def test_a_newer_wait_supersedes_the_older_which_prints_nothing_it_did_not_take(self):
         # two waits armed in one turn: the newer one takes the question; the older one ends with one line (exit 5)
         self.run_with_member()

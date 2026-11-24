@@ -607,6 +607,31 @@ def _sentence(s):
     return crew._sentence(s)
 
 
+class BriefSharedFolderCheckTests(unittest.TestCase):
+    # A run saved before such names were refused holds "Diseño" and "diseno", whose lanes would share one scratch
+    # folder, so the brief of either names the member's plain folder. A defect in that check was swallowed with every
+    # other error, and the brief named the shared folder: only a run that cannot be read names the step's own folder.
+    def setUp(self):
+        state = TempState().__enter__()
+        self.addCleanup(state.__exit__, None, None, None)
+        pg.start("Feature", plan=["api=30m"])
+        run = pg.load_run("claude", "s1")
+        run["plan"] += [pg._new_step("Diseño", 30), pg._new_step("diseno", 30)]
+        pg.run_path("claude", "s1").write_text(json.dumps(run))
+
+    def brief(self):
+        with tempfile.TemporaryDirectory() as d:
+            return ui.ANSI_RE.sub("", crew.brief_text(crew.member("neo"), "Design it.", "", step="diseno", cwd=d))
+
+    def test_a_defect_in_the_shared_folder_check_surfaces_and_only_an_unreadable_run_names_the_steps_folder(self):
+        self.assertIn("`scratchpad/neo/`", self.brief())
+        with mock.patch.object(pg, "folder_twin", side_effect=RuntimeError("a defect in the check")):
+            with self.assertRaisesRegex(RuntimeError, "a defect in the check"):
+                self.brief()
+        pg.run_path("claude", "s1").write_text("{ not a run")
+        self.assertIn("`scratchpad/neo-diseno/`", self.brief())
+
+
 # --------------------------------------------------------------------------- live crew state, messages, decisions
 
 class CrewSessionTests(unittest.TestCase):

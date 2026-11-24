@@ -166,6 +166,10 @@ dev crew graph --global              # every live session on this Mac (the defau
   member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
   repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
+  They refuse every other path outside the repository, except this project's plans folder
+  (`~/Development/.handoff/plans/<project id>/`) and the member's own scratch folders for the step
+  (`scratchpad/<member id>-<step>/` and `scratchpad/<member id>/`). When two open steps of one member get scopes that
+  overlap, `assign` tells you: a file both hold counts for the step the lane runs when it writes it.
 - **Scopes match folder by folder.** `*`, `?`, and `[…]` stay inside one folder name; `**` spans folders; a glob
   holds everything under a folder it matches. `*.md` means root-level Markdown only: write `**/*.md` for all of it.
   A relative glob never holds a path outside the repository, a link that leads out of it included, and a
@@ -256,18 +260,19 @@ files.
   working lanes to it (`session.adopt`), so your plan commands keep working.
 - **Read-only members** (the Code reviewer and the other review-only members) may run the reads of work state
   (`dev overview`, `dev standup`, `dev team`, `dev initiative ls|show`, `dev report` without `-o`, `dev plan ls`), the
-  repository's tests, and writes in their own scratch folder (`scratchpad/<member id>/`). They change no repository
-  file: they report the change with file:line. A shell write of theirs outside the scratch folder is detected and
-  counted for them. A member Responsible for requirements,
+  repository's tests, and writes in their own scratch folder (`scratchpad/<member id>-<step>/`). They change no
+  repository file: they report the change with file:line. A shell write of theirs outside the scratch folder is
+  detected and counted for them. A member Responsible for requirements,
   architecture, research, UX, or docs also records its plan from its review lane with `dev plan new` (in the run's
   project checkout, without `-p` or `-i`) and `dev plan revise <file>` (a plan below that project's plans folder).
 - **Helpers:** a member may launch a helper for a narrow lookup or a slice of its own files. The helper gets the
   member's tools and files, takes a slot, and no launch goes deeper than `progress.max_depth` (2). A member that needs
   another specialist asks you.
-- **Scratch folders:** each member writes and deletes only in `scratchpad/<member id>/` or
-  `scratchpad/<member id>-<task>/` of the session scratchpad. `dev crew brief` names the folder in the brief's Scope
-  section, and devkit creates it when the lane opens, so a read-only member has one too. A brief you write by hand
-  names it the same way.
+- **Scratch folders:** each lane gets its own folder in the session scratchpad and writes and deletes only there:
+  `scratchpad/<member id>-<step>/` for a lane that runs a step, so two lanes of one member never share one, and
+  `scratchpad/<member id>/` for a lane that runs none. `dev crew brief --step` names the folder in the brief's Scope
+  section, and devkit creates it at launch, so a read-only member has one too. A brief you write by hand names it
+  the same way.
 - **Questions:** any member can ask anything: `dev crew ask "Should empty lines be skipped?"` (to the tech lead by
   default, or `--to Seraph`; `--to "Tech lead"` and `--to Morpheus` reach the main session). The message reaches the
   recipient with its next action. Answer with `dev crew answer M1 "Yes, skip them"`. Answer quickly: a member waiting

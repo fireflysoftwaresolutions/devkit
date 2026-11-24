@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Progress, timing and predictability. Run: python3 -m unittest discover -s tests -v"""
 import contextlib
+import io
 import json
 import os
 import sys
@@ -754,18 +755,17 @@ class AbsoluteScopeTests(unittest.TestCase):
 
     def test_an_absolute_scope_inside_a_worktree_is_kept_repository_relative(self):
         from devkit import hooks
-        with TempState(), tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as scratch:
+        with TempState(), tempfile.TemporaryDirectory() as d:
             main, wt = self.repo_with_worktree(d)
             pg.start("Feature", plan=["installer"], now=self.m(0))
             with mock.patch.dict(os.environ, {"HOME": d}):  # the ~ form the tech lead wrote: ~/<worktree>/…
-                run = pg.assign("installer", "Kid", scope=f"{wt}/install.sh,~/wt/tests/**,{scratch}/kid/**",
-                                cwd=str(main), now=self.m(0))
-            self.assertEqual(run["plan"][0]["scope"], ["install.sh", "tests/**", f"{scratch}/kid/**"])  # outside: as is
+                run = pg.assign("installer", "Kid", scope=f"{wt}/install.sh,~/wt/tests/**", cwd=str(main),
+                                now=self.m(0))
+            self.assertEqual(run["plan"][0]["scope"], ["install.sh", "tests/**"])
             told = [m["text"] for m in run.get("messages") or [] if m["from"] == "devkit"]
             self.assertEqual(len(told), 1, told)
             self.assertIn(f"{wt}/install.sh → install.sh", told[0])
             self.assertIn("~/wt/tests/** → tests/**", told[0])
-            self.assertNotIn(scratch, told[0])
             launch("a1", "devkit:kid", "Kid: installer", self.m(1))
             real_temp = hooks.core.is_temp  # the fixture lives in a temp folder; real worktrees do not
             patch = mock.patch.object(hooks.core, "is_temp", lambda p: real_temp(p) and not str(p).startswith(d))
@@ -807,17 +807,6 @@ class AbsoluteScopeTests(unittest.TestCase):
                         pg.assign("installer", "Kid", scope=scope, cwd=str(main), now=self.m(0))
                     self.assertIn(why, str(e.exception))
 
-    def test_a_scope_with_dot_dot_counts_in_the_checkout_it_resolves_to(self):
-        with TempState(), tempfile.TemporaryDirectory() as d:
-            main, wt = self.repo_with_worktree(d)
-            pg.start("Feature", plan=["installer"], now=self.m(0))
-            run = pg.assign("installer", "Kid", scope=f"{wt}/lib/../tests/**,{wt}/../api/docs/**", cwd=str(main),
-                            now=self.m(0))
-            self.assertEqual(run["plan"][0]["scope"], ["tests/**", "docs/**"])  # the worktree's, then the main one's
-            with self.assertRaises(pg.StepError) as e:  # climbs above both checkouts
-                pg.assign("installer", "Kid", scope=f"{wt}/../**", cwd=str(main), now=self.m(0))
-            self.assertIn("2 checkouts", str(e.exception))
-
     def test_a_rewritten_scope_still_clashes_with_a_working_lane_s_files(self):
         # two working members never share files: the clash check compares the rewritten, repository-relative glob
         with TempState(), tempfile.TemporaryDirectory() as d:
@@ -845,6 +834,44 @@ class AbsoluteScopeTests(unittest.TestCase):
                 pg.assign("more", "Kid", scope=f"{wt}/lib/devkit/x.py", cwd=str(main), why="test", now=self.m(3))
             self.assertIn("overlaps the files Release engineer (Link) owns", str(e.exception))
 
+    def test_a_clash_with_a_scope_of_no_checkout_says_so_and_its_commands_bind_both(self):
+        # the tech lead gave the working member a repository-relative scope and the next one a worktree's paths: the
+        # refusal said scopes of two checkouts do not clash and showed lib/** on both sides, so it read as if every
+        # scope were stored for every checkout. It names where each scope counts, and the commands it gives work
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = self.repo_with_worktree(d)
+            pg.start("Feature", plan=["release notes", "ext", "more"], now=self.m(0))
+            pg.assign("release notes", "Link", scope="lib/**", cwd=str(main), why="test", now=self.m(0))
+            launch("l1", "devkit:link", "Link: release notes", self.m(1))
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("ext", "Kid", scope=f"{wt}/lib/**", cwd=str(main), why="test", now=self.m(2))
+            told = str(e.exception)
+            self.assertIn("names no checkout", told)
+            self.assertIn(f"in every checkout, {core.tilde(os.path.realpath(wt))} too", told)  # the new one's
+            self.assertIn('''dev progress assign 'release notes' --to link --scope "<their worktree>/lib/**"''',
+                          told)  # a command the shell runs as it reads
+            pg.assign("release notes", "Link", scope=f"{main}/lib/**", cwd=str(main), why="test", now=self.m(3))
+            self.assertEqual(pg.assign("ext", "Kid", scope=f"{wt}/lib/**", cwd=str(main), why="test",
+                                       now=self.m(4))["plan"][1]["scope"], ["lib/**"])
+            with self.assertRaises(pg.StepError) as e:  # one checkout: no worktree can help
+                pg.assign("more", "Kid", scope=f"{main}/lib/x.py", cwd=str(main), why="test", now=self.m(5))
+            self.assertIn(f"count in {core.tilde(os.path.realpath(main))}", str(e.exception))
+            self.assertNotIn("worktree", str(e.exception))
+
+    def test_the_commands_a_clash_gives_put_every_glob_in_the_worktree(self):
+        # with two globs, the commands put only the first in the worktree, so the second still counted in every
+        # checkout and the same clash came back
+        for theirs in ("lib/**", "{main}/lib/**"):  # the working member's scope counts in every checkout, or in one
+            with self.subTest(theirs=theirs), TempState(), tempfile.TemporaryDirectory() as d:
+                main, wt = self.repo_with_worktree(d)
+                pg.start("Feature", plan=["release notes", "ext"], now=self.m(0))
+                pg.assign("release notes", "Link", scope=theirs.format(main=main), cwd=str(main), why="test",
+                          now=self.m(0))
+                launch("l1", "devkit:link", "Link: release notes", self.m(1))
+                with self.assertRaises(pg.StepError) as e:
+                    pg.assign("ext", "Kid", scope="lib/x.py,docs/y.md", cwd=str(main), why="test", now=self.m(2))
+                self.assertIn('--scope "<worktree>/lib/x.py,<worktree>/docs/y.md"', str(e.exception))
+
     def test_a_scope_given_in_one_worktree_holds_the_files_of_that_worktree_only(self):
         # the edit advice and `dev crew owner` read the scope in the checkout it was given in, as assign does: the
         # Release engineer's <wt>/lib/** holds <wt>/lib/x.py, and the main checkout's lib/x.py is the tech lead's
@@ -867,6 +894,44 @@ class AbsoluteScopeTests(unittest.TestCase):
             self.assertEqual(hooks._scope_advice("claude", mine(wt / "lib" / "x.py")), [])
             self.assertIn("outside Release engineer (Link)'s scope",
                           " ".join(hooks._scope_advice("claude", mine(main / "lib" / "x.py"))))
+
+    def test_scopes_given_from_inside_two_worktrees_say_where_each_counts(self):
+        # a tech lead gave lane A <wtA>/studio/** from inside wtA, then lane B two files of wtB from inside wtB: both
+        # were accepted and bound to their worktree, but each notice said the scope held its files in every
+        # checkout, so the tech lead concluded that worktree scopes do not work
+        from devkit import crew, hooks
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wta, wtb = repo_with_worktrees(d, Path(d) / "wtA", Path(d) / "wtB")
+            pg.start("Studio", plan=["studio", "x"], now=self.m(0))
+            pg.assign("studio", "Trinity", scope=f"{wta}/studio/**", cwd=str(wta), why="test", now=self.m(0))
+            launch("a1", "devkit:trinity", "Trinity: studio", self.m(1))
+            run = pg.assign("x", "Neo", scope=f"{wtb}/studio/src/x.ts,{wtb}/tests/x.test.ts", cwd=str(wtb),
+                            why="test", now=self.m(2))
+            launch("b1", "devkit:neo", "Neo: x", self.m(3))
+            here = {w: core.tilde(os.path.realpath(w)) for w in (wta, wtb)}
+            told = [m["text"] for m in run.get("messages") or [] if m["from"] == "devkit"]
+            self.assertEqual(len(told), 2, told)
+            for text, mine, other in ((told[0], wta, wtb), (told[1], wtb, wta)):
+                self.assertIn(f"only in {here[mine]}", text)
+                self.assertNotIn("every checkout", text)
+                self.assertNotIn(other.name, text)
+            x = wtb / "studio" / "src" / "x.ts"
+            held = pg.scope_holders(str(x), "claude", "s1", cwd=str(wtb), now=self.m(4))
+            self.assertEqual([h["who"] for h in held], ["Senior engineer (Neo)"])  # never Trinity's
+            edit = {"session_id": "s1", "agent_id": "b1", "tool_name": "Edit", "cwd": str(wtb),
+                    "tool_input": {"file_path": str(x)}}
+            self.assertEqual(hooks._scope_advice("claude", edit), [])
+            self.assertEqual(hooks._crew_limits_advice("claude", dict(edit, agent_id=None))[0].count("Trinity"), 0)
+            # dev crew owner and dev crew next say the checkout each bound scope counts in
+            owner = pg.owner_text([{"path": str(x), "free": False, "holders": held}], now=self.m(4))
+            self.assertIn(f"scope studio/src/x.ts, tests/x.test.ts in {here[wtb]}", owner)
+            busy = {b["member"]: b for b in crew.ready_view(pg.load_run("claude", "s1"))["busy"]}
+            self.assertEqual((busy["Trinity"]["checkout"], busy["Neo"]["checkout"]),
+                             (os.path.realpath(wta), os.path.realpath(wtb)))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                crew._next(None, "b1")
+            self.assertIn(f"scope studio/** in {here[wta]}", out.getvalue())
 
     def test_another_sessions_member_holds_the_files_of_the_worktree_its_scope_names(self):
         # a member of another session's run, whose session works in the main checkout, was given <wt>/lib/**: its
@@ -1421,6 +1486,37 @@ class OpenDecisionTests(unittest.TestCase):
         self.assertEqual([r["target"] for r in audit.query(action="crew.withdrawn")], ["D1"])
         mail = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
         self.assertIn("D1 was withdrawn by the tech lead: the parser keeps both behaviors", mail)
+
+    def test_a_withdrawal_whose_notice_is_refused_leaves_the_decision_pending(self):
+        # the decision was saved withdrawn before the notice to its asking lane failed (here a secret in the
+        # reason), so the lane waited for an answer that would never come
+        from devkit import audit, messaging
+        with self.assertRaisesRegex(messaging.MessageError, "secret"):
+            pg.crew_withdraw("D1", "the key ghp_" + "a1B2" * 10 + " decides it", now=self.m(4))
+        self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
+        self.assertEqual(audit.query(action="crew.withdrawn"), [])
+
+    def test_a_withdrawal_whose_asking_lane_ended_is_refused_for_a_secret_in_its_reason(self):
+        # with the asking lane ended, no notice quotes the reason, so nothing checked it before it was saved
+        from devkit import messaging
+        self.end_lane(self.m(3))
+        with self.assertRaisesRegex(messaging.MessageError, "secret"):
+            pg.crew_withdraw("D1", "the key ghp_" + "a1B2" * 10 + " decides it", now=self.m(4))
+        self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
+
+    def test_a_withdrawal_refused_by_a_full_message_store_leaves_no_record_of_the_step_it_never_freed(self):
+        # the parser step blocked on D1 was recorded running again in the audit trail before the notice to the asking
+        # lane was refused: a step the run never saved running
+        from devkit import audit, messaging
+        running = len(audit.query(action="plan.running"))
+        full = len(messaging.encoded(self.run_()))
+        with mock.patch.object(messaging, "STORE_MAX", full), \
+                self.assertRaisesRegex(messaging.MessageError, "capacity"):
+            pg.crew_withdraw("D1", "the parser keeps both behaviors", now=self.m(4))
+        self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
+        self.assertEqual(len(audit.query(action="plan.running")), running)
+        pg.crew_withdraw("D1", "the parser keeps both behaviors", now=self.m(5))  # saved: recorded
+        self.assertEqual(len(audit.query(action="plan.running")), running + 1)
 
     def test_a_withdrawn_decision_is_never_the_developers_answer(self):
         pg.crew_decision("Push feat/parser?", options="A: push | B: wait", recommend="A", now=self.m(3))  # D2
@@ -2850,7 +2946,10 @@ class MemberOwnStepTests(KidSyncCase):
     def test_a_members_close_of_its_own_step_closes_it_at_once(self):
         run = pg.step("handoff sync rewritten", which="sync", check="✓ 14 tests pass", from_agent="k1",
                       now=self.m(10))
-        self.assertEqual([s["state"] for s in run["plan"]], ["done", "running"])  # the next step need not wait
+        self.assertEqual([s["state"] for s in run["plan"]], ["done", "pending"])
+        self.assertEqual(pg.deps_open(run, run["plan"][1]), [])  # the next step need not wait for the report
+        # it is the tech lead's: it starts in the tech lead's own next call, never in the member's
+        self.assertEqual(pg.add_step("notes=5m", now=self.m(11))["plan"][1]["state"], "running")
         self.assertEqual(run["agents"]["k1"]["state"], "running")  # the member still works: its lane stays open
         self.assertEqual((run["lane_outcome"]["step"], run["lane_outcome"]["closed"]), ("sync", True))
         last = [h for h in run["history"] if h["step"] == "sync"][-1]

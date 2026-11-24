@@ -118,12 +118,40 @@ short version:
    Write scopes relative to the repository: they match the same files in every checkout of it, the main checkout
    and each worktree. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to
    that form and tell you. They refuse a path that spans more than one checkout or names a worktree that is not
-   there, a deleted one included; give the files relative to the repository instead.
+   there, a deleted one included; give the files relative to the repository instead. Both take paths in the
+   repository by one rule: they refuse, saving nothing and quoting nothing, a scope that holds a secret, a URL, or
+   a remote (any `:`), a `..` segment, a control or invisible character (such as U+202E, which turns the text around
+   where it is shown, or a line separator), a space other than the plain space (U+0020), such as the no-break space
+   (U+00A0) or the thin space (U+2009), which shows as a plain one, a Hangul filler (U+115F, U+1160, U+3164, U+FFA0),
+   the blank Braille pattern (U+2800) or a mark that draws nothing (the combining grapheme joiner U+034F, the Khmer
+   inherent vowels U+17B4 and U+17B5, the four Mongolian free variation selectors, and the variation selectors
+   U+FE00 to U+FE0F and U+E0100 to U+E01EF), which show as nothing or as a space, or a path outside every checkout.
+   A combining mark that shows is kept, such as the acute accent (U+0301) in a filename that macOS stores
+   decomposed. A code point with no character assigned is kept too. Which code points those are depends on the
+   Unicode version of the Python that runs devkit, so a format character that a newer Unicode version added (such as
+   U+0890, in Unicode 14) is refused only by a Python whose Unicode version has it. The Hangul fillers, the blank
+   Braille pattern and the marks that draw nothing are named one by one, so every Python refuses them, the fourth
+   Mongolian free variation selector (U+180F, in Unicode 14) included.
+
+   Outside the repository, a scope may name only these folders, as absolute or `~` paths: this project's plans
+   folder in the handoff repository (`~/Development/.handoff/plans/<project id>/`), where the Software architect and
+   the Technical writer write specs, and the scratch folders of the member the step goes to: the step's lane folder
+   (`scratchpad/<member id>-<step>/` in the session scratchpad, which the lane's launch creates) and the member's
+   plain `scratchpad/<member id>/` (see [Scratch folders](#scratch-folders)). Each is judged by its real path, with
+   links resolved, and the step keeps that real path. `assign` and `delegate` refuse another project's plans
+   folder, another step's lane folder, another member's or another session's scratch folder, a wildcard that
+   reaches past the folder (`plans/acme/ap*/**`), and a link that leads out of it, including a link in place of the
+   member's folder.
 
    A scope that `assign` gets as paths in one checkout (`<worktree>/lib/**`) counts in that checkout only: the
-   overlap check of `assign`, the edit check, the edit advice, and `dev crew owner` hold it to that checkout's files.
+   overlap check of `assign`, the edit check, the edit advice, `dev crew owner`, and `dev commit` in a lane hold it
+   to that checkout's files. The notice `assign` posts names that checkout, and `dev crew owner` and `dev crew next`
+   show it after the scope (`scope lib/** in ~/Development/.worktrees/…`).
    Members in two worktrees can then own the same files without a clash; bringing their changes together is merge
-   work.
+   work. Both scopes need their worktree's paths: a scope relative to the repository counts in every checkout, so it
+   still clashes. To bind a working member's scope, assign its step again to the same member with the paths of its
+   worktree (`dev progress assign api --to Tank --scope "<worktree>/services/invoices/**"`); the step stays in its
+   lane. When `assign` refuses an overlap, it says where each scope counts and gives these commands.
 
 3. **Brief and launch** them, all parallel members in one message:
 
@@ -202,9 +230,74 @@ The kind of work decides three things:
 member's verdict, its review step's Check or its `--approves`, counts only at the end of its lane, when the crew gates
 pass its report without a finding (see [Every report is checked](#every-report-is-checked)). A report the gates sent
 back or only recorded approves nothing, and the work stays owed until a review whose report passes. The tech lead's
-`--approves` counts at once. Nobody approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves code
-and configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer and
-incidents by the tech lead.
+`--approves` counts at once. An approver's ✓ with `--approves` on a step that ended unverified also closes it, done with
+that verdict as its evidence, as a review step's ✓ closes the unverified work it follows; a ✗ leaves it unverified. The
+command's line says why the step is unverified, such as a read-only member's shell write, so the ✓ is given knowingly. A
+verdict covers only the work it saw: one given before the step last ended unverified closes and approves nothing, and a
+reopen drops the verdicts members still hold on the step and tells them to give it again once the new work ends. A
+review covers the work that ended before its lane took it: work reopened, or taken again by a new launch, that ends
+after that is neither closed nor approved by the review's ✓, and the tech lead is told to have the new work reviewed. A
+close of unverified work while its review runs, with the tech lead's evidence or another approval, does not move when
+that work ended, so the review's ✓ still approves it, unless the step got work since it ended unverified: then its work
+ends at that close. Its author's own close (its report's ✓ or its own `dev progress step` ✓) always ends its work at
+that close. A review's ✓ neither closes nor approves work that ended after the review began, or that got work since it
+began. A review that joins a reviewer's lane while that lane still runs an earlier review begins once the lane gives
+its verdict on the earlier one (`dev progress step --step <it> --check …`), so work done before that is work the
+review saw; when one report ends both with no verdict before it, the review began when it joined the lane. Each time,
+the tech lead is told to have the new work reviewed. As soon as that work starts again, from done or
+from unverified, the review and any other step running on it are flagged for recheck, so the run does not end before
+they are checked again. An author's lane that stops with no work since its unverified step ended keeps the time that
+step ended, so a verdict given in between still counts; work since then ends the step unverified again at the stop, and
+the earlier verdict counts no more. When an approval, a review, or the tech lead closed the step while its author's lane
+worked on, work after that close makes the step unverified again at the lane's stop: the verdicts given before it count
+no more, and the tech lead is told. Work on its scope after the lane closed the step itself does the same; the lane's
+other work then counts as its next step's.
+
+Every close and stop asks the same question: did a lane that ran the step, or the tech lead, work on it after a given
+time? Work counts only when it is the step's:
+
+- A `dev progress step` or note of such a lane that names the step, or that names no step or a step the lane does not
+  hold, given while the lane held no other open step. A lane holds a step from when it takes it until the step is
+  done, so a step assigned to the lane later does not hide work the lane did before.
+- A file such a lane or a helper it launched wrote with an edit tool, a file the shell call of a review-only or
+  read-only lane (or of such a helper) wrote, which write detection records, or a file the tech lead wrote with an
+  edit tool, when the file is the step's: a file of its scope in a checkout of the project, never the same path in
+  another repository, or a file its lanes edited for it, from its start to when its work ended. A file a lane wrote
+  while it held another open step is that step's when that step's scope holds it, even where both scopes hold it,
+  and so is any file outside this step's scope. While a review of this step is at work, though, a file of this
+  step's scope is this step's whichever step the lane runs, because the review may not see it. A step with no scope
+  also takes any file a lane wrote while it held no other open step, unless the scope of another of that lane's
+  steps holds it.
+- After a lane closed the step itself, only its work that names the step or is a file of its scope.
+
+When two steps of one member get scopes that overlap (`src/**` and `src/api/**`), `dev progress assign` tells the tech
+lead: one lane may run both, and a file both scopes hold counts for the step the lane runs when it writes it, except
+that it counts as rework of a finished step while a review of that step is at work. It tells for a step that is
+still open and for a finished one whose approval is still owed.
+
+devkit does not see a build lane's shell writes (a script, `sed -i`, `git apply`): they are recorded nowhere, so they
+count only through its `dev progress step` or note. The tech lead's edits count only for the step's files, so a step
+with no scope whose lanes edited nothing with an edit tool takes none of them.
+
+Nobody approves their own kind of work: when the Accountable member did the work, the Code reviewer (Seraph) approves
+code and configuration, and the tech lead the rest. In the team's RACI, compliance is approved by the Security engineer
+and incidents by the tech lead.
+
+A review never goes to its author: `dev progress assign` refuses a review step for a member whose lane ran a step it
+follows, directly or through other work (a review after an integration of the Backend engineer's API is not the Backend
+engineer's either; an earlier review on the way counts no author, so its reviewer may review the fix after it), and no
+lane of that member takes it from the queue or by naming it, not even a new launch that names a review left unverified:
+that review stays unverified, and the tech lead is told to give it to another member. A step keeps the lanes that ran it
+when it is reopened: its review still avoids their members, and it is approved as the work of every one of them, never
+as the tech lead's, so a member who ran an earlier version never approves it, by a review or by `--approves`.
+devkit compares crew members, never lane names: a lane that names no crew member, such as a general-purpose agent whose
+description does not start with `<Member>:`, takes no review, and `dev progress assign` gives a review to no label
+outside the roster. A review given to a member before it did the work stays its member's in the plan, but that member's
+`dev progress step --step "<review>"` is refused, records nothing, and says the review never joins its lane: the tech
+lead gives it to another member. devkit also starts no step in a member's call: when a member closes its step, only the
+free lanes take what waits for them. The tech lead's next step starts in the tech lead's own call, and only when it is
+the tech lead's own work: never a review, which waits for its reviewer, and never a step whose kind of work another
+member is Responsible for.
 
 ### Root cause, research, and requirements
 
@@ -274,7 +367,12 @@ that launch alone, so two members launched together never swap lanes:
   step to that lane; with a role (`--to Tank`), any lane of the member may take it. A lane that runs no step takes,
   in order: the step its launch names, an answered blocked step, the steps bound to that lane, then the steps given
   to its member, each oldest first and once its dependencies are done. The step's scope becomes the lane's, and the
-  member is told (`“<step>” is your step now`) at its next hook or in its `dev watch --wait`. A new launch takes a
+  member is told (`“<step>” is your step now`) at its next hook or in its `dev watch --wait`. A step that joined a
+  lane only from its member's queue, and that the lane recorded nothing on, never blocks a step of the brief: when
+  the member closes another step its launch names (`dev progress step "…" --step "<name>" --check "…"`), the
+  joined step yields, first for the member's next lane and never again for this one. A step its launch does not
+  name waits its turn: closing it is refused, with nothing recorded, until the joined step closes, and the refusal
+  says the launch does not name it. A new launch takes a
   step bound to an older lane once that lane has ended. When the member works in two or more lanes, the first lane
   that frees takes a step given to the member, and the tech lead's notice gives the
   `dev progress assign "<step>" --to "<launch description>"` line that gives it to one lane instead. When the tech
@@ -305,7 +403,9 @@ that launch alone, so two members launched together never swap lanes:
 - **A blocked step frees its lane.** While a step waits for a decision (one asked in guided mode, or one that
   approves steps), it keeps its member but holds neither the lane nor its files: the member takes its next step, with
   that step's files. When the decision is answered, the blocked step runs again in that lane, or goes first in the
-  lane's queue while the lane runs another step, or goes to the member's next lane if that lane ended.
+  lane's queue while the lane runs another step, or goes to the member's next lane if that lane ended. The tech
+  lead's `dev progress begin` on a member's blocked step returns it the same way, so a lane never runs it beside
+  another step.
 - **A launch that failed** (an unknown agent type, an interrupt) starts no agent, so its record goes at once: it
   never labels another agent or holds a slot.
 - **A resumed agent** keeps its own lane and takes no other member's step or label. When it runs no step, it takes
@@ -346,6 +446,9 @@ scope check, `dev crew owner`, and the overlap check of `assign` all match it th
   scratchpad, so `**` alone holds the repository and nothing else. It holds a path only when its real path, links
   resolved, is inside the repository too: `shared/**` holds nothing behind a tracked link `shared` that leads out of
   the repository.
+- An absolute glob holds files outside the repository only in this project's plans folder or in a scratch folder
+  of the step's member, its lane folder for the step or its plain folder, the folders `assign` and `delegate`
+  accept outside it (see [Leading the crew](#leading-the-crew)).
 - The edit check (the Write and Edit tools) also judges the file a write lands on: with links resolved, that file
   must be in the scope too: `docs/**` does not let a member edit `docs/core.py` when it links to `lib/core.py`.
   A new file is judged by its nearest existing folder, and the advice names where the write would land.
@@ -501,14 +604,28 @@ When a member needs another specialist, it asks the tech lead instead of launchi
 
 ### Scratch folders
 
-In the session's scratchpad, each member writes and deletes only in its own folder: `scratchpad/<member id>/`, or
-`scratchpad/<member id>-<task>/` for one task (`scratchpad/tank-f3/`). A file tool's write outside it gets advice in
-the member's context. A helper uses its member's folder. The shared top level and the other members' folders hold
-their work, so a cleanup that stays in its own folder never deletes another member's files.
+In the session's scratchpad, each crew lane writes and deletes only in its own folder: `scratchpad/<member id>-<step>/`
+for a lane that runs a plan step (`scratchpad/tank-api/` for the Backend engineer's step `api`), and the member's
+plain `scratchpad/<member id>/` for a lane that runs none. Two lanes of one member, such as two Security engineer
+lanes on different branches, never share a folder. The step's name is written in lowercase letters, digits, and
+hyphens: `Session graph (v2)` becomes `session-graph-v2`. To keep two steps out of one folder, `dev progress
+start` and `dev progress add` refuse a step whose name differs from another step's only in case, accents, spaces, or
+punctuation (`api v2` and `api-v2`), and `dev crew delegate` numbers its step apart (`API v2 (2)`). A run saved
+before that rule may hold two such steps: it still takes other steps, and the lanes and briefs of those two name the
+member's plain folder. A file tool's write outside the lane's folder gets advice
+in the member's context. A helper uses its member's lane folder. The shared top level and the other lanes' folders
+hold their work, so a cleanup that stays in its own folder never deletes another lane's files.
 
-Each brief names the member's folder in its Scope section and tells the member to keep logs, probes, and temporary
-files there. devkit creates the folder when the member's lane opens (SubagentStart), so a read-only member has one too. A
-read-only member writes only inside its own folder; a shell write elsewhere is detected and counted for it (see
+Each brief names the lane's folder in its Scope section and tells the member to keep logs, probes, and temporary
+files there: `dev crew brief tank "…" --step api` names `scratchpad/tank-api/`, and a brief without a step names
+`scratchpad/tank/`. devkit creates the folder when the lane opens (SubagentStart), so a read-only member has one too.
+A Claude Code lane learns its step only when it binds to its launch, just after its start (by the launch's result or
+at its first tool call), so devkit creates the step's folder then; until then the lane has the member's plain folder.
+When another step joins a running lane (a review that joins a reviewer's lane, or the next step of the member),
+devkit creates that step's folder at the lane's next tool call, and the lane keeps the folder of each step it ran:
+the folder its brief named stays its own, until another running lane owns that step (a reopened step that a new
+lane took).
+A read-only member writes only inside its own folder; a shell write elsewhere is detected and counted for it (see
 [Guardrails](#guardrails)). Nothing is created when the session has no scratchpad, or for a helper that names no
 crew member.
 
@@ -564,8 +681,9 @@ session, and for a decision that waits for you; messages between crew members ne
 
 A message an agent types is refused when it holds a secret: a token, a key, a credential in a URL, or a key name with
 a value of a secret's shape. A key name followed by an ordinary word (`id-token: write`, `password: required`) or a
-mask (`***`) is not one. Notices from devkit and CI watch quote what they saw, so they are stored with every secret
-redacted instead of being refused.
+mask (`***`) is not one. The same check refuses the whole task of `dev crew delegate` and the whole reason of
+`dev crew withdraw` before either changes anything, even when no notice quotes them. Notices from devkit and CI
+watch quote what they saw, so they are stored with every secret redacted instead of being refused.
 
 Canonical references are `M<n>@r-<run_uuid>` and `D<n>@r-<run_uuid>`; bare aliases select the current run only.
 Old session-qualified references work only when unique. Pages redact the whole body before splitting and visibly
@@ -656,6 +774,11 @@ A completed failed check can support an honest failure report, but cannot approv
 requires successful execution evidence. `dev test plan`, help output, `dev ci --run --dry-run`, and
 `dev ci --run --evidence` inspect or describe checks; they do not prove that checks ran. An explicit project override
 must establish that the command checked the same checkout as the reviewed change.
+
+A proof piped into a read-only filter (`dev test | tail -40`) shows it ran, but its receipt holds the filter's exit
+code, so a positive report needs the proof run alone. `dev progress step` is the exception: when the member's lane
+holds the update that same command recorded (its text and Check), the gate takes that record as the proof, and the
+audit trail keeps the warning that the pipe hid the command's exit code.
 
 **When the brief or the project forbids `dev ci --run`.** In a shared checkout, other members' uncommitted work fails
 the full suite, and a project can have runner preparation that must not run twice. Only the tech lead can then meet

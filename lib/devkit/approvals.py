@@ -10,8 +10,9 @@ Rules
   `dev progress step --check` from its lane whose Check starts with ✓. Otherwise it ends `unverified`, and Morpheus
   closes it with evidence or reopens it (`ending`).
 - Each finished step is approved by the Accountable member of its kind of work (`approver`). Nobody approves their
-  own work: when the doer is the approver, the Code reviewer (Seraph) approves code and configuration and the Tech
-  lead (Morpheus) everything else; when that one did it too, Morpheus, then the developer.
+  own work, nor a step they ran before a reopen (`doers`): when one who did it is the approver, the Code reviewer
+  (Seraph) approves code and configuration and the Tech lead (Morpheus) everything else; when that one did it too,
+  Morpheus, then the developer.
 - An approval is an explicit verdict on named steps that finished before it: `dev progress step --check "✓ …"
   --approves "<step>"` (`record`), the Check of a review step on the steps it comes after (`from_review`), or the
   developer's answer to a decision that names the steps (`dev crew ask --decision … --approves "<step>"`), which
@@ -65,25 +66,54 @@ def takes(member_id: str, act) -> bool:
 
 
 def approver(act, doer):
-    """Who approves a step of this kind of work that `doer` (a member id, or None) did: its Accountable member,
-    unless that is the doer; then `A_fallback` or the Code reviewer for code and configuration, the Tech lead for
-    the rest; then the Tech lead; then the developer. Never the doer. None without a kind of work."""
+    """Who approves a step of this kind of work that `doer` did (a member id or None, or every member who did it:
+    doers): its Accountable member, unless that one did it; then `A_fallback` or the Code reviewer for code and
+    configuration, the Tech lead for the rest; then the Tech lead; then the developer. Never one who did it. None
+    without a kind of work."""
     if not act:
         return None
+    did = set(doer) if isinstance(doer, (list, tuple, set, frozenset)) else {doer}
     second = act.get("A_fallback") or (REVIEWER if act.get("id") in CODE_AND_CONFIG else MAIN)
-    return next((a for a in (act.get("A"), second, MAIN, DEVELOPER) if a and a != doer), DEVELOPER)
+    return next((a for a in (act.get("A"), second, MAIN, DEVELOPER) if a and a not in did), DEVELOPER)
 
 
 def doer(run: dict, s: dict, roster=None):
-    """The member who did a step: Morpheus for the main session's own steps, else its lane's member; None when the
-    lane names no member of the roster."""
+    """The member who did a step: its lane's member; for a step the tech lead holds, the member of the last lane that
+    ran it (coord.authors: a reopen gives the step back, never its work), and Morpheus for the main session's own
+    steps; None when the lane names no member of the roster."""
+    from . import coord
     owner = s.get("owner") or "main"
     if owner == "main":
-        return MAIN
+        lanes = coord.authors(s)
+        if not lanes:
+            return MAIN
+        owner = lanes[-1]
     from . import crew
     lane = (run.get("agents") or {}).get(owner) or {}
     m = crew._for_label(lane.get("persona") or lane.get("label") or s.get("label") or "", roster)
     return m["id"] if m else None
+
+
+def doers(run: dict, s: dict, roster=None) -> list:
+    """Every member who did a step, first to last: the member of each lane that ran it (coord.authors, kept across a
+    reopen, as doer reads one), so none of them approves it; [Morpheus] for the main session's own steps. A lane
+    that names no member of the roster adds None."""
+    from . import coord, crew
+    lanes = coord.authors(s)
+    if not lanes:
+        return [MAIN]
+    out = []
+    for aid in lanes:
+        lane = (run.get("agents") or {}).get(aid) or {}
+        m = crew._for_label(lane.get("persona") or lane.get("label") or s.get("label") or "", roster)
+        if (m["id"] if m else None) not in out:
+            out.append(m["id"] if m else None)
+    return out
+
+
+def _did(run: dict, s: dict, doer_of, roster=None) -> set:
+    """The members who did step `s`: doers, and the one `doer_of` names."""
+    return {doer_of(s), *doers(run, s, roster)}
 
 
 def _who(aid, roster=None) -> str:
@@ -228,17 +258,35 @@ def owed(run: dict, doer_of=None, roster=None) -> list:
     for s in run.get("plan") or []:
         if s.get("state") != "done":
             continue
-        who = approver(raci.step_activity(s, roster), doer_of(s))
+        who = approver(raci.step_activity(s, roster), _did(run, s, doer_of, roster))
         if who and who != MAIN and not _approved(entries, s, who):
             out.setdefault(who, []).append(s.get("name") or "?")
     return sorted(out.items())
 
 
+def mark_unverified(s: dict, now: float, why: str = ""):
+    """Step `s` ends unverified now, and keeps when (`unverified_at`, exact; `ended`, when its work last ended, which
+    saw reads) and why (`unverified_why`): an approval's ✓ closes it only when given after that (record), so a verdict
+    on earlier work never closes work redone since, and its approver hears why it is unverified (unverified_reason)
+    before its ✓ counts."""
+    s.update(state="unverified", unverified_at=now, ended=now, unverified_why=str(why or "")[:300])
+
+
+def unverified_reason(s: dict) -> str:
+    """“<step>”, unverified: <why it ended unverified>, for the line of an approval that closes it."""
+    why = (s or {}).get("unverified_why") or ""
+    return f"“{(s or {}).get('name')}”, unverified" + (f": {why}" if why else "")
+
+
 def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step", check: str = "",
-           doer_of=None, roster=None) -> dict:
+           doer_of=None, roster=None, unverified: bool = False) -> dict:
     """Record `by`'s verdict ("approved" or "changes") on the named steps, in the run -> the entry. Refused, whole,
     when a step is not done, has no kind of work (so no approver), when `by` did it (self-approval) or is not its
-    approver. The developer approves through a decision that names the steps (verdicts), never here."""
+    approver. `unverified`: the caller closes the unverified steps an approval names, as a review step's ✓ closes the
+    unverified work it follows, so its approver's ✓ takes them, listed in the entry's `closes`; a ✗ still leaves them
+    unverified, refused, and so is a verdict given (`now`) before the step last ended unverified (`unverified_at`,
+    mark_unverified): it saw older work. The developer approves through a decision that names the steps (verdicts),
+    never here."""
     from . import raci
     if verdict not in VERDICTS:
         raise ApprovalError(f"the verdict is one of {', '.join(VERDICTS)}")
@@ -248,22 +296,33 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
                             "their answer with dev crew decide")
     doer_of = doer_of or (lambda s: doer(run, s, roster))
     targets = _steps(run, steps)
-    problems = []
+    problems, closes = [], []
     for s in targets:
-        if s.get("state") != "done":
+        if s.get("state") == "unverified" and unverified and verdict != "approved":
+            problems.append(f"“{s['name']}” is unverified: only its approver's ✓ closes it; a ✗ leaves it for the "
+                            f"tech lead to reopen (dev progress reopen \"{s['name']}\" --why \"…\")")
+            continue
+        closing = s.get("state") == "unverified" and unverified  # the caller ends it done, at or before this verdict
+        if closing and now < (s.get("unverified_at") or 0):
+            problems.append(f"“{s['name']}” ended unverified at {_iso(s['unverified_at'])}, after this verdict "
+                            f"({_iso(now)}): a verdict covers only the work it saw, so give it again on the new work")
+            continue
+        if closing:
+            closes.append(s["name"])
+        elif s.get("state") != "done":
             problems.append(f"“{s['name']}” is {s.get('state') or 'pending'}, not done: Morpheus closes it with "
                             f"evidence first (dev progress step --step \"{s['name']}\" --check \"…\")")
             continue
-        if not s.get("finished"):
+        if not closing and not s.get("finished"):
             problems.append(f"“{s['name']}” has no finish time, so no approval can be shown to come after its "
                             f"work: dev progress reopen \"{s['name']}\" --why \"…\", then close it with evidence")
             continue
-        did = doer_of(s)
+        did = _did(run, s, doer_of, roster)
         should = approver(raci.step_activity(s, roster), did)
         if should is None:  # no kind of work: devkit cannot tell who approves it, so nobody may
             problems.append(f"“{s['name']}” has no kind of work, so devkit cannot tell who approves it: declare one "
                             f"(dev progress assign \"{s['name']}\" --to <member> --activity <id>), then approve it")
-        elif did == by:
+        elif by in did:
             problems.append(f"self-approval: {_who(by, roster)} did “{s['name']}”, and {_who(should, roster)} "
                             f"approves it")
         elif should and should != by:
@@ -274,6 +333,8 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
     entry = {"ts": now, "by": by, "steps": [s["name"] for s in targets], "verdict": verdict, "via": via}
     if check:
         entry["check"] = str(check)[:300]
+    if closes:
+        entry["closes"] = closes
     run["approvals"] = [a for a in run.get("approvals") or []][-399:] + [entry]
     return entry
 
@@ -294,9 +355,87 @@ def is_review(s: dict, roster=None) -> bool:
     return bool(m and m.get("tools") == "review")
 
 
-def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster=None):
+def began(run: dict, s: dict):
+    """When review step `s` began in the lane that holds it: when that lane moved to it. The lane takes it (`taken`)
+    when it is assigned or its work ends, even while it still runs an earlier review, since reviews share a lane; it
+    moves to it once each step it held open then has let go of the lane (_let_go), so work that ended while the lane
+    was still on the earlier step is work this review saw. Until then, a review still open began at nothing yet
+    (None); one that ended no later than such a step (one report ends them all) began when the lane took it, since
+    when it moved to it is unknown. Without `taken` (a step recorded before steps kept it), the later of the lane's
+    start and the step's. A reopened review keeps its first start. None when nothing is known."""
+    owner = s.get("owner") or ""
+    lane = (run.get("agents") or {}).get(owner) or {}
+    took = s.get("taken") or s.get("started")
+    times = [t for t in (lane.get("started"), took) if isinstance(t, (int, float))]
+    if not times:
+        return None
+    since = max(times)
+    if not isinstance(took, (int, float)):
+        return since
+    ends = []
+    for x in run.get("plan") or []:
+        t = x.get("taken") or x.get("started") if isinstance(x, dict) else None
+        if x is s or not isinstance(t, (int, float)) or t >= took or x.get("owner") != owner:
+            continue  # another lane's, or one the lane took with this review or after it
+        end = _let_go(run, x)
+        if end is None or end > took:
+            ends.append(end)  # the lane still held it when it took this review
+    if not ends:
+        return since
+    mine = _let_go(run, s)
+    if None in ends or (mine is not None and max(ends) >= mine):
+        return None if mine is None else since
+    return max([since] + ends)
+
+
+def _let_go(run: dict, x: dict):
+    """When the lane that owns step `x` was done with it: its first `dev progress step --step <x> --check …` since it
+    took it (a review stays running after its member's verdict, until the report), else when the step stopped holding
+    the lane: a done or skipped step when it finished, an unverified one when it ended so, a blocked one when it was
+    blocked (the run's history). None while it runs with no verdict; 0 when the record does not say: long ago."""
+    state = x.get("state")
+    if state == "running":
+        t = None
+    elif state in ("done", "skipped"):
+        t = x.get("finished")
+    elif state == "unverified":
+        t = x.get("ended") or x.get("unverified_at")
+    elif state == "blocked":
+        t = next((h.get("ts") for h in reversed(run.get("history") or []) if isinstance(h, dict)
+                  and h.get("step") == x.get("name") and h.get("to") == "blocked"), None)
+    else:
+        t = 0
+    t = t if isinstance(t, (int, float)) or t is None else 0
+    took = x.get("taken") or x.get("started") or 0
+    lane = (run.get("agents") or {}).get(x.get("owner") or "") or {}
+    said = next((u["ts"] for u in lane.get("updates") or [] if isinstance(u, dict) and u.get("kind") == "step"
+                 and u.get("step") == x.get("name") and str(u.get("check") or "").strip()
+                 and isinstance(u.get("ts"), (int, float)) and u["ts"] >= took - 1), None)  # updates keep whole seconds
+    return said if said is not None and (t is None or said < t) else t
+
+
+def saw(run: dict, review: dict, x: dict, closed=()) -> bool:
+    """Did review step `review` see the work of step `x` it follows? Only when that work last ended (`ended`) before
+    the review began (began). A close of unverified work (the tech lead's evidence, an approval's ✓, a review's ✓)
+    does not move when that work ended, so it never hides work from a review that saw it; work reopened or taken again
+    by a new launch since ends later, so a verdict on the old work neither closes nor approves it. A step saved
+    before steps kept `ended`: when it last ended unverified (mark_unverified), for one the review's ✓ has just closed
+    (`closed`) too, else when it finished. True when the review cannot be dated."""
+    since = began(run, review)
+    if since is None:
+        return True
+    end = x.get("ended")
+    if end is None:
+        old = x.get("state") == "unverified" or x.get("name") in closed
+        end = x.get("unverified_at") if old else x.get("finished")
+    return (end or 0) <= since
+
+
+def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster=None, closed=(), unseen=()):
     """A review step (is_review) ended with this Check: its doer's verdict on the steps it comes after that they
-    approve -> the entry, or None when it is not a review, has no verdict, or follows none of theirs."""
+    approve and that it saw (saw; `closed`: the unverified ones its ✓ just closed; `unseen`: those that got work
+    since it began, which the caller found in the work records) -> the entry, or None when it is not a review, has
+    no verdict, or follows none of theirs."""
     from . import raci
     if not is_review(s, roster):
         return None
@@ -308,8 +447,9 @@ def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster
         return None
     by_name = {x.get("name"): x for x in run.get("plan") or []}
     mine = [x["name"] for x in (by_name.get(n) for n in s.get("after") or [])
-            if x and x.get("state") == "done" and doer_of(x) != who and
-            approver(raci.step_activity(x, roster), doer_of(x)) == who]
+            if x and x.get("state") == "done" and who not in _did(run, x, doer_of, roster) and
+            approver(raci.step_activity(x, roster), _did(run, x, doer_of, roster)) == who and saw(run, s, x, closed)
+            and x["name"] not in unseen]
     if not who or not mine:
         return None
     return record(run, who, mine, verdict, now, via="review", check=check, doer_of=doer_of, roster=roster)
@@ -523,6 +663,8 @@ def apply(run: dict, moves: list, now: float) -> list:
             if not s or s.get("state") != m["from"] or (s.get("owner") or "main") != m["owner_from"]:
                 continue
             s.update(state=m["to"], owner=m["owner"])
+            if m["to"] == "unverified":
+                mark_unverified(s, now, m["why"])
             if m["to"] == "pending" and m["owner"] == "main":
                 s.update(lost_from=m["owner_from"], lost_at=now)  # taken back after new work only (_worked_since)
                 s.pop("waiting", None)  # back with Morpheus: no decision blocks it any more

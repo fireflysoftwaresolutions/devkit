@@ -329,6 +329,57 @@ class LaneCommitTests(Lanes):
         self.assertEqual(self.committed(), {("M", "lib/rules.py"), ("M", "README.md")})
         self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
 
+    def test_a_commit_two_lanes_typed_alike_is_refused_with_what_to_do_and_nothing_moves(self):
+        # the open calls of two members hold this very command and no lane mark says whose it is: devkit acts as
+        # neither, and says so as a refusal with the way out, not as a crash of its own
+        theirs = self.ghost_stages()
+        self.write("lib/rules.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/rules.py")
+        head = git(self.repo, "rev-parse", "HEAD")
+        argv = ["commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE]
+        twin = progress.CALLS / SID / "toolu_2.json"
+        twin.parent.mkdir(parents=True, exist_ok=True)
+        twin.write_text(json.dumps({"tool_use_id": "toolu_2", "caller": GHOST, "ts": time.time(), "ttl": 3600,
+                                    "cmd": "dev " + " ".join(shlex.quote(x) for x in argv)}))
+        rc, out, err = self.dev(KEY, *argv)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("Keymaker", err)
+        self.assertIn("Ghost", err)
+        self.assertIn("as a command of its own", err)
+        self.assertNotIn("<paths>", err)  # the form that checks no lane's scope is no way out for an unknown caller
+        self.assertIn("dev crew owner", err)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
+        self.assertIn("lib/rules.py", self.staged())
+
+    def test_a_lane_whose_scope_names_another_worktree_owns_no_file_of_this_checkout(self):
+        # two members own lib/** in two checkouts (scopes given as worktree paths): the Security engineer's in the
+        # worktree, the Technical writer's in the main checkout. A commit the Security engineer runs in the main
+        # checkout takes none of the Technical writer's staged files there, as `dev crew owner` holds them hers
+        wt = self.root / "widget-wt"
+        git(self.repo, "worktree", "add", "-q", "-b", "fix/other", str(wt))
+        f = progress.RUNS / f"claude-{SID}.json"
+        run = json.loads(f.read_text())
+        run["plan"] = [{"name": "rules", "owner": KEY, "state": "running", "scope": ["lib/**"], "checkout": str(wt)},
+                       {"name": "docs", "owner": GHOST, "state": "running", "scope": ["lib/**"],
+                        "checkout": str(self.repo)}]
+        f.write_text(json.dumps(run))
+        self.write("lib/rules.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/rules.py")
+        theirs = self.entries("lib/rules.py")
+        head = git(self.repo, "rev-parse", "HEAD")
+        rc, out, err = self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn(f"counts in {core.tilde(str(wt))}", err)  # where its files are, and so where to commit
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+        self.assertEqual(self.entries("lib/rules.py"), theirs)
+        (wt / "lib" / "rules.py").write_text("RULES = 3\n")
+        git(wt, "add", "lib/rules.py")
+        os.chdir(wt)
+        rc, out, err = self.dev(KEY, "commit", "-m", "fix(rules): read the rules once", "--cause", CAUSE)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(git(wt, "show", "--name-only", "--format=", "HEAD"), "lib/rules.py")
+
 
 if __name__ == "__main__":
     unittest.main()

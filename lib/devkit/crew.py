@@ -791,12 +791,13 @@ def _who_label(label, roster=None) -> str:
 
 
 def ready_view(run: dict, roster=None) -> dict:
-    """dispatch.ready() as plain data: what Morpheus can launch now, what is queued or waiting and why, who is busy."""
-    from . import dispatch, progress
+    """dispatch.ready() as plain data: what Morpheus can launch now, what is queued or waiting and why, who is busy
+    and on which steps (the ones its lane runs now, which a resumed lane took after the step its launch named)."""
+    from . import coord, dispatch, progress
     r = dispatch.ready(run)
     step = lambda s: {"step": s["name"], "member": s.get("label") or "", "who": _who_label(s.get("label"), roster),  # noqa: E731
-                      "scope": s.get("scope") or [], "requested_by": s.get("requested_by") or "",
-                      "order": r["why"].get(s["name"], "")}
+                      "scope": s.get("scope") or [], "checkout": s.get("checkout") or "",
+                      "requested_by": s.get("requested_by") or "", "order": r["why"].get(s["name"], "")}
     b = r["slots"]
     return {"free": r["free"], "max_parallel": r["limit"],  # the effective limit: lower while the quota is short
             "slots": {"used": b["used"], "limit": b["limit"], "max": b["max"], "reserve": b["reserve"],
@@ -806,7 +807,9 @@ def ready_view(run: dict, roster=None) -> dict:
             "waiting": [dict(step(s), why=why) for s, why in r["waiting"]],
             "busy": [{"member": (_for_lane(lane, roster) or {}).get("name") or lane.get("persona") or "",
                       "who": _who_label(lane.get("persona") or lane.get("label"), roster),
-                      "label": lane.get("label") or "", "scope": lane.get("scope") or []} for _, lane in r["busy"]]}
+                      "label": lane.get("label") or "", "scope": lane.get("scope") or [],
+                      "checkout": progress.lane_home(run, aid),
+                      "steps": [s["name"] for s in coord.held(run, aid)]} for aid, lane in r["busy"]]}
 
 
 def _when(ts) -> str:
@@ -973,6 +976,22 @@ def _step_name(step) -> str:
     return "" if w.isdigit() else w
 
 
+def _folder_step(step_name: str) -> str:
+    """The step whose lane folder a brief names: `step_name`, or '' when another step of the current session's run
+    gives its lanes the same scratch folder (progress.folder_twin, a run saved before such names were refused), so
+    the brief names the member's plain folder, the one its lane writes in (progress.lane_scratch). `step_name` too
+    when the run cannot be read (a record that does not parse, is busy or cannot be opened) or the session cannot be
+    named; any other error is a defect, and it surfaces."""
+    from . import messaging, progress, state
+    try:
+        run = progress.load_run(*progress.current_session())
+    except (OSError, state.StateBusy, messaging.MessageError, progress.CodexSessionError):
+        return step_name
+    plan = progress.normalize(run or {}).get("plan") or []
+    s = next((x for x in plan if isinstance(x, dict) and x.get("name") == step_name), None)
+    return "" if s and progress.folder_twin(plan, step_name, skip=s) else step_name
+
+
 def show_text(m: dict, roster=None) -> str:
     roster = roster or load()
     tier = {"strong": "the session's model at high effort", "standard": "the session's model and effort",
@@ -1104,7 +1123,8 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
         pid = core.project_identity(main_, core.gitout(main_, "config", "--get", "remote.origin.url"))[0] or ""
     branch = (core.gitout(cwd, "rev-parse", "--abbrev-ref", "HEAD") if top else "") or "<branch>"
     globs = [g.strip() for g in (scope or "").split(",") if g.strip()]
-    head = [ui.section(f"Brief for {who(m)}")] + [f"  {ln}" for ln in _spawn_lines(m, codex_task_name(_step_name(step)))]
+    step_name = _step_name(step)
+    head = [ui.section(f"Brief for {who(m)}")] + [f"  {ln}" for ln in _spawn_lines(m, codex_task_name(step_name))]
     if step is not None and str(step).strip():
         w = str(step).strip()
         head.append(f"  Link the lane dev progress assign {w if w.isdigit() else _dq(w)} --to {_dq(m['name'])}"
@@ -1119,9 +1139,14 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     else:
         b.append("The files this task needs and nothing beyond them. Ask the tech lead before you widen it: "
                  '`dev crew ask "<question>"`.')
-    # each member keeps its scratch files in its own folder of the session scratchpad, so none overwrites another's
-    b += ["", f"Your scratch folder is `scratchpad/{m['id']}/` in the session scratchpad: put logs, probes and other "
-              "temporary files there, never at the scratchpad's top level or in another member's folder."]
+    # each lane keeps its scratch files in its own folder of the session scratchpad, for its step when it has one
+    # (progress.scratch_names, the folder the launch hook makes), so no lane overwrites another's, not even one of
+    # the same member; a step whose name gives another step's folder has none (_folder_step)
+    from . import progress
+    folder = (progress.scratch_names(m["id"], _folder_step(step_name)) or [m["id"]])[0]
+    b += ["", f"Your scratch folder is `scratchpad/{folder}/` in the session scratchpad: put logs, probes and other "
+              "temporary files there, never at the scratchpad's top level or in another member's or another lane's "
+              "folder."]
     from . import raci
     act = _brief_activity(m, task, step, roster, activity=activity, globs=globs)
     if act:  # the declaration the launch hook and the crew gates read, whatever language the task is written in
@@ -1951,8 +1976,10 @@ def _next(a=None, me=None) -> int:
         print("\n".join(f"  {s.get('who') or s['member']}: {s['step']} · {s['why']}" for s in v["waiting"]))
     if v["busy"]:
         print(ui.section("Busy"))
-        print("\n".join(f"  {ui.ACTIVE} {b.get('who') or b['member'] or 'subagent'} · {task_of(b['label'])}"
-                        + (f" · scope {', '.join(b['scope'])}" if b["scope"] else "") for b in v["busy"]))
+        print("\n".join(f"  {ui.ACTIVE} {b.get('who') or b['member'] or 'subagent'} · "
+                        f"{', '.join(b.get('steps') or []) or task_of(b['label'])}"
+                        + (f" · scope {', '.join(b['scope'])}{progress._in_checkout(b['checkout'])}"
+                           if b["scope"] else "") for b in v["busy"]))
     if not (v["launch"] or v["queued"] or v["waiting"] or v["busy"]):
         print("  nothing assigned to the crew: dev crew route --plan, or dev crew delegate \"<task>\"")
     if mode == "auto" and v["launch"]:
@@ -2179,11 +2206,16 @@ def _raci_cmd(a) -> int:
 def _owner_cmd(a) -> int:
     """`dev crew owner <path>…`: who holds each path now, as the edit check decides it (progress.scope_holders):
     exit 0 when every path is free, 1 while a working member holds one. Reads only."""
-    from . import progress
+    from . import identity, progress
     cwd, now = os.getcwd(), time.time()
     agent, sid = progress.current_session(cwd)
-    me = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT"), cwd)
-    if not me:  # the audit's context: a member's lane, the main session, or a caller devkit cannot tie to a lane
+    unsure = False
+    try:
+        me = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT"), cwd)
+    except identity.IdentityError as e:  # it reads as no lane: every holder is named, the caller's own lane too
+        ui.warn(f"{e}. Until then every lane that holds a path is named, yours too")
+        me, unsure = "", True
+    if not me and not unsure:  # the audit's context: a member's lane, the main session, or a caller of no lane
         from . import audit
         c = audit.context().get("crew") or {}
         me = c.get("lane") or ("" if c else "main")

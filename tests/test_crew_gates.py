@@ -383,6 +383,34 @@ class CrewGateTests(GateCase):
         self.tx = Transcript(Path(self.tmp.name) / "agent-alone.jsonl")
         self.assertEqual(self.proofs_with("dev test 2>&1", successful=True), [])  # joined stderr keeps its exit code
 
+    def test_a_piped_step_record_counts_once_its_lane_holds_it_and_its_hidden_exit_code_is_kept(self):
+        # the Technical researcher's `dev progress step … | tail -3` recorded its step, yet the gates sent it back
+        # as if it had not: the lane's own record of that update is the proof, and the audit keeps the warning
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_progress import TempState, launch
+        step = 'dev progress step "built it" --step calc --check "✓ 12 tests pass"'
+        with TempState():
+            pg.start("Work", plan=["calc=10m"])
+            pg.assign("calc", "Kid", why="test")
+            launch("a1", "devkit:kid", "Kid: calc")
+            self.write("calc.py", "def add(a, b):\n    return a + b\n")
+            self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+            self.tx.bash("dev test")
+            self.tx.bash(f"{step} 2>&1 | tail -3")
+            transcript = self.tx.save()
+
+            def proofs(accepted):
+                return self.rules(f for f in gates.crew_gates(KID, transcript, str(self.repo), session="s1",
+                                                              lane="a1", accepted=accepted, successful=True)
+                                  if f["rule"] == "proofs")
+            self.assertEqual(proofs([]), [("proofs", "dev progress step")])  # refused, or never ran: not recorded
+            pg.step("built it", which="calc", check="✓ 12 tests pass", from_agent="a1")
+            accepted = []
+            self.assertEqual(proofs(accepted), [])
+            self.assertEqual([a["proof"] for a in accepted], ["dev progress step"])
+            self.assertIn("piped into `tail -3`", accepted[0]["how"])
+            self.assertIn("its own exit code", accepted[0]["how"])
+
     def test_a_proof_run_through_the_python_interpreter_counts(self):
         self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
         self.tx.bash("python3 bin/dev test")

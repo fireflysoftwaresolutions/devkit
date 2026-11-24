@@ -120,6 +120,21 @@ class ClaimTests(unittest.TestCase):
                      {"L": lane("Tank")})
         self.assertIsNone(coord.claimable(run, "L", member_wide=False, review=review))
 
+    def test_a_review_never_goes_to_a_lane_of_the_member_that_did_the_work_it_follows(self):
+        work = step("api", "done", "L", "Tank")
+        rv = step("review-api", label="Tank", after=["api"], activity="review",
+                  intent={"member": "Tank", "lane": None, "ts": T})
+        fix = step("fix-api", label="Tank", after=["api"], intent={"member": "Tank", "lane": None, "ts": T + 1})
+        run = run_of([work, rv, fix], {"L": lane("Tank"), "L2": lane("Tank"), "S": lane("Seraph")})
+        self.assertEqual((coord.independent(run, rv, "Tank"), coord.independent(run, rv, "tank"),
+                          coord.independent(run, rv, "Seraph")), (False, False, True))
+        self.assertEqual(coord.claimable(run, "L", review=review)["name"], "fix-api")  # more work: its own lane's
+        self.assertEqual(coord.claimable(run, "L2", review=review)["name"], "fix-api")  # the same member's work too
+        run = run_of([work, rv], {"L": lane("Tank"), "L2": lane("Tank")})
+        self.assertIsNone(coord.claimable(run, "L", review=review))
+        self.assertIsNone(coord.claimable(run, "L2", review=review))
+        self.assertEqual(coord.check(run, T, review=review), [])  # free, yet nothing waits for it
+
     def test_a_claim_runs_the_step_in_the_lane_removes_its_intent_and_records_why(self):
         run = run_of(self.plan(), {"L": lane("Tank")})
         s = coord.claim(run, "L", T + 30, "its lane holds no other step", review=review)
@@ -190,6 +205,9 @@ class CheckTests(unittest.TestCase):
             "I-claim": lambda r: (r["plan"][0].update(state="done"),
                                   r["plan"].append(step("next", label="Tank", assigned_at=T))),
             "I-history": lambda r: r.update(step=0),
+            # Tank's lane reviews its own doc
+            "I-independent": lambda r: r["plan"].append(step("review-doc", "running", "L", "Tank", after=["doc"],
+                                                             activity="review")),
         }
         for rule, breaks in cases.items():
             run = self.sound()
