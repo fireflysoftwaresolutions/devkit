@@ -61,13 +61,16 @@ class ReleaseFragmentsTests(unittest.TestCase):
     def test_dev_release_on_a_release_branch_named_after_a_tagged_version_refuses_and_writes_nothing(self):
         git(self.s.repo, "tag", "v26.11.27")
         git(self.s.repo, "push", "-q", "origin", "--tags")
-        for branch, args in (("release/26.11.27", ()), ("hotfix/26.11.27", ()),
-                             ("hotfix/login", ("--version", "26.11.27"))):
-            with self.subTest(branch=branch):
+        for branch, args, only_on_origin in (("release/26.11.27", (), False), ("hotfix/26.11.27", (), True),
+                                             ("hotfix/login", ("--version", "26.11.27"), False)):
+            with self.subTest(branch=branch, only_on_origin=only_on_origin):
                 git(self.s.repo, "reset", "-q", "--hard")
                 git(self.s.repo, "switch", "-q", "main")
                 self.s.branch(branch)
                 self.s.commit("fix: keep the login", {"changes/fix-login.md": LOGIN})
+                if only_on_origin:  # another clone released it: dev release fetches the tags before it checks
+                    git(self.s.repo, "tag", "-d", "v26.11.27")
+                    self.assertEqual(git(self.s.repo, "tag", "--list"), "")
                 rc, out, err = dev("release", *args)
                 self.assertEqual(rc, 2, out + err)
                 self.assertIn("tag v26.11.27 already exists", err)
