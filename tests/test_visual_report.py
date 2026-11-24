@@ -223,9 +223,10 @@ class ProductReport(unittest.TestCase):
                       "Capture it here: dev visual capture --again VC-g33z1c5h8j", capture_view.text())
         self.assertEqual(list(capture_view.find("img")), [])
 
-    # a record names the Mac by its machine id; the report names it as the dashboard does, the name its presence
-    # publishes with the id, in the note where the picture is missing and in the capture's details
-    def test_a_capture_from_another_mac_names_it_by_its_published_name_and_its_id(self):
+    # a record names the Mac by its machine id, and the report names it as the dashboard does: by that id, never by a
+    # name its presence publishes (a hostname often names the person), in the note where the picture is missing and in
+    # the capture's details
+    def test_a_capture_from_another_mac_names_it_by_its_id_never_a_published_name(self):
         records_dir, store = fixture_copy(self)
         path = records_dir / "captures" / "VC-g33z1c5h8j.json"
         rec = json.loads(path.read_text())
@@ -236,8 +237,9 @@ class ProductReport(unittest.TestCase):
                 mock.patch.object(identity, "machine", lambda now=None: identity.Machine("m-test0001", "laptop", {})):
             root = Tree(report.render_html(report.load(records_dir, store, PRODUCT))).root
         text = " ".join(root.one("section", id="VC-g33z1c5h8j").text().split())
-        self.assertIn("Captured on studio (m-studio01) by Frontend engineer (Trinity). The picture stays on that Mac.", text)
-        self.assertRegex(text, r"Taken: [\d-]+ [\d:]+ by Frontend engineer \(Trinity\) on studio \(m-studio01\)")
+        self.assertIn("Captured on another Mac (m-studio01) by Frontend engineer (Trinity). The picture stays on that Mac.", text)
+        self.assertRegex(text, r"Taken: [\d-]+ [\d:]+ by Frontend engineer \(Trinity\) on another Mac \(m-studio01\)")
+        self.assertNotIn("studio (", text)
         self.assertNotRegex(text, r"on m-studio01")
 
     def test_vd_ac_25_the_verified_finding_shows_before_after_and_difference(self):
@@ -476,9 +478,9 @@ class MacNamesInAFindingsHistory(unittest.TestCase):
         detail = root.one("article", id=self.REOPENED)
         state = " ".join(detail.one("p", class_="state").text().split())
         history = [" ".join(li.text().split()) for li in detail.one("ol", class_="history").find("li")]
-        self.assertIn("picture before was taken on studio (m-studio01) and is not on this Mac. Reopened.", state)
+        self.assertIn("picture before was taken on another Mac (m-studio01) and is not on this Mac. Reopened.", state)
         self.assertIn("picture before was taken on another Mac (m-laptop02) and is not on this Mac", history[-2])
-        self.assertIn("picture before was taken on studio (m-studio01) and is not on this Mac", history[-1])
+        self.assertIn("picture before was taken on another Mac (m-studio01) and is not on this Mac", history[-1])
         self.assertNotRegex(detail.text(), r"taken on m-")
 
 
@@ -505,7 +507,7 @@ class ReviewerWordsInAFindingsHistory(unittest.TestCase):
         history = [" ".join(li.text().split()) for li in root.one("article", id=self.REOPENED).one(
             "ol", class_="history").find("li")]
         self.assertTrue(history[-2].endswith(": the m-dropdown menu overlaps the header at m-1440wide"), history[-2])
-        self.assertIn("picture before was taken on studio (m-studio01) and is not on this Mac", history[-1])
+        self.assertIn("picture before was taken on another Mac (m-studio01) and is not on this Mac", history[-1])
         self.assertEqual({"m-studio01", "m-dropdown", "m-1440wide"} & set(audit["macs"]), {"m-studio01"})
 
 

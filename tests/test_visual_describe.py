@@ -417,7 +417,7 @@ class DescribeCommandTest(PlantedCase):
         (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
         rc, out, err = self.dev("describe", c["id"])
         self.assertEqual(rc, 1)
-        self.assertIn(f"The description of {c['id']} is not on this Mac: it was taken on studio (m-studio01). Capture it "
+        self.assertIn(f"The description of {c['id']} is not on this Mac: it was taken on another Mac (m-studio01). Capture it "
                       f"again here: dev visual capture --again {c['id']}", " ".join(err.split()))
 
 
@@ -432,7 +432,7 @@ class MarksCommandTest(PlantedCase):
         (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
         rc, out, err = self.dev("marks", c["id"])
         self.assertEqual(rc, 1)
-        self.assertIn(f"The picture of {c['id']} is not on this Mac: it was taken on studio (m-studio01). Capture it "
+        self.assertIn(f"The picture of {c['id']} is not on this Mac: it was taken on another Mac (m-studio01). Capture it "
                       f"again here: dev visual capture --again {c['id']}", " ".join(err.split()))
 
     def test_marks_cuts_viewport_high_tiles_and_one_marked_copy_whose_marks_name_elements(self):

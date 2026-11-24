@@ -269,7 +269,7 @@ class PictureNotHere(unittest.TestCase):
             said[where] = str(cm.exception)
         again = f"Capture it here: dev visual capture --again {BEFORE}"
         self.assertEqual(said, {"m-test0001": f"The picture of {BEFORE} is no longer in this Mac's store. {again}",
-                                "m-studio01": f"The picture of {BEFORE} is not on this Mac: it was taken on studio "
+                                "m-studio01": f"The picture of {BEFORE} is not on this Mac: it was taken on another Mac "
                                               f"(m-studio01). {again}"})
 
 

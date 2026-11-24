@@ -282,26 +282,21 @@ def this_mac():
 
 
 def mac_name(host) -> str:
-    """A Mac a visual record names, as a message a person reads names it: the way the dashboard does (work.display),
-    its short name with the machine id in parentheses, `studio (m-0000beef)`. This Mac's id reads as this Mac's short
-    hostname now; another Mac's as the label its presence in the handoff repository publishes; an id with neither, or
-    whose label is not a plain short hostname, as `another Mac (m-…)`. A record from before the machine id names a
-    hostname already, which another Mac wrote: it stays when it is a plain short hostname (work._LABEL), as a presence
-    label does, and is "another Mac" otherwise, so no control character reaches a terminal or the report; no name at
-    all is "another Mac". For messages only: records keep the id."""
-    from .. import work
+    """A Mac a visual record names, as a message a person reads names it, the way the dashboard does (work.display):
+    by its machine id, never by a hostname devkit would have to look up, since a hostname often names the person and
+    messages land in shared reports and logs. This Mac is `this Mac (m-…)`; another one `another Mac (m-…)`. A record
+    from before the machine id names a hostname already, which another Mac wrote: it stays when it is a plain short
+    hostname, as work.display keeps such a record as written, and is "another Mac" otherwise, so no control character
+    reaches a terminal or the report; no name at all is "another Mac". For messages only: records keep the id."""
     host = str(host or "").strip()
     if not host:
         return "another Mac"
     if not identity.MACHINE_ID.fullmatch(host):
-        return host if work._LABEL.fullmatch(host) else "another Mac"
-    users = ["me"] if host == identity.machine().id else \
-        [p.name[:-len(f"@{host}.json")] for p in sorted(work.PRESENCE.glob(f"*@{host}.json"))]
-    for user in users:
-        name = work.display(f"{user}@{host}").partition("@")[2]
-        if name != host:
-            return f"{name} ({host})"
-    return f"another Mac ({host})"
+        return host if _HOSTNAME.fullmatch(host) else "another Mac"
+    return f"this Mac ({host})" if host == identity.machine().id else f"another Mac ({host})"
+
+
+_HOSTNAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # a plain short hostname, the only kind an older record shows
 
 
 def _check(m: dict) -> None:

@@ -188,7 +188,7 @@ class RecordTest(base.StoreCase):
         then = ("so devkit cannot tell whether the page still lays out as its picture shows. Nothing was changed. "
                 f"Capture it again here, with its own signals: dev visual capture --again {c['id']}")
         for where, said in (("m-test0001", "is no longer in this Mac's store"),
-                            ("m-studio01", "is not on this Mac: it was taken on studio (m-studio01)")):
+                            ("m-studio01", "is not on this Mac: it was taken on another Mac (m-studio01)")):
             with self.subTest(where=where):
                 rec = self.record(c["id"])
                 rec["image"]["where"] = f"local:{where}"

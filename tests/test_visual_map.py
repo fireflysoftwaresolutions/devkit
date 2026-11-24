@@ -65,12 +65,15 @@ class MacNameTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def test_this_macs_id_reads_as_its_short_name_with_the_id(self):
-        self.assertEqual(vmap.mac_name("m-test0001"), f"{HOST} (m-test0001)")
+    # a Mac reads by its machine id, never by a hostname devkit looks up: a hostname often names the person, and
+    # these messages land in shared reports and logs (work.display)
+    def test_this_macs_id_reads_as_this_mac_with_the_id(self):
+        self.assertEqual(vmap.mac_name("m-test0001"), "this Mac (m-test0001)")
+        self.assertNotIn(HOST, vmap.mac_name("m-test0001"))
 
-    def test_another_macs_id_reads_as_the_name_its_presence_publishes(self):
-        presence(self.tmp / "presence", "bob@m-studio01", "studio")
-        self.assertEqual(vmap.mac_name("m-studio01"), "studio (m-studio01)")
+    def test_another_macs_id_never_reads_as_a_name_its_presence_publishes(self):
+        presence(self.tmp / "presence", "bob@m-studio01", "studio")  # an older devkit's presence still carries one
+        self.assertEqual(vmap.mac_name("m-studio01"), "another Mac (m-studio01)")
 
     # a Mac with no presence here, or one whose label is not a plain short hostname (presence is another person's
     # text), is another Mac with its id; a record from before the machine id names a hostname, and keeps it
@@ -150,7 +153,7 @@ class MapTest(unittest.TestCase):
         presence(self.tmp / "presence", "kid@m-studio01", "studio")
         with mock.patch.object(work, "PRESENCE", self.tmp / "presence"), self.assertRaises(vmap.MapConflict) as cm:
             vmap.save(P, stale, base=1, why="crawl from /", by="neo")
-        self.assertEqual(str(cm.exception), "The map changed to v2 on studio (m-studio01). Run the command again on v2.")
+        self.assertEqual(str(cm.exception), "The map changed to v2 on another Mac (m-studio01). Run the command again on v2.")
         self.assertFalse((self.dir / "map" / "v3.json").exists())
         self.assertEqual(vmap.load(P)["version"], 2)
         self.assertFalse(vmap.load(P)["partial"])

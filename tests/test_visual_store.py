@@ -833,7 +833,7 @@ class ShareTest(StoreCase):
         presence(self.tmp / "presence", "bob@m-studio01", "studio")
         with self.assertRaises(store.VisualError) as e:
             store.share(P, f["id"])
-        self.assertEqual(str(e.exception), f"The picture of {c['id']} is not on this Mac: it was taken on studio "
+        self.assertEqual(str(e.exception), f"The picture of {c['id']} is not on this Mac: it was taken on another Mac "
                                            f"(m-studio01). Share it from there, or capture it here: dev visual capture "
                                            f"--again {c['id']}")
 
@@ -908,7 +908,7 @@ class FindingOnADescriptionNotHereTest(StoreCase):
         then = f"so its elements cannot be read. Capture it here: dev visual capture --again {c['id']}"
         self.assertEqual(said, {
             "m-test0001": f"The description of {c['id']} is no longer in this Mac's store, {then}",
-            "m-studio01": f"The description of {c['id']} is not on this Mac: it was taken on studio (m-studio01), {then}"})
+            "m-studio01": f"The description of {c['id']} is not on this Mac: it was taken on another Mac (m-studio01), {then}"})
 
 
 # --------------------------------------------------------------------------- records read, replays, the driver
