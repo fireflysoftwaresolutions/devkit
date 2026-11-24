@@ -270,9 +270,10 @@ never touched):
    `.mjs`, `.cjs`, `.mts`, `.cts`, `.vue`, or `.svelte`) whose lines outside its tests differ from the base, a fix
    inside a helper's body or a hook too, keeps its change: the run without your change runs it as it is now. A test
    of it that fails there proves your production change, on any error, because only the production change was
-   undone. A test that passes is "cannot be proven: its module keeps its change: devkit rebuilds only Python test
-   modules." A module whose only change is its tests (each with the comment and blank lines that directly precede
-   it) has nothing to rebuild. devkit's own JavaScript reader could not tell reliably where a helper's body or a
+   undone, unless it imports a changed test helper file, where the rule for test support above applies. A test
+   that passes is "cannot be proven: its module keeps its change: devkit rebuilds only Python test modules." A
+   module whose only change is its tests (each with the comment and blank lines that directly precede it) has
+   nothing to rebuild. devkit's own JavaScript reader could not tell reliably where a helper's body or a
    template literal ends, and a misread could put a base fixture back under a new test; rebuilding these modules
    safely would take a real JavaScript parser.
 

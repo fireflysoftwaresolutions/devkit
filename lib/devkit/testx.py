@@ -5460,6 +5460,9 @@ _PROVE_OWNER = re.compile(r"devkit-prove-(?:git-)?(\d+)-")
 PROVE_COPY_DAYS = 1
 
 
+_REMOVE_PASSES = 256  # _remove_tree's passes: one per level of folders a stopped test left locked
+
+
 def _remove_tree(path) -> bool:
     """Remove folder `path` with all it holds, read-only and unreadable folders a test left in it too: a removal
     refused there makes the folder and what failed readable and writable for their owner and is tried again. A pass
@@ -5483,10 +5486,12 @@ def _remove_tree(path) -> bool:
                 func(p)
             except OSError:
                 pass
-    while os.path.lexists(path):
+    for _ in range(_REMOVE_PASSES):  # bounded: a process still running in the copy could keep locking new folders
+        if not os.path.lexists(path):
+            break
         unlocked.clear()
         shutil.rmtree(path, onerror=unlock)
-        if not unlocked:  # each pass unlocks something new or ends: modes only rise, so the passes end
+        if not unlocked:  # each pass unlocks something new or ends
             break
     return not os.path.lexists(path)
 

@@ -895,7 +895,7 @@ def locked_chain(root, name, modes):
 def unlock_all(root):
     """Give every folder under `root` back to its owner, outermost first, so a temporary folder can go."""
     try:
-        os.chmod(root, 0o700)
+        os.chmod(root, stat.S_IRWXU)
         entries = list(os.scandir(root))
     except OSError:
         return
