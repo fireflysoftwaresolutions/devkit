@@ -3,6 +3,404 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.28] - 2026-11-23
+
+### Added
+
+- Work on Vue, Svelte, ASP.NET Core, SwiftUI and Android asks the agent to load that stack's skill:
+  vue-best-practices, svelte-core-bestpractices, dotnet-webapi, swiftui-pro, android-permissions-security and
+  jetpack-compose-performance, pinned at reviewed commits. Next.js work points the agent at the docs Next.js ships
+  with the installed version (`node_modules/next/dist/docs/`) instead of a separate skill.
+- A `mobile` skill for iOS and Android apps; the Mobile engineer loads it with the platform skills instead of only
+  the web design skills.
+- The backend skill covers .NET, Go, Rust and Ruby. Their route code, migrations, and web or database dependencies
+  require it, and Rails and EF Core migrations on Postgres require the Postgres skill.
+- `dev bug drop --old-format` drops every report an older devkit queued, which can never be sent, and lists them.
+- `dev task show` and `dev task history` find a closed item by a part of its title, and list each matching item with
+  its command when the part names several.
+- `dev progress start` and `dev progress add` list the steps that are ready for the crew, with the member the RACI
+  makes Responsible for each step's declared kind of work, and say to launch them in parallel when crew slots are
+  free.
+- `dev test` runs the project's declared test command (the delivery policy's `test_gate`, the CI step, the
+  `package.json` script) before inferring one; `--json` and `plan` give `source` and `declared_by`. `--listed`
+  (config `test.listing`) selects test files from the runner's own listing, cached.
+- An approver's `dev progress step --approves "<step>" --check "✓ …"` closes a step that ended unverified, as a
+  review step's ✓ does, and says why the step was unverified.
+- The Stop hook reminds the agent when its status block asks you to approve or decide while the work runs in auto
+  mode: a bullet that names a decision (D2) or offers options (A or B) always counts; approving something only you
+  can do on your account ("approve the GitHub OAuth app") does not.
+
+- Change fragments: in a repository with a `changes/` folder, each branch writes its CHANGELOG lines in
+  `changes/<branch>.md` (its name with `/` as `-`) instead of editing `CHANGELOG.md`, so parallel branches no longer
+  collide on it. `dev release` on a `release/`, `hotfix/` or `integration/` branch writes every fragment into that
+  version's section of `CHANGELOG.md`, in Keep a Changelog order, and removes the files; on the default branch it
+  refuses while a fragment is left. `dev ci --run` and `dev ci --mark-passed` fail a branch that edits `CHANGELOG.md`
+  outside a release branch, and a fragment or file in `changes/` they cannot use, naming its file and line.
+- Change fragments: in a repository with a `changes/` folder, each branch writes its CHANGELOG lines in
+  `changes/<branch>.md` (its name with `/` as `-`) instead of editing `CHANGELOG.md`, so parallel branches no longer
+  collide on it. `dev release` on a `release/`, `hotfix/` or `integration/` branch writes every fragment into that
+  version's section of `CHANGELOG.md`, in Keep a Changelog order, and removes the files, and refuses a version that
+  is already tagged; on the default branch it refuses while a fragment is left. `dev ci --run` and
+  `dev ci --mark-passed` fail a branch that edits `CHANGELOG.md` outside a release branch, and a fragment or file in
+  `changes/` they cannot use; the error names its file and line number. devkit takes its own CHANGELOG lines from
+  fragments from this release on.
+
+### Changed
+
+- CI installs pinned Vale and markdownlint-cli2, checked against their release checksum, so the generated-documents
+  docs check runs in CI.
+- `dev progress assign --scope` refuses a secret, a URL or remote, a `..` segment and a path outside every checkout
+  other than this project's handoff plans folder and the member's own scratchpad, with `dev crew delegate`'s rule.
+- When devkit refuses a command on purpose, it exits 2 with `dev <command>: <the reason>` and a `fix:` line on
+  stderr, instead of a devkit bug notice and a bug report. When another devkit process holds the record the command
+  needs, it exits 75: run the command again. devkit's own bugs still exit 70. Troubleshooting lists every exit code.
+  `dev ext ack` follows it: 75 when the acceptance list is busy, 2 with the reason when the list cannot be written
+  safely.
+- `dev ci audit --fix` sizes each job's new `timeout-minutes` from its last 20 successful runs on GitHub: 1.5 times
+  the longest, rounded up to 5 minutes, never below the policy's `job_timeout_minutes`. Without readable runs it
+  writes no number and says why.
+- Now lists this Mac's runs before other machines' runs in each state. Copying a command says _Copied. Run it in
+  your terminal._; copying a path says _Copied the path._
+- `dev stubs -p` and `dev test -p` find the one project instead of inspecting every checkout on the Mac first.
+- `dev gc` removes the Vale configurations of devkit copies that are gone.
+
+### Fixed
+
+- Outside bypass mode, a plain `dev` call goes out exactly as written, so an allow rule such as
+  `Bash(dev progress:*)` or `Bash(dev crew:*)` runs it without a prompt. devkit names its caller from the call's own
+  shell (facts the kernel keeps and a pin), and makes no permission decision.
+- `dev sec scan` lists the Semgrep findings the repository reviewed (`REVIEWED_DISPOSITIONS` in
+  `scripts/security_corpus.py`, as committed) as reviewed and exits 0 when only those remain, as CI's gate does; it
+  skips `node_modules`, `.venv`, `build` and the other skip folders at any depth in the trivy stage.
+- `dev commit`, `dev crew owner` and `dev watch` no longer stop as a devkit crash when devkit cannot tell which crew
+  lane calls them or refuses a step change: they refuse with the reason and what to do.
+- A crew member's `dev progress step` no longer starts the tech lead's next step or calls the review of its own work
+  `your step`. A review never goes to a member whose work it follows, directly or through other steps and across
+  reopens: `dev progress assign` refuses it, none of that member's lanes takes it from the queue, a new launch of
+  that member does not take it back when it ended unverified, and a lane whose description names no crew member
+  takes no review.
+- A verdict covers only the work it saw. A member's `--approves` ✓ given before a step was reopened and reworked no
+  longer closes the reworked step or dates it before the rework, and a review's ✓ no longer closes or approves work
+  redone after the review took it: the tech lead is told and the review is flagged for recheck. A reopen drops the
+  verdicts members still hold on the step, and a verdict still counts when the author's lane stops later without
+  working on the step again.
+- A member who ran any earlier version of a reopened step can no longer approve it.
+- `dev crew delegate`, `decline` and `withdraw` save their change and its notice together, or refuse the whole command
+  with nothing saved; a retry no longer adds a duplicate step.
+- `dev progress assign` refuses a review with a clear message, not a traceback, when the crew roster cannot be read.
+- A member can close a step from its brief while its lane holds a step that only joined from the queue; the joined
+  step goes back to the member's next lane. A step the launch does not name waits its turn, and the refusal says so.
+- A reviewer launched for two reviews it names fully takes both, and its report closes both; one launched as
+  "Seraph: review" no longer takes a later review that shares only that word.
+- `dev progress begin` on a member's blocked step sends it back to its lane, or first in that lane's queue, instead
+  of running it next to the lane's other step.
+- `dev progress assign` says where a scope counts: only in the worktree its paths name, or in every checkout. The
+  commands a scope clash suggests put every glob in the worktree and name the member by id. `dev crew owner` and
+  `dev crew next` show the checkout a bound scope counts in, and `dev crew next` names the step a resumed lane runs.
+- `dev commit` in a crew lane counts the lane's files in the worktree its scope was given for, so a member no longer
+  commits another member's staged files in another checkout; `dev test` takes the same files.
+- The crew gates accept a `dev progress step` piped into `tail` once the lane recorded it, and keep the hidden exit
+  code in the audit trail.
+- `dev test prove` proves a project installed as a built copy (`uv sync --no-editable`, `pip install .`); when it
+  cannot, it names the package and says how to make it provable. It no longer takes a fake class's `test_…` method
+  for a changed test.
+- `dev test` runs Playwright specs with Playwright, including specs that take `test` from a local fixtures file, and
+  no longer sends Vitest tests to Playwright under `testDir: '.'` or a commented-out `testDir`. Angular unit-test
+  builder specs run through `ng test`, and Angular `include` patterns are matched against file names.
+- `dev test prove` says it proves the change only when the run without the change recorded where it imported each
+  file from, and says `cannot be proven`, naming the file, when a changed file came from the checkout. It counts only
+  the tests whose own text changed and those that call a changed helper, counts `it.each` cases, and ends a
+  JavaScript test at its call's closing bracket.
+- `dev test` selects the tests that walk a source folder or quote a changed file's path, splits a list of tests passed
+  as one shell word, forgets a last failure in a file that is no longer a test, keeps a unit test that imports only
+  Playwright's types with vitest, and a partial CI rerun stops all its processes at its limit.
+- `dev test --since REF prove` applies `--since`, as do the other options written before the subcommand. A
+  production module named `test_…` outside pytest's `testpaths` or `python_files` is no longer run as a test, and a
+  nested Python project's tests no longer run inside the outer project's pytest run.
+- `dev ci audit` no longer says jobs skip draft pull requests when the skipped jobs never run on a pull request, and
+  `--fix` no longer adds `ready_for_review` there; when it leaves a draft gate to you, it says to add the type.
+- `dev ci --run` stops every process of a step that passes its time limit, or that you stop with Ctrl-C (also a
+  second Ctrl-C), SIGTERM or SIGHUP, then exits 124, 130, 143 or 129. A timed-out suite no longer runs on in the
+  background writing the step's log.
+- `dev docs check` passes the plans and design notes devkit writes: titles with a colon, tabs or line separators are
+  written as valid YAML, Vale no longer checks a plan's record fields as prose, an adopted note's own `#` title is
+  not counted twice, and a file Vale stops on is named with its line and reason. A branch checkout's docs check no
+  longer changes the Vale configuration your installed devkit uses.
+- The Stop hook's `dev plan revise` reminder works from any folder: `dev plan revise`, `approve` and `supersede` take
+  a plan's path in the handoff repository (`plans/…`).
+- `dev sec scan .` outside a checkout scans that folder instead of crashing; a project not on this Mac is refused
+  with the `dev clone` command.
+- `dev task done` and other item changes no longer crash or report an item as gone when the pull before them, or
+  another Mac during the push, moved it.
+- Two Macs that each record a lesson's third repeat no longer get a conflict warning and two automation items: the
+  sync keeps one, keeps a duplicate someone already started and names both, and numbers the repeats in order.
+- Work items keep only the sections that have text, and `dev task show` hides only the templates' own unfilled
+  lines, never lines you wrote in italics or boxes you checked.
+- Skill rules no longer fire on look-alikes: a Unity or iOS `…Controller.cs`, a `spec/` folder outside Ruby, a Go
+  module's `// indirect` requirement, Block's goose agent, or TypeScript that resembles .NET, Rust, Ruby or Nuxt
+  code. Rules read an option written with its value (`-dir=db`), and no content pattern backtracks on large files.
+- `dev test prove` records what the run without the change imports as it runs, from every thread, by file identity,
+  and counts a changed data file read from the copy. A patched `sys.modules`, a checkout path in another letter case, a
+  flat-layout built install, or a Python child that skips the record (`-I`, `-E`, `-S`, a cleared `PYTHONPATH`, behind
+  `env`, `NAME=value`, `sh -c` or `executable=`) no longer lets a test count as proven; only the test files that start
+  such a child lose their proof. It restores a changed helper inside a test module whole, so a test the change never
+  touched no longer crashes on the helper's old signature and counts as proof.
+- `dev test prove` undoes a test-module hunk that both edits a helper and adds one line by line, or calls that file's
+  tests `cannot be proven`, and counts a helper added to a test class as changing only the tests that call it; a file
+  whose only change is a helper no test calls is left out. The import recorder finds a Python child behind a runner
+  that starts a shell or `env` (`timeout 30 bash -c "python -I …"`), and no longer flags the words of `echo` or
+  `printf`.
+- `dev test prove` rebuilds each helper changed inside a Python or JavaScript test module from its own base text,
+  matched by class and name, and checks the result; a test that reads a name only the change's helper edit gives cannot
+  be proven, and a helper the test framework calls (`run`, `__init__`, a `name=` fixture, `pytestmark`, `load_tests`,
+  a pytest hook) reaches every test.
+- `dev test prove --isolated-imports` keeps a checkout's evidence on a busy machine: the snapshot is bounded by its
+  number of files and bytes, never by time.
+- `dev ci --run` reads the test runner of a multi-line CI step that runs one test command beside lines that cannot
+  change it (comments, assignments, `export`, `echo`, `cd`, `set`), so `--resume` reruns only the failed and affected
+  tests, in the step's folder and with its exported variables; the unittest observer wraps that line, never a comment
+  or `echo` that names it.
+- `dev test` keeps the project's own test command for a bare `pytest` CI step (`uv run pytest` in a uv project),
+  `--listed` keeps a unittest module or package that fails to import as a failing test, and `dev test run` keeps a
+  pytest id with a space in its parameters, or after a `[` that never closes, whole.
+- The crew gates count a piped `dev progress step` by its recorded step only when the lane recorded it after the call
+  started; execution receipts carry the time their call started.
+- An automatic bug-report flush waits only for a flush of the same outbox: a flush of another outbox no longer makes it
+  skip its reports.
+- The tech lead's plain `dev` call is no longer refused when you approve it after its tool timeout, or when a quick
+  member call or the lead's own background call opens just before its shell starts. devkit registers Claude Code's
+  `PermissionDenied` hook, so a call auto mode denies closes at once (run `dev install` to get it); after a denial at
+  the prompt, the refusal of a retry says how many minutes remain. A command whose use devkit cannot record says so and
+  asks you to run it again.
+- A review no longer approves unverified work its author or the tech lead redid after the review began: the step's
+  end moves to that close. An author's work after an approver, a review or the tech lead closed its step makes the step
+  unverified again when the author's lane stops, and shell writes recorded for read-only lanes and their helpers count
+  as work on a step. Held audit records are kept per thread.
+- A member's edits for its next step no longer make an earlier step someone else closed unverified again: only work on
+  that step counts (its scope in the project's checkouts, files its lanes edited for it, progress records that name
+  it). Who closed a step is kept on the step, and a step's scope refuses invisible Unicode characters.
+- Each crew lane keeps its scratch files in its own folder, `scratchpad/<member id>-<step>/`, named in its brief and
+  created when the lane binds to its step, so two lanes of one member no longer replace or delete each other's files.
+  A review's ✓ no longer approves work an idle lane redid before it was given its next step, and editing a file for a
+  lane's next step no longer makes the step it just closed unverified again, even when their scopes overlap; `dev
+  progress assign` warns when one member's open steps get overlapping scopes.
+- A teammate's audit line with a long `dev.config.set` detail no longer makes each team audit query take seconds or
+  minutes, and a line an older devkit wrote with bytes that were not UTF-8 no longer stops the daily audit publish or
+  `dev audit verify`.
+- A crew call denied at its permission prompt keeps its contest audit, and the call ledger's sweep leaves a contest
+  flag younger than a minute, or whose call closed within one, and never follows a session folder swapped for a link.
+- A `dev` command whose detail, reason, or folder holds bytes that are not UTF-8 is recorded in the audit trail with
+  their escapes instead of being left out, and `dev audit show`, `export`, and `--format json|csv` read older such
+  records instead of stopping.
+- `dev visual capture` asks `npm root -g` again when it prints nothing, fails, or times out, and keeps a good answer for
+  the rest of the process; when npm still names no folder, the capture says so instead of reporting the pinned
+  Playwright as not installed.
+- A capture recorded under a hostname counts as this Mac's only when its user is this user too, and `dev visual
+  compare`, `check`, and a finding on an element say where a missing picture or description is, as the other commands do.
+- A deeply nested JSON value in a teammate's lesson rule file no longer crashes every hook call (the file is ignored and
+  `dev lesson` says why), a deeply nested presence file from another Mac is skipped instead of breaking the dashboard's
+  team view, and `dev crew set <member> procedure` refuses nested values instead of writing a team crew file every
+  reader then ignored.
+- `dev test prove` rebuilds a changed Python or JavaScript test module only when its code outside the tests differs
+  from the base inside the bodies of helpers that both sides hold in the same places (a fix in a property getter beside
+  its setter, or in one of two `beforeEach` hooks), so the run without your change gets exactly the base module with
+  your tests in it, never base helpers mixed with the module's other changes. Any other change keeps the module as it
+  is now: a test that fails without the production change proves it, and one that passes is `cannot be proven`,
+  named by the module's first difference. In a rebuilt module only an assertion failure counts as proof; another
+  error is `cannot be proven`, naming what it raised. JavaScript test modules with thousands of nested `describe`
+  blocks or declarations are read in linear time.
+- `dev test prove` keeps a changed test module as it is now, naming the cause, when it holds a line break devkit's
+  readers do not see (a carriage return without a new line; in JavaScript also U+2028 or U+2029) or a JavaScript helper
+  line indented no deeper than the helper; it runs a test that failed on an error once more from a fresh copy; and it
+  no longer counts pytest-timeout's `Failed: Timeout` as an assertion failure.
+- `dev test prove` rebuilds a JavaScript or TypeScript test module only when Node itself reads each helper body and
+  test it cut as one whole function body, so a construct devkit's reader misreads keeps the module instead of
+  proving falsely; postfix `++` and `--` before a division, braces inside a template expression, and HTML-like
+  comments in `.cjs` files are read correctly. Each run has its own temporary folder, a test that failed on an error
+  is run again from a fresh copy and proves only when it fails the same way, a read-only folder left in the copy no
+  longer crashes the run, and pytest-timeout's current `Timeout (>1.0s)` message is never an assertion.
+- `dev visual verify`, `compare`, and the marks, `dev doctor`'s pinned npm packages row, and the packages step ask
+  `npm root -g` again when it fails or prints nothing, keep a good answer for the process, and say `npm root -g gave
+  no folder` instead of reporting no browser or every pinned package as not installed. Each try waits at most 30 s
+  (15 s in `dev setup` and `dev doctor`), a wizard run asks a hung npm once instead of on every change of stacks, and a
+  missing npm says to run `dev install --only tools`.
+- A deeply nested tool input in a transcript, Codex rollout, or proof receipt no longer crashes the Stop hook, the
+  reply canary, the crew gates, continuity, language detection, or the skill checks: the deep record reads as
+  unreadable and the rest of the turn is still read. A deeply nested state record or lesson rule file reads as one
+  that does not parse, and writers never write over it.
+- A file of a step's scope that its lane rewrites while a review of that step is at work counts as that step's rework,
+  so the review's ✓ never approves unseen work; a crew lane keeps the scratch folder its brief named after another
+  step joins it; `dev progress start` and `add` refuse a step whose name differs from another's only in case, accents,
+  spaces, or punctuation; and a step's scope refuses every space character but the plain one.
+- The call ledger's sweeps never follow a session folder that is a link, so they no longer delete JSON files in the
+  folder it points to; a contested crew call keeps its contest audit however it ends (its result, SessionEnd, expiry,
+  or its session gone); the contest flag sweep keeps a flag when the record of closed calls cannot be read; and one
+  sweep handles at most 1,000 entries of a folder planted at a flag's name.
+- `dev mcp` answers a client message nested too deep with a JSON-RPC parse error and keeps serving instead of exiting;
+  an agent settings file, a repository's `package.json`, Codex shell-call arguments, a public issue's JSON block, a
+  teammate's audit line, and synced visual records nested too deep read as unreadable instead of crashing a hook or a
+  command.
+- A run saved with step names that share a scratch folder takes other steps again, a review queued behind another
+  on the same reviewer begins when the reviewer gives its verdict on the earlier one, two lanes of one member never
+  share a scratch folder, and scopes refuse the Hangul fillers and the blank Braille pattern.
+- `dev release` refuses a version already tagged with or without the `v`, writes a blank line after a code block that
+  ends a changelog entry, and keeps the changelog's most common line ending.
+- Visual messages name another Mac by its machine id (`another Mac (m-…)`) and this one as `this Mac (m-…)`, never by
+  a hostname, as the dashboard does, and no longer crash on an older record that names a hostname.
+- A visual capture whose browser is slow to start no longer runs past its 90 s bound: the start gets what is left of
+  the bound, and a browser that starts after it is closed before it loads anything.
+- A visual capture stopped at its time bound no longer leaves its temporary folder behind on a loaded Mac: it waits
+  for the browser to exit and stops one that has not exited within 5 s, and it stops a detector still running together
+  with the engine it started, so `dev impeccable` no longer keeps the capture alive past its bound. A capture stopped
+  by its timeout or Ctrl-C also stops the detector and its engine.
+- The ConfigChange hook refuses a settings file with a byte that is not UTF-8 when it sets `DEVKIT_*` variables (it
+  crashed and let the change through), and any settings file it cannot read; session start reads a repository's or an
+  agent's settings, and a Codex MCP value, nested too deep as unreadable.
+- `dev progress assign` and `dev crew delegate` refuse a scope holding a mark that draws nothing (the combining
+  grapheme joiner, Khmer inherent vowels, Mongolian free variation selectors, variation selectors), keeping marks that
+  show, such as a decomposed accent.
+- A crew member's plain `dev watch --wait --for me` takes only that member's events, in the foreground and the
+  background, through the call's text pin.
+- devkit's call ledger never reads, writes, or removes a file through a session folder that is a link, a FIFO in the
+  ledger no longer blocks the hooks or a `dev` command, the ledger sweep reads a bounded number of entries starting at
+  a different folder each time, and a contested call writes one audit record even when two processes end it. Its audit is
+  written whatever is planted at its claim, and anything planted at a call's contest flag or use mark still counts
+  (devkit fails closed). Each sweep starts at a random name in the ledger root, so a flooded root keeps no session
+  folder out, and anything but a file planted at a background record is removed.
+- A change to `~/.claude/settings.json` that devkit cannot read (a byte that is not UTF-8, text that is not JSON,
+  nesting deeper than 64 levels, a path that does not open) is refused, because devkit cannot check the settings it
+  manages there; the refusal names the reason and leaves the file as it is, and a deleted user settings file is
+  refused and repaired like an empty one. The Claude Desktop extension's fallback server answers a message nested too
+  deep with a parse error and keeps serving.
+- In a repository with version tags in both spellings, `dev delivery`, `dev release`, and `dev ci init` take the tag
+  format from the newest version tag (git lists every `v` tag first), and the release workflow `dev ci init`
+  generates also runs on SemVer pre-releases and PEP 440 pre-, post-, and dev releases, one pattern per form, and on no
+  other tag.
+- The ConfigChange hook refuses (exit 2) a settings change devkit could read but not check (a JSON array or string, a
+  hooks event that is not a list, a failure of devkit's own configuration) instead of letting it pass, and the
+  PostToolUse hook reads a call's use mark only from its real session folder.
+- The ConfigChange hook still refuses a change when its logs, its background repair, or the logs folder cannot open,
+  and any error in the check refuses instead of letting the change through. It refuses settings with NaN or Infinity,
+  which Node's JSON parser rejects, and `disableAllHooks`, which `dev config repair` now removes. devkit's own hooks
+  count only as `dev install` writes them (matcher, type, timeout, no async). Refusals name a value that is not a
+  settings object, a number Python cannot read, and a file devkit could not restore.
+- A project or local Claude settings file that sets `disableAllHooks` to anything but false is refused and left as
+  written, and `dev doctor` names such a file in the current project with the fix. devkit never writes NaN or Infinity
+  into Claude settings, and refuses a number past a float's range (`1e400`) like them. When devkit's own settings
+  check fails, the refusal says the file keeps the change, a new session reads it, and to run `dev bug report`.
+- A settings file Python cannot parse but Claude Code reads can no longer hide a top-level `disableAllHooks: true`
+  behind a `false` nested elsewhere: in such a file any value but `false` counts as hooks off. `dev install`,
+  `dev config repair`, `dev config lock` and `dev config unlock` fail when they cannot write `~/.claude/settings.json`
+  instead of reporting success, and devkit leaves a user settings file it cannot parse (a byte order mark, a byte that
+  is not UTF-8, deep nesting, a huge integer) as it is, naming the problem, instead of replacing it with its own keys.
+  `dev doctor` never reads a project settings link out of the repository, and never opens a FIFO or a device.
+- A crew member's `dev progress step` piped into a read-only filter passes the proofs gate only when its lane holds the
+  step that call recorded, with its text and Check, since the call started; the audit trail says the pipe hid the exit
+  code, and a call with no start time or an earlier step with the same text is still sent back to run alone.
+- The dark theme's red meter fills, run bars and segments have 3:1 against their track.
+- The dashboard's ranked bar lists show the focus ring on a focused project name, and a copy button that shows its
+  command is named by that command first. Visual reports and `dev visual verify` name a Mac by its name and machine id,
+  say when this Mac's own picture before is no longer in its store, and show an old record's hostname only when it is a
+  plain short hostname. The copy toast reads `$'…'` as one quoted value.
+- A contest of a text call is kept in a flag file of its own, so it never brings a closed call back as open; the
+  `calls.text-use-without-result` record keeps its caller; the refusal for a command several open calls run says an
+  earlier one may still run; `dev config` says what the permission-denied and compaction hooks do.
+- `dev ci --run` keeps its step logs and records per checkout, so two worktrees of one repository can run it at once
+  without deleting or swapping each other's logs, and `--resume` reruns only the failed and affected tests of
+  devkit's own unit step. It resolves `${VAR:-word}` and `${VAR-word}` log targets, reads a later assignment after a
+  `mktemp` one, treats variables set by `read`, `for` or `printf -v` as unknown, and holds `cp`, `mv`, `dd of=` and the
+  other writing commands to an unknown path.
+- `dev visual describe`, `marks`, `share` and `verify` say a capture's picture or description is no longer in this
+  Mac's store when this Mac took it and pruned it, also under this Mac's former hostname; `verify` then compares
+  nothing. The visual report replaces a machine id with the Mac's name only where a verification wrote it.
+- `dev audit verify` and the daily publish no longer block publishing for good after a redaction pattern is removed,
+  the team policy breaks, or devkit changes its cleaning wording: a text difference is a note, while edits to outcome,
+  time, actor or keys still fail. It reports a line added to a published copy after the local file ends.
+- `dev ci --run` stops a step whose Ctrl-C, SIGTERM or SIGHUP lands while its shell is starting, instead of exiting
+  while the step's processes run on.
+- The dashboard counts another Mac's run from the summary its presence publishes, quotes every value in the commands
+  it builds (a branch name can hold `;` or `$`), draws one amber bar per screen, shows whole commands on a phone,
+  reads 24-hour times, and gives the first-run screen's sections their own headings.
+- `dev release` refuses a version whose tag the repository wrote without the `v` (`26.11.4`), as it already refused
+  one tagged `v26.11.4`, so a repository whose tag format has no `v` cannot release a shipped version twice.
+- `dev release` creates, pushes, and names its GitHub release with the tag in the project's format: `26.11.4` where
+  the delivery policy's tag format, or the repository's own version tags, have no `v`, and `v26.11.4` otherwise. It
+  tagged `v26.11.4` everywhere, so the release workflow that `dev ci init` generates for a repository without the
+  `v` never started. `dev calver` and devkit's CI watch name the tag the same way.
+- In a repository with version tags in both spellings, `dev delivery`, `dev release`, and `dev ci init` take the
+  tag format from the newest version tag: `26.11.3` follows `v26.10.0` and `26.11.2`. They took the `v` wherever any
+  tag had one, because git lists every `v` tag first.
+- A tag the delivery policy refuses is told in the repository's spelling when the policy names no tag format
+  (`Use MAJOR.MINOR.PATCH`), not always with the `v`.
+- The release workflow that `dev ci init` generates also runs on SemVer pre-releases (`v1.2.3-rc.1`) and PEP 440
+  pre-, post-, and dev releases (`v0.1.0a17`), one GitHub pattern per form, and on GitHub and GitLab on no other tag;
+  it ran on `X.Y.Z` tags only. `dev ci audit` no longer reports a PEP 440 tag format as a mismatch with that workflow.
+
+### Security
+
+- A team audit policy that is cut off, unreadable, not a JSON object, or whose `redact` section was rejected no
+  longer drops the team's redaction patterns without warning. Until you repair the file, devkit replaces each text it
+  would redact with its length, so a token only the team's patterns know never shows in clear. An unknown top-level
+  key in the policy (`redcat`, or a policy wrapped in `audit`) counts as broken too, and so does this Mac's own
+  `audit.redact.extra` written as a string or with a pattern that does not compile. Audit records keep their action,
+  outcome, devkit's own ids, sessions, members, projects and outcome words, and say why their text is missing, so
+  `dev audit show --project` still finds them; a refused command or message names the file to repair, and
+  `dev audit config` lists its errors.
+- Bug reports, the lesson screen and captured hook payloads check for secrets with the team's and this Mac's
+  `audit.redact.extra` patterns, not only the built-in rules, through the one screen refusals and records use.
+  Lessons are screened again when the patterns change.
+- A refusal whose reason cannot be redacted shows a fixed line instead of the reason.
+- `dev sync` records a refused team policy push, and a broken policy it cannot move aside, once per file and reason,
+  and still warns at every sync. A refused push says to undo the unpushed commits (`git reset --soft @{u}`) or amend
+  the commit, since a repair committed on top still published the broken text. A staged deletion of a team policy
+  stays staged when a broken new copy is moved aside, and a policy moved aside goes back in place when git cannot
+  restore the repository's version.
+
+- `dev sync` refuses to push while any unpushed commit, not only the last one, holds a team policy that no Mac could
+  load, and names the file and the commit; the refusal gives its repair (`git reset --soft @{u}`) before its files. A
+  broken policy is held with its reason when the handoff repository's own copy is broken too, and a broken new policy
+  that cannot be deleted stays out of every commit without stopping the sync.
+- Every `dev` command names an unknown configuration key only when it is a short word; a token pasted as a key is shown
+  by its length and the group it is in.
+- The handoff repository names a Mac by its machine id only: sync commit subjects, audit records, presence files, and
+  the project note's refresh and lock lines. Teammates show as `user@<machine id>`; this Mac's own SIEM export still
+  finds the hostname it had at each record's time.
+- Configuration errors no longer quote what you typed: a wrong value is named by its path, type and length (`work.mode
+  must be one of auto, guided (got a string of 40 characters)`), and a name you chose inside a path, such as a job's or
+  a Codex profile's, only when it is a short word, otherwise by its length. This applies to every `dev` command's
+  error, `dev config set`, `show` and `validate`, the writers, `dev update`, `dev install` and `dev doctor`.
+- A crew member can no longer pass a forged tech-lead `dev` command through a decoy shell of a later call, an
+  interrupted call, or a busy record of closed calls; a plain `dev` call runs one `dev` command, a second one is
+  refused, and a contest holds even when its marker cannot be written. devkit never writes a call's use list or
+  contested marker through a planted link.
+- A state change under a tech-lead call that then failed, was denied, or was still open when its session ended or was
+  killed is recorded (`calls.text-use-without-result`): at once, or at the next session start or `dev sync`.
+- `dev crew delegate --scope` refuses anything that is not a path in the repository, secrets and URLs included.
+- `dev config set`, `dev jobs` and job runs no longer write a typed key, a job name or a value into the audit log or
+  its export: a key you chose shows as `<key of N characters>`, a value by its type and length, and a custom job keeps
+  one short id across its records, which `dev jobs show` prints. The session context names other Macs by machine id.
+- `dev sync` reads each unpushed commit's policy files from `git log -z`, so a file named `policy/\x01<hex>` can no
+  longer hide a broken team policy. `dev audit` and its jsonl, csv, ocsf and cef exports clean records an older devkit
+  wrote the same way as new ones, and a scheduled job's audit id uses built-in rules only, so it is the same on every
+  Mac and over time.
+- `dev audit --publish` and the daily `audit` job clean each line with the rules `dev audit` reads with before
+  publishing it, so a typed key, a job name, a whole `jobs.set` detail, a value digest or a secret the redactor learned
+  since, held in a line an older devkit wrote, no longer reaches the handoff repository or its git history; nothing is
+  published while the redaction patterns cannot load. `dev audit verify` matches a cleaned published line to its local
+  line by id, hash and how both read today.
+- An audit line nested very deeply in a teammate's handoff copy no longer stops `dev audit --team`, `dev audit verify`,
+  the audit publish, or the embargo check of `dev push`, `dev backup` and `dev sync`; it reads as unreadable. A team
+  audit policy nested that deeply is rejected as invalid JSON, and redaction stays blocked until it is fixed.
+- Audit records devkit 26.11.3 to 26.11.18 wrote for `dev config set` no longer show the value: readers, exports and
+  the handoff copy say only the new value's type and length. The handoff copy no longer carries an old line's number
+  or boolean that readers hide, or the hidden value of a duplicate JSON key. A JSON file nested far deeper than any
+  devkit file, such as a teammate's crew overlay or progress policy, reads as invalid instead of crashing every command
+  that reads it.
+- An extension an agent accepted stays listed at every session start until you run `dev ext ack` in a terminal; an
+  agent's acknowledgment is refused and recorded.
+- The bug registry guide says that GitHub's edit history keeps reporter text removed from an issue, and how to have
+  it deleted; a test pins that only the registry workflow may write issues.
+
 ## [26.11.27] - 2026-11-20
 
 ### Added
