@@ -55,8 +55,8 @@ def _stdin_json() -> dict:
     global _PAYLOAD
     try:
         data = sys.stdin.read()
-        parsed = json.loads(data) if data.strip() else {}
-    except (ValueError, OSError):
+        parsed = core.load_json(data) if data.strip() else {}
+    except (ValueError, OSError):  # not JSON, or nested too deep: the hook goes on with no payload, failing open
         parsed = {}
     _PAYLOAD = parsed if isinstance(parsed, dict) else {}
     return parsed
@@ -4714,7 +4714,7 @@ def _capture_stdin(event: str, agent: str):
         raw = sys.stdin.read()
         sys.stdin = io.StringIO(raw)
         try:
-            data = json.loads(raw) if raw.strip() else {}
+            data = core.load_json(raw) if raw.strip() else {}
         except ValueError:
             data = {"unparsed": raw[:CAPTURE_CUT]}
         capture(event, agent, data)
@@ -4767,7 +4767,7 @@ def _own_identity(event: str, agent: str) -> dict:
     try:
         raw = sys.stdin.read()
         sys.stdin = io.StringIO(raw)
-        payload = json.loads(raw) if raw.strip() else {}
+        payload = core.load_json(raw) if raw.strip() else {}
         sid = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
     except (OSError, ValueError, TypeError):
         sid = ""

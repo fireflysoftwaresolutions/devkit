@@ -15,6 +15,8 @@ reason it is safe. Every file here is temporary. Run: python3 -m unittest tests.
 import ast
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -30,8 +32,8 @@ import test_acceptance_hooks as acceptance  # noqa: E402  (the hook entry run as
 import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extension runs it)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import (audit, branches, bugs, canary, ciwatch, continuity, core, gates, gc, language,  # noqa: E402
-                    lessonlint, lessons, mcp, policy, scope, shellparse, skillguard, state)
+from devkit import (audit, branches, bugs, canary, ciwatch, continuity, core, gates, gc,  # noqa: E402
+                    hooks, language, lessonlint, lessons, mcp, policy, scope, shellparse, skillguard, state)
 from devkit.visual import compare as vcompare, map as vmap, report as vreport, store as vstore, walk as vwalk  # noqa: E402,E501
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
@@ -440,6 +442,64 @@ class McpServerPython39Tests(McpServerTests):
     python = "/usr/bin/python3"
 
 
+class HookReaderTests(TempFolder):
+    """What the hooks read besides their input: a Codex rollout's command records, its first record and devkit's
+    session records; and the hook input as the capture and the identity read it."""
+
+    def test_a_deep_hook_input_is_captured_unparsed_and_names_no_session(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                raw = '{"session_id": "s1", "hook_event_name": "PreToolUse", "x": ' + deep(d) + "}"
+                seen = []
+                with mock.patch("sys.stdin", io.StringIO(raw)), \
+                        mock.patch.object(hooks, "capture", lambda e, a, data: seen.append(data)):
+                    hooks._capture_stdin("pre-tool", "claude")
+                    self.assertEqual(sys.stdin.read(), raw)  # the handler still gets the text
+                self.assertEqual(seen, [{"unparsed": raw[:hooks.CAPTURE_CUT]}])
+                with mock.patch("sys.stdin", io.StringIO(raw)), \
+                        mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:old"}):
+                    hooks._own_identity("pre-tool", "claude")  # a payload naming no session keeps this agent's
+                    self.assertEqual(os.environ.get("DEVKIT_SESSION"), "claude:old")
+                    self.assertEqual(sys.stdin.read(), raw)
+                with mock.patch("sys.stdin", io.StringIO(raw)):
+                    self.assertEqual(hooks._stdin_json(), {})
+
+
+class HookInputTests(acceptance.Sandbox):
+    """bin/dev hook end to end, as Claude Code starts it (-I -S, the payload on stdin): a hook input nested too deep
+    reads as a malformed one (the hook fails open, its output the same, no error logged), and the ConfigChange hook
+    refuses a settings file it cannot parse that sets a DEVKIT_* variable."""
+
+    def dev_hook(self, event, raw):
+        p = subprocess.run([self.python, "-I", "-S", str(ROOT / "bin" / "dev"), "hook", event, "--agent", "claude"],
+                           input=raw, capture_output=True, text=True, cwd=str(self.repo), env=self.env, timeout=180)
+        return p.returncode, p.stdout, p.stderr
+
+    def failures(self):
+        f = self.state / "logs" / "hooks.log"
+        return [ln for ln in (f.read_text() if f.exists() else "").splitlines() if " error" in ln or "Error" in ln]
+
+    def test_a_deep_hook_input_reads_as_a_malformed_one(self):
+        self.start_claude_turn()
+        fields = {"pre-tool": ('{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "toolu_01", '
+                               '"tool_input": {"command": "git status", "x": '),
+                  "stop": '{"hook_event_name": "Stop", "stop_hook_active": false, "x": '}
+        for event, head in fields.items():
+            head = head.replace("{", '{"session_id": "' + acceptance.CLAUDE_SID + '", "cwd": "' + str(self.repo)
+                                + '", "transcript_path": "' + str(self.transcript) + '", ', 1)
+            close = "}}" if event == "pre-tool" else "}"
+            malformed = self.dev_hook(event, head + "[")
+            for d in DEPTHS:
+                with self.subTest(event=event, depth=d):
+                    self.assertEqual(self.dev_hook(event, head + deep(d) + close), malformed)
+                    self.assertEqual(self.failures(), [])
+
+
+@unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
+class HookInputPython39Tests(HookInputTests):
+    python = "/usr/bin/python3"
+
+
 # --------------------------------------------------------------------------- the guard
 
 # Why a raw parse is safe where it stands. A deep document can reach a parser only through text whose shape someone
@@ -532,12 +592,9 @@ REVIEWED = {
     ("gitx", "_only_skipped"): (1, TOOL),
     ("gitx", "ctx"): (1, TOOL),
     ("gitx", "gh_json"): (2, TOOL),
-    ("hooks", "_capture_stdin"): (1, HELD),
     ("hooks", "_codex_version"): (1, HELD),
     ("hooks", "_devkit_env_change"): (1, HELD),
     ("hooks", "_item_record"): (1, HELD),
-    ("hooks", "_own_identity"): (1, HELD),
-    ("hooks", "_stdin_json"): (1, HELD),
     ("hooks", "codex_rollout"): (1, HELD),
     ("hooks", "sessions_to_restart"): (1, HELD),
     ("identity", "_read_kept"): (1, OWN),
