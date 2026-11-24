@@ -238,8 +238,8 @@ def devkit_env(text: str, toml: bool = False, shell: bool = False) -> dict:
                 for m in _KEY_SHELL.finditer(body)}
     if not toml:
         try:
-            data = json.loads(text)
-        except ValueError:
+            data = core.load_json(text)
+        except ValueError:  # not JSON (comments, cut short) or nested too deep: read the keys from the text
             data = None
         if isinstance(data, dict):
             env = data.get("env")
@@ -248,7 +248,7 @@ def devkit_env(text: str, toml: bool = False, shell: bool = False) -> dict:
     for m in (_KEY_TOML if toml else _KEY_JSON).finditer(_unescape(text)):
         v = m.group(2)
         try:
-            v = json.dumps(json.loads(v))
+            v = json.dumps(core.load_json(v))
         except ValueError:
             pass
         out[m.group(1)] = v

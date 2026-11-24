@@ -31,7 +31,7 @@ import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extensi
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import (audit, bugs, canary, ciwatch, continuity, core, gates, language, lessonlint,  # noqa: E402
-                    lessons, mcp, scope, skillguard, state)
+                    lessons, mcp, policy, scope, skillguard, state)
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
 # inside every reader's window (canary reads the last 400 KB of a transcript).
@@ -299,6 +299,12 @@ class ForeignTextReaderTests(TempFolder):
                 self.assertEqual([(r["id"], (r.get("error") or {}).get("code")) for r in replies],
                                  [(None, mcp.PARSE_ERROR), (8, None)])
 
+    def test_a_deep_settings_file_reads_like_an_unparsable_one(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                text = '{"env": {"DEVKIT_HOME": "/x", "DEVKIT_A": ' + deep(d) + '}, "y": ' + deep(d) + "}"
+                self.assertEqual(policy.devkit_env(text), {"DEVKIT_HOME": '"/x"', "DEVKIT_A": deep(d)})
+
 
 class McpServerTests(unittest.TestCase):
     """`dev mcp` end to end, as the Claude Desktop extension starts it (-I -S): a client message nested too deep gets
@@ -453,7 +459,6 @@ REVIEWED = {
     ("pipelines", "external_linters"): (2, TOOL),
     ("pipelines", "facts"): (1, COMMAND),
     ("plans", "_unquote"): (1, STRING),
-    ("policy", "devkit_env"): (2, "OPEN: an agent's settings file, a repository's own among them, read by a hook"),
     ("profiles", "catalog"): (1, SHIPPED),
     ("progress", "_codex_meta"): (1, HELD),
     ("progress", "_codex_midturn_requests"): (1, HELD),
