@@ -460,24 +460,29 @@ class SessionLogTests(unittest.TestCase):
         return self.dir / "sessions" / "acme" / "widget" / f"{time.strftime('%Y-%m')}.md"
 
     def test_a_session_line_rewritten_on_every_turn_never_drops_a_line_another_session_appends(self):
-        # Session A rewrites its own line 60 times (the Stop hook) while session B appends lines (dev handoff --log)
-        # until A is done: every line B appended is kept, and A's line is there once, as A last wrote it. A waits for
-        # a fresh append of B before each rewrite, so the two always overlap, however busy the Mac is.
+        # Session A rewrites its own line (the Stop hook) while session B appends lines (dev handoff --log): every line
+        # B appended is kept, and A's line is there once, as A last wrote it. A keeps rewriting until B has appended
+        # more than 20 lines since A's first rewrite, so the two overlap however busy the Mac is; a B that
+        # cannot append that many within the bound fails the test by name instead of passing with no overlap.
+        appends = 20
         done, ticks = self.dir / "a-done", self.dir / "b-ticks"
         setup = f"""
             from devkit import work
             work.SESSIONS = Path({str(self.dir / 'sessions')!r})
+            def appended():
+                return Path({str(ticks)!r}).stat().st_size if Path({str(ticks)!r}).exists() else 0
             """
         rewrite = setup + f"""
-            seen, deadline = 0, time.monotonic() + {TIMEOUT}
-            for i in range(60):
-                while (Path({str(ticks)!r}).stat().st_size if Path({str(ticks)!r}).exists() else 0) <= seen:
-                    if time.monotonic() > deadline:
-                        raise SystemExit("session B stopped appending")
-                    time.sleep(0.0005)
-                seen = Path({str(ticks)!r}).stat().st_size
-                work.replace_session_line("acme/widget", "<!-- s:sA -->", f"session A turn {{i}} <!-- s:sA -->")
+            deadline, turns, first = time.monotonic() + {TIMEOUT // 2}, 0, None
+            while first is None or appended() - first <= {appends}:
+                if time.monotonic() > deadline:
+                    raise SystemExit("session B appended %d lines in {TIMEOUT // 2} s of session A's %d rewrites, "
+                                     "not more than {appends}" % (appended() - first, turns))
+                work.replace_session_line("acme/widget", "<!-- s:sA -->", f"session A turn {{turns}} <!-- s:sA -->")
+                first = appended() if first is None else first
+                turns += 1
             Path({str(done)!r}).touch()
+            print(turns)
             """
         append = setup + f"""
             n = 0
@@ -488,13 +493,13 @@ class SessionLogTests(unittest.TestCase):
                     t.write(".")
             print(n)
             """
-        written = int(together([rewrite, append], self.dir)[1])
+        turns, written = (int(o) for o in together([rewrite, append], self.dir))
         text = self.month().read_text()
-        self.assertGreaterEqual(written, 60, "session B did not append between session A's rewrites")
-        self.assertEqual(len([ln for ln in text.splitlines() if ln.startswith("- bob line ")]), written,
-                         "lines of session B were lost")
+        self.assertGreater(written, appends, "session B did not append while session A rewrote its line")
+        self.assertEqual(sorted(ln for ln in text.splitlines() if ln.startswith("- bob line ")),
+                         sorted(f"- bob line {n}" for n in range(written)), "lines of session B were lost")
         self.assertEqual([ln for ln in text.splitlines() if "<!-- s:sA -->" in ln],
-                         ["- session A turn 59 <!-- s:sA -->"])
+                         [f"- session A turn {turns - 1} <!-- s:sA -->"])
 
     def test_a_session_line_is_appended_when_the_month_has_none_and_replaced_in_place_when_it_has_one(self):
         from devkit import work

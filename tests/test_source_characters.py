@@ -7,7 +7,9 @@ characters then hide in the source ("Trojan Source"): the code reads one way and
 
 Refused everywhere, strings and comments included:
 - bidirectional controls U+202A to U+202E and U+2066 to U+2069;
-- zero-width characters U+200B to U+200D, U+2060 and U+FEFF (a leading byte-order mark too).
+- zero-width characters U+200B to U+200D, U+2060 and U+FEFF (a leading byte-order mark too);
+- blank characters Python does not take for white space: the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0, and
+  the blank Braille pattern U+2800, which can name a variable that reads as nothing.
 
 Refused in code, and in strings and comments unless the file is on LOOKALIKE_ALLOWLIST:
 - the hyphen U+2010, the non-breaking hyphen U+2011 and the no-break space U+00A0, which look like ``-`` and `` ``.
@@ -29,7 +31,8 @@ SCANNED_DIRS = ("lib", "bin", "tools", "tests")
 
 BIDI = tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A))
 ZERO_WIDTH = (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF)
-HIDDEN = BIDI + ZERO_WIDTH
+BLANK = (0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800)
+HIDDEN = BIDI + ZERO_WIDTH + BLANK
 LOOKALIKE = (0x2010, 0x2011, 0x00A0)
 
 # Files allowed to keep a look-alike dash or space inside a string or comment (never in code, and never a hidden
@@ -128,6 +131,9 @@ class RepositorySourceTests(unittest.TestCase):
 MUST_REFUSE_HIDDEN = (0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069,
                       0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF)
 MUST_REFUSE_LOOKALIKE = (0x2010, 0x2011, 0x00A0)
+# Blank characters that are not white space to Python: the Hangul fillers and the blank Braille pattern can name a
+# variable that reads as nothing.
+MUST_REFUSE_BLANK = (0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800)
 
 
 class ScannerTests(unittest.TestCase):
@@ -161,6 +167,17 @@ class ScannerTests(unittest.TestCase):
                     found = self._scan('x = "a%sb"  # c%sd\n' % (chr(cp), chr(cp)))
                     self.assertEqual([f.split(" ", 2)[:2] for f in found],
                                      [["lib/sample.py:1:7:", "U+%04X" % cp], ["lib/sample.py:1:15:", "U+%04X" % cp]])
+        finally:
+            del LOOKALIKE_ALLOWLIST["lib/sample.py"]
+
+    def test_blank_fillers_are_refused_in_code_names_strings_and_comments_even_when_allowlisted(self):
+        LOOKALIKE_ALLOWLIST["lib/sample.py"] = "a test fixture"
+        try:
+            for cp in MUST_REFUSE_BLANK:
+                with self.subTest(code_point="U+%04X" % cp):
+                    found = self._scan('a%s = "b%sc"  # d%se\n' % (chr(cp), chr(cp), chr(cp)))
+                    self.assertEqual(found, ["lib/sample.py:1:%d: U+%04X hidden character" % (col, cp)
+                                             for col in (2, 8, 16)])
         finally:
             del LOOKALIKE_ALLOWLIST["lib/sample.py"]
 
