@@ -3956,8 +3956,9 @@ def _py_test_class(node, plain) -> bool:
     return True
 
 
-def _units(f, text) -> list:
-    """Test units of a test file: [(name, first line, last line)]; Python classes add ('Class.*', …) for setUp."""
+def _units(f, text, functions=True) -> list:
+    """Test units of a test file: [(name, first line, last line)]; Python classes add ('Class.*', …) for setUp.
+    `functions`: a module-level Python function named test… is a test (pytest's), not a helper (unittest runs none)."""
     lang = _lang(f)
     if lang == "py":
         try:
@@ -3973,7 +3974,7 @@ def _units(f, text) -> list:
 
         out, plain = [], set()
         for node in tree.body:
-            if isinstance(node, fn) and node.name.startswith("test"):
+            if isinstance(node, fn) and node.name.startswith("test") and functions:
                 out.append((node.name,) + span(node))
             elif isinstance(node, ast.ClassDef) and _py_test_class(node, plain):
                 mine = [(f"{node.name}.{i.name}",) + span(i) for i in node.body
@@ -4507,10 +4508,10 @@ def _framework_reach(lang, src, name, s, e, cls) -> str:
     return "every" if called else ""
 
 
-def _py_support(text) -> list:
+def _py_support(text, functions=True) -> list:
     """The named test support of a Python test module: [(name, first line, last line, class or '')] of its
-    module-level functions that are no tests, its assignments and classes without tests, and the methods and class
-    attributes of its test classes that are no tests."""
+    module-level functions that are no tests (all of them unless `functions`, see _units), its assignments and classes
+    without tests, and the methods and class attributes of its test classes that are no tests."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -4530,7 +4531,8 @@ def _py_support(text) -> list:
 
     out, plain = [], set()
     for node in tree.body:
-        if isinstance(node, fn) and not node.name.startswith("test") or isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if isinstance(node, fn) and not (node.name.startswith("test") and functions) or \
+                isinstance(node, (ast.Assign, ast.AnnAssign)):
             out += [(x, *span(node), "") for x in names(node)]
         elif isinstance(node, ast.ClassDef):
             mine = [i for i in node.body if isinstance(i, fn)]
@@ -4557,7 +4559,7 @@ def _keyed(units, lines) -> dict:
     return out
 
 
-def _changed_units(top, base, f):
+def _changed_units(top, base, f, functions=True):
     """Names of the tests in `f` that are new or changed since `base`; None when the whole file counts.
 
     A test is changed when its own text differs from the same-named test's at `base` (so a test moved or with new
@@ -4565,7 +4567,8 @@ def _changed_units(top, base, f):
     helper of the file that changed: a helper it calls, directly or through other helpers; a helper the test framework
     calls (_framework_reach: setUp, run, a beforeEach, a module setup, a fixture) reaches every test it runs for. Only
     a helper the change adds that no test reaches changes no test ([]): one that was there may be reached in ways no
-    name shows, so a change to it that no test names counts the whole file, as a change elsewhere (an import) does."""
+    name shows, so a change to it that no test names counts the whole file, as a change elsewhere (an import) does.
+    `functions`: see _units."""
     p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
     if p.returncode != 0:
         return None
@@ -4574,29 +4577,29 @@ def _changed_units(top, base, f):
     src = text.splitlines()
     lines = {ln for ln in _changed_lines(top, base, f)  # blank and comment-only lines change no test
              if 0 < ln <= len(src) and src[ln - 1].strip() and not src[ln - 1].strip().startswith(("#", "//"))}
-    units = _units(f, text)
+    units = _units(f, text, functions)
     if not lines or not units:
         return None
     tests = [(n, s, e) for n, s, e in units if not n.endswith(".*")]
     old_lines = old_text.splitlines()
-    before = _keyed([u for u in _units(f, old_text) if not u[0].endswith(".*")], old_lines)
+    before = _keyed([u for u in _units(f, old_text, functions) if not u[0].endswith(".*")], old_lines)
     now = _keyed(tests, src)
     picked = {k[0] for k, body in now.items() if before.get(k) != body}
     outside = {ln for ln in lines if not any(s <= ln <= e for _, s, e in tests)}
     helpers_only = False  # every changed line outside the tests is inside a helper the change adds
     if outside:
-        reached, helpers_only = _helper_callers(f, text, old_text, units, tests, outside)
+        reached, helpers_only = _helper_callers(f, text, old_text, units, tests, outside, functions)
         picked |= reached
     return sorted(picked) if picked or helpers_only else None
 
 
-def _helper_callers(f, text, old_text, units, tests, lines) -> tuple:
+def _helper_callers(f, text, old_text, units, tests, lines, functions=True) -> tuple:
     """The tests of `f` a change to its support reaches (see _changed_units); `lines`: the changed lines outside
     every test. -> (the tests, whether every line of `lines` is inside a helper the change adds)."""
     src, lang = text.splitlines(), _lang(f)
     if lang == "py":
-        support = _py_support(text)
-        old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in _py_support(old_text)}
+        support = _py_support(text, functions)
+        old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in _py_support(old_text, functions)}
         members, had = _py_members(text), set(_py_members(old_text))
     elif lang == "js":
         support = [(n, s, e, "") for n, s, e in _js_support(text)]
@@ -5618,8 +5621,10 @@ def _prove(a, top, runners) -> int:
     # helpers defined inside the changed test modules (outside every test): a fix inside their bodies is part of the
     # change too, so such a module is rebuilt as the base module with its tests now (_rebuild_helpers)
     inner, kept = {}, {}  # kept: the modules that keep their change, each with its first difference
+    # a module-level function named test… is a test only where the runner runs one: unittest runs none
+    functions = {f: (owner(runners, f) or {}).get("name") != "unittest" for f in tests}
     for f in tests:
-        restored = _helper_restore(top, base, f)
+        restored = _helper_restore(top, base, f, functions[f])
         if restored is None:
             continue
         if restored["text"] is None:
@@ -5657,7 +5662,8 @@ def _prove(a, top, runners) -> int:
         if r is None:
             skipped.append((f, _no_runner(a, f)))
             continue
-        units = _changed_units(top, base, f)  # a named file too: its new or changed tests (all, when none changed)
+        # a named file too: its new or changed tests (all, when none changed)
+        units = _changed_units(top, base, f, functions[f])
         if units == []:  # only helpers no test calls changed: a named file runs all its tests, as before
             if not a.tests:
                 unreached.append(f)

@@ -641,6 +641,18 @@ class SupportRerunTests(unittest.TestCase):
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
 
 
+class UnittestModuleFunctionTests(unittest.TestCase):
+    # unittest runs only the test methods of a TestCase: a module-level function named test… is a helper there, whose
+    # fix comes back as its base text, never a test prove names (unittest would refuse to run it)
+    def test_a_module_function_named_like_a_test_is_a_helper_under_unittest(self):
+        before = fake_module("def testing_env():\n    return 1\n\n\ndef h():\n    return 1\n\n\n")
+        after = before.replace("def testing_env():\n    return 1", "def testing_env():\n    return 2").replace(
+            "def h():\n    return 1", "def h():\n    return testing_env() - 1") + \
+            "\n    def test_h(self):\n        self.assertEqual(h(), 1)\n"
+        rc, rows, text = prove_rows(before, after)
+        self.assertEqual([("test_calc.CalcTests.test_h", "does not test the change")], rows, text)
+
+
 class SameShapeGroupTests(unittest.TestCase):
     # helpers of one class and name in the same places on both sides (a getter beside its setter, a beforeEach in
     # each of two describes) are matched place by place, so a fix in one comes back as its base text and is proven
