@@ -425,9 +425,9 @@ change instead of taking it as the tech lead's, and records why:
 
 Reads and waits, such as `dev crew read` and `dev watch --wait`, are not refused. `dev audit --action caller` lists
 the records ([The audit trail › Caller identity records](audit.md#caller-identity-records)). Outside Claude Code's
-bypass mode, or a Codex approval policy other than `never`, only a call that visibly runs `dev` carries the token: do
-not add an allow rule for `export` to get one on every call, since it would allow any command that starts with an
-export.
+bypass mode, or with a Codex approval policy other than `never`, a call of one plain `dev` command in sh, bash, or zsh
+goes out as written and its own shell names its caller ([The crew › Who is calling](crew.md#who-is-calling)): do not add an allow rule for
+`export` to get a token on every call, since it would allow any command that starts with an export.
 
 ### Codex profile models are not available
 
