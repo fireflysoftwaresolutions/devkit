@@ -1434,14 +1434,24 @@ def _refuse_unparsed_env(path: str, project: bool):
     """A settings file devkit cannot parse (not JSON, or nested deeper than core.JSON_MAX_DEPTH, which Claude Code
     still reads) that sets DEVKIT_* variables in its text (policy.devkit_env): refused with exit 2 and recorded, as
     config_change refuses them in a file it can parse. devkit cannot rewrite such a file, so it names the keys to
-    remove. A project's or local settings may set none; the user settings only devkit's own values."""
+    remove. A project's or local settings may set none; the user settings only devkit's own values. The text is read
+    as Claude Code reads it, a byte that is not UTF-8 replaced; a file devkit then fails to read is refused whole."""
     from . import audit, policy
     try:
-        have = policy.devkit_env(Path(path).read_text())
+        text = Path(path).read_bytes().decode("utf-8", "replace")
     except OSError:  # gone or unreadable: no agent reads it either
         return
-    want = {} if project else {p[1]: json.dumps(v) for p, v in policy.claude_desired()[0].items()
-                               if len(p) == 2 and p[0] == "env" and str(p[1]).startswith("DEVKIT_")}
+    try:
+        have = policy.devkit_env(text)
+        want = {} if project else {p[1]: json.dumps(v) for p, v in policy.claude_desired()[0].items()
+                                   if len(p) == 2 and p[0] == "env" and str(p[1]).startswith("DEVKIT_")}
+    except Exception as e:  # what it sets is unknown: a hook that crashed would let the change pass
+        _log(f"config-change blocked, settings devkit cannot read: {type(e).__name__}")
+        audit.record("config.blocked", path, "unreadable", "blocked")
+        print(f"devkit cannot read {tilde(path)}, so it cannot tell whether it sets devkit's DEVKIT_* variables, "
+              f"which say who calls devkit and where its state lives: refused the change. Make the file plain JSON.",
+              file=sys.stderr)
+        sys.exit(2)
     keys = ", ".join(f"env.{k}" for k in sorted(k for k, v in have.items() if want.get(k) != v))
     if not keys:
         return

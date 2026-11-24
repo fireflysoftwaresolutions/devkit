@@ -468,6 +468,20 @@ class HookReaderTests(TempFolder):
         self.assertEqual(hooks._codex_version(b'{"type": "session_meta", "payload": {"cli_version": "0.167.0"}}'),
                          (0, 167, 0))
 
+    def test_a_settings_file_devkit_fails_to_read_is_refused(self):
+        f = self.write(".claude/settings.local.json", '{"env": {"DEVKIT_HOME": "/var/tmp/x"}')
+        for p in (mock.patch.object(core, "STATE", self.root / "state"), mock.patch.object(hooks, "STATE",
+                                                                                           self.root / "state"),
+                  mock.patch.object(audit, "AUDIT", self.root / "audit"),
+                  mock.patch.object(policy, "devkit_env", side_effect=RuntimeError("cannot read it"))):
+            p.start()
+            self.addCleanup(p.stop)
+        with self.assertRaises(SystemExit) as stop, mock.patch("sys.stderr", io.StringIO()) as err:
+            hooks._refuse_unparsed_env(str(f), True)
+        self.assertEqual(stop.exception.code, 2)
+        self.assertIn("cannot read", err.getvalue())
+        self.assertEqual([r["detail"] for r in audit.records(1, "config.blocked")], ["unreadable"])
+
     def test_sessions_to_restart_skips_a_deep_session_record(self):
         rec = {"agent": "claude", "pid": 1, "session": "s1", "started": 1}
         self.write("sessions/claude-s1.json", json.dumps(rec))
@@ -649,6 +663,31 @@ class HookInputTests(acceptance.Sandbox):
                     {"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange",
                      "source": "local_settings", "file_path": str(local), "cwd": str(self.repo)}))
                 self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.failures(), [])
+
+    def test_config_change_refuses_a_settings_file_with_a_byte_that_is_not_utf8(self):
+        """Claude Code reads such a file with the byte replaced, so its DEVKIT_* variables still take effect."""
+        local = self.repo / ".claude" / "settings.local.json"
+        local.parent.mkdir()
+        user = self.home / ".claude" / "settings.json"
+        user.parent.mkdir(exist_ok=True)
+        for f, source, key in ((local, "local_settings", "DEVKIT_HOME"), (user, "user_settings", "DEVKIT_GUARD")):
+            with self.subTest(source=source):
+                raw = b'{"env": {"' + key.encode() + b'": "/var/tmp/x"}, "note": "caf\xe9"}'
+                f.write_bytes(raw)
+                code, _, err = self.dev_hook("config-change", json.dumps(
+                    {"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange", "source": source,
+                     "file_path": str(f), "cwd": str(self.repo)}))
+                self.assertEqual(code, 2)
+                self.assertIn(f"env.{key}", err)
+                self.assertEqual(f.read_bytes(), raw)
+                self.assertIn(f"env.{key}", self.audit("config.blocked")[-1]["detail"])
+        with self.subTest(source="local_settings, no DEVKIT_* variable"):
+            local.write_bytes(b'{"env": {"NODE_ENV": "test"}, "note": "caf\xe9"}')
+            code, _, err = self.dev_hook("config-change", json.dumps(
+                {"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange", "source": "local_settings",
+                 "file_path": str(local), "cwd": str(self.repo)}))
+            self.assertEqual((code, err), (0, ""))
         self.assertEqual(self.failures(), [])
 
 
