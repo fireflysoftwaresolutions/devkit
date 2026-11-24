@@ -631,16 +631,14 @@ def _drop_marks(sid: str, tid: str):
 
 def _in_ledger(sid: str, name: str) -> bool:
     """Is there anything named `name` (a link counts, never followed) in session `sid`'s folder, opened without
-    following a link (ledger_folder)? False when that folder cannot be opened so."""
+    following a link (ledger_folder)? A name that cannot be looked up counts as there, as for the sweep
+    (_lexists_at): one presence rule for every ledger mark. False when that folder cannot be opened so."""
     try:
         folder = ledger_folder(sid)
     except OSError:
         return False
     try:
-        os.stat(name, dir_fd=folder, follow_symlinks=False)
-        return True
-    except OSError:
-        return False
+        return _lexists_at(folder, name)
     finally:
         os.close(folder)
 
@@ -866,12 +864,14 @@ def _sweep_flags(folder, now: float | None = None, budget: list | None = None, r
     folder (dir_fd): a folder that is a link is left, and one swapped for a link meanwhile is never followed. `budget`
     ([count], shared by the sweep's folders): the flags looked at and planted entries removed, at most _SWEEP_MAX;
     `reads` ([count], shared too): the names listed, at most _LIST_MAX; what is left past either waits for the next
-    sweep. A call's audit claim (audit_claim_path) goes by the same rules."""
+    sweep. A call's audit claim (audit_claim_path) goes by the same rules. Anything but a regular file at a background
+    record's name (background_path) is never a record (keep_background writes a file) and goes too, a folder through
+    the same bounded removal: while it is there, it keeps its call's flag and marks, as a record does."""
     import stat
     now = now or time.time()
     budget = budget if budget is not None else [_SWEEP_MAX]
     reads = reads if reads is not None else [_LIST_MAX]
-    suffixes = (".contested", ".audited")
+    suffixes = (".contested", ".audited", ".background")
     try:
         fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
@@ -894,6 +894,16 @@ def _sweep_flags(folder, now: float | None = None, budget: list | None = None, r
                 break
             budget[0] -= 1
             tid = name[1:-len(suffix)]
+            if suffix == ".background":
+                try:
+                    mode = os.lstat(name, dir_fd=fd).st_mode
+                    if stat.S_ISDIR(mode):
+                        _remove_tree_at(fd, name, _TREE_DEPTH, budget)
+                    elif not stat.S_ISREG(mode):
+                        os.unlink(name, dir_fd=fd)
+                except OSError:
+                    pass
+                continue
             if _lexists_at(fd, f"{tid}.json") or _lexists_at(fd, f".{tid}.background"):
                 continue
             try:
@@ -1606,9 +1616,14 @@ def _read_kept(path, dir_fd: int | None = None):
 
 
 def _kept_background(sid: str, now: float) -> list:
-    """The background shell calls of session `sid` kept for their reads and waits; older ones go. The session's folder
-    is opened once, never through a link (ledger_folder), and every record is read and removed through it."""
-    out = []
+    """The background shell calls of session `sid` kept for their reads and waits; older ones go, and so does anything
+    at a record's name that cannot be read as one: a folder planted there through the bounded tree removal
+    (_remove_tree_at), as the audit claim does, so it never stays to keep the call's marks for every later sweep; the
+    planted folders of one read remove at most _SWEEP_MAX entries together, and the rest waits for the next read. The
+    session's folder is opened once, never through a link (ledger_folder), and every record is read and removed
+    through it."""
+    import stat
+    out, budget = [], [_SWEEP_MAX]
     try:
         folder = ledger_folder(sid)
     except OSError:
@@ -1619,7 +1634,10 @@ def _kept_background(sid: str, now: float) -> list:
             e = _read_kept(name, folder)
             if e is None or now - float(e.get("ts") or 0) > BACKGROUND_KEEP_S:
                 try:
-                    os.unlink(name, dir_fd=folder)
+                    if stat.S_ISDIR(os.lstat(name, dir_fd=folder).st_mode):
+                        _remove_tree_at(folder, name, _TREE_DEPTH, budget)
+                    else:
+                        os.unlink(name, dir_fd=folder)
                 except OSError:
                     pass
                 if e is not None:  # its pin and use marks, kept with it, go with it

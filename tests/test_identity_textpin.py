@@ -2150,6 +2150,64 @@ class LedgerFolderTests(TextPinCase):
             sids.append(sid)
         self.assertEqual([r["ref"]["session"] for r in self.records("caller.token-unexplained-use")], sids)
 
+    # a folder planted at a call's background record counts as one when the call ends (its marks stay, as the sweep
+    # leaves its flag while it is there), and never stays: the record's reader removes it, which unlink cannot, and so
+    # does the sweep when no reader comes; the call's stale flag then goes at the next sweep
+    def planted_background_folder(self, sid, kind="folder"):
+        folder = pg.CALLS / sid
+        folder.mkdir(parents=True)
+        record = identity.background_path(sid, "toolu_bg")
+        if kind == "folder":
+            record.mkdir()
+            (record / "d").mkdir()
+            (record / "d" / "x").write_text("")
+        elif kind == "fifo":
+            os.mkfifo(record)
+        else:
+            os.symlink(self.root / "nowhere", record)
+        flag = identity.contest_path(sid, "toolu_bg")
+        flag.write_text("")
+        old = time.time() - 10 * identity.FLAG_GRACE_S
+        os.utime(flag, (old, old))
+        identity.note_closed("claude", sid, "toolu_bg")
+        self.assertTrue(os.path.lexists(flag))
+        return folder, record, flag
+
+    def test_a_folder_planted_at_a_background_record_goes_at_its_next_read(self):
+        folder, record, flag = self.planted_background_folder("s1")
+        self.assertEqual(identity._kept_background("s1", time.time()), [])
+        self.assertFalse(os.path.lexists(record))
+        identity._sweep_flags(folder, time.time())
+        self.assertFalse(os.path.lexists(flag))
+
+    # the same for a FIFO or a dangling link there
+    def test_anything_but_a_file_planted_at_a_background_record_goes_at_the_sweep(self):
+        for kind in ("folder", "fifo", "dangling-link"):
+            with self.subTest(kind):
+                folder, record, flag = self.planted_background_folder(f"s-{kind}", kind)
+                for _ in range(2):
+                    identity._sweep_flags(folder, time.time())
+                self.assertEqual((os.path.lexists(record), os.path.lexists(flag)), (False, False))
+
+    # a background record that cannot be looked up (the session's folder cannot be searched) counts as one for the
+    # call's end as for the sweep: the end keeps the call's pin, as the sweep keeps its flag
+    def test_a_background_record_that_cannot_be_looked_up_counts_as_one_for_the_end_and_the_sweep(self):
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        flag = identity.contest_path("s1", "toolu_bg")
+        flag.write_text("")
+        old = time.time() - 10 * identity.FLAG_GRACE_S
+        os.utime(flag, (old, old))
+        pin = identity.pin_path("s1", "toolu_bg")
+        pin.parent.mkdir(parents=True, exist_ok=True)
+        pin.write_text("123")
+        folder.chmod(0o600)  # listed, never searched: no name in it can be looked up
+        self.addCleanup(folder.chmod, 0o700)
+        identity._sweep_flags(folder, time.time())
+        identity.note_closed("claude", "s1", "toolu_bg")
+        folder.chmod(0o700)
+        self.assertEqual((os.path.lexists(flag), os.path.lexists(pin)), (True, True))
+
     # an audit that cannot be written is recorded as a swallowed devkit error, never lost silently
     def test_a_contest_audit_that_fails_is_reported(self):
         from devkit import audit, bugs
