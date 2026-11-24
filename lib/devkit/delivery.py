@@ -315,6 +315,30 @@ def summary_line(scope: str) -> str:
             (f" · release train: {p['release_train']}" if p.get("release_train") else ""))
 
 
+def release_tag_format(repo, policy=None) -> str:
+    """The format of the project's release tags: `policy`'s tag_format (the recorded delivery policy when `policy` is
+    None), else the one dev delivery detects from the repository's CalVer, SemVer or PEP 440 tags, else vYY.MM.PATCH.
+    A repository whose tags follow no version scheme has no format to detect, so it gets the default."""
+    if policy is None:
+        try:
+            policy = load(scope_for(repo))
+        except Exception:  # the handoff repository is optional
+            policy = None
+    fmt = (policy or {}).get("tag_format")
+    if not fmt:
+        scheme, found = _scheme_from_tags(_tags(Path(repo)))
+        fmt = found if scheme in ("calver", "semver", "pep440") else None
+    return fmt or "vYY.MM.PATCH"
+
+
+def release_tag(repo, version: str, policy=None) -> str:
+    """The tag that names `version` in this project: v<version> when its release_tag_format starts with v, else
+    <version>. dev release creates and pushes it, names its GitHub release after it, and checks it before it tags;
+    devkit's CI watch follows it; and the release workflow dev ci init generates runs on tags spelled this way
+    (release_tag(repo, "") is the prefix of that workflow's tag pattern). `policy`: release_tag_format's."""
+    return ("v" if release_tag_format(repo, policy).startswith("v") else "") + version
+
+
 def tag_violation(scope: str, tag: str):
     """A tag that does not follow the recorded scheme -> the reason, else None."""
     p = load(scope)

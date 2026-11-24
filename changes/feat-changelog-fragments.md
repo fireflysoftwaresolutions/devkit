@@ -13,3 +13,7 @@
 
 - `dev release` refuses a version whose tag the repository wrote without the `v` (`26.11.4`), as it already refused
   one tagged `v26.11.4`, so a repository whose tag format has no `v` cannot release a shipped version twice.
+- `dev release` creates, pushes, and names its GitHub release with the tag in the project's format: `26.11.4` where
+  the delivery policy's tag format, or the repository's own version tags, have no `v`, and `v26.11.4` otherwise. It
+  tagged `v26.11.4` everywhere, so the release workflow that `dev ci init` generates for a repository without the
+  `v` never started. `dev calver` and devkit's CI watch name the tag the same way.

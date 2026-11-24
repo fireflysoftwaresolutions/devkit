@@ -2421,6 +2421,42 @@ class ReleaseTests(unittest.TestCase):
             s.branch("feat/x")
             self.assertIn("releases are cut from `main`", dev("release")[2])
 
+    def test_release_tags_the_version_in_the_projects_tag_format_and_its_release_workflow_runs_on_it(self):
+        # dev release tagged v<version> whatever the format, so a repository whose tags have no v never started the
+        # release workflow dev ci init generates for it, which runs on <version> tags only
+        from devkit import pipelines
+        cases = (("a policy without the v", {"versioning": "calver", "tag_format": "YY.MM.PATCH"}, (), "26.11.4"),
+                 ("a policy with the v", {"versioning": "calver", "tag_format": "vYY.MM.PATCH"}, (), "v26.11.4"),
+                 ("nothing recorded or tagged", None, (), "v26.11.4"),
+                 ("no policy, tags without the v", None, ("26.11.3",), "26.11.4"))
+        for name, policy, tags, want in cases:
+            other = want[1:] if want.startswith("v") else "v" + want
+            with self.subTest(name), Sandbox() as s:
+                if policy:
+                    f = delivery.POLICIES / "acme" / "widget.json"
+                    f.parent.mkdir(parents=True)
+                    f.write_text(json.dumps(policy))
+                for t in tags:
+                    git(s.repo, "tag", t)
+                git(s.repo, "push", "-q", "origin", "--tags")
+                dev("ci", "--mark-passed")
+                s.gh.on(["run", "list"], [])
+                s.gh.on(["release", "create"], f"https://github.com/acme/widget/releases/tag/{want}\n")
+                rc, out, err = dev("release", "--version", "26.11.4")
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(s.head(f"{want}^{{commit}}", repo=s.origin), s.head())
+                self.assertEqual(gitx._ref_sha(s.origin, f"refs/tags/{other}"), "")
+                call = s.gh.called("release", "create")[0]
+                self.assertEqual((call[call.index("create") + 1], call[call.index("--title") + 1]), (want, want))
+                self.assertIn(f"released {want} ·", out)
+                workflow = pipelines.generate(s.repo, "github", policy=policy)[0][".github/workflows/release.yml"]
+                trigger = re.search(r'tags: \["([^"]+)"\]', workflow).group(1)
+                self.assertTrue(pipelines.gh_glob(trigger, want), trigger)
+                self.assertFalse(pipelines.gh_glob(trigger, other), trigger)
+                rc, _, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 2, err)
+                self.assertIn(f"tag {want} already exists", err)
+
     def test_the_recorded_delivery_policy_wins(self):
         with Sandbox() as s:
             dev("ci", "--mark-passed")

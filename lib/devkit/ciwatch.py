@@ -1022,7 +1022,10 @@ def _devkit_or_gh(prog: str, args: list, cwd: str) -> list:
         return [_branch(top, base, f"refs/remotes/origin/{base}")] if base else []
     if prog == "dev" and args[:1] == ["release"]:
         version = next((args[k + 1] for k, a in enumerate(args[:-1]) if a == "--version"), "")
-        return [_tag(top, "v" + version.lstrip("v") if version else _newest_tag(top, at="HEAD"))]
+        if not version:
+            return [_tag(top, _newest_tag(top, at="HEAD"))]
+        from . import delivery  # the tag spelled as dev release created it
+        return [_tag(top, delivery.release_tag(top, version.lstrip("v")))]
     return []
 
 

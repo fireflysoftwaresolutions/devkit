@@ -4572,7 +4572,8 @@ def cmd_calver(a):
         return 0
     print(ui.kv("repository", tilde(top), 12))
     print(ui.kv("current", cur or "no CalVer tag yet", 12))
-    print(ui.kv("next", f"{nxt}  (tag v{nxt}, branch release/{nxt})", 12))
+    from . import delivery
+    print(ui.kv("next", f"{nxt}  (tag {delivery.release_tag(top, nxt)}, branch release/{nxt})", 12))
     return 0
 
 

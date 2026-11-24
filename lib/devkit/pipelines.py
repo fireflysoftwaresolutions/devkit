@@ -4696,15 +4696,11 @@ TARGETS = {"github": ".github/workflows/ci.yml", "gitlab": ".gitlab-ci.yml", "bi
 
 
 def _tag_patterns(policy, root: Path) -> dict:
-    fmt = (policy or {}).get("tag_format")
-    if not fmt:
-        try:
-            from . import delivery
-            fmt = delivery._scheme_from_tags(delivery._tags(root))[1]
-        except Exception:
-            fmt = None
-    fmt = fmt or "vYY.MM.PATCH"
-    v = "v" if fmt.startswith("v") else ""
+    """The release tag patterns of the generated pipelines: tags spelled as dev release creates them
+    (delivery.release_tag), so the release workflow runs on every tag dev release pushes."""
+    from . import delivery
+    fmt = delivery.release_tag_format(root, policy)
+    v = delivery.release_tag(root, "", policy)
     return {"tag_format": fmt, "tag_glob": f"{v}[0-9]+.[0-9]+.[0-9]+", "tag_regex": f"/^{v}\\d+\\.\\d+\\.\\d+$/",
             "tag_bb": f"{v}*.*.*", "tag_az": f"{v}*"}
 

@@ -84,6 +84,12 @@ dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35
   the next version to use (`dev calver --next`); in a SemVer project, a tag that is not `vMAJOR.MINOR.PATCH` is
   refused, and in a `pep440` project, a tag that is not a PEP 440 version. Change the policy to release another way.
   A raw `git tag` is not checked.
+- **`dev release` names the tag in the project's format.** The tag is `v26.11.4` when the policy's tag format starts
+  with `v` (`vYY.MM.PATCH`) and `26.11.4` when it does not (`YY.MM.PATCH`). Without a recorded policy, the format is
+  the one `dev delivery` detects from the repository's CalVer, SemVer, or PEP 440 tags, and `v<version>` when there
+  is none. `dev release` pushes that tag and names the GitHub release after it, the release workflow that
+  `dev ci init` generates runs on tags spelled the same way, and `dev calver` and devkit's CI watch use that
+  spelling too.
 - **Release work requires the `release-policy` skill.** Tags and releases (`git tag`, `dev release`, `gh release`),
   `release` work, and changes to `VERSION` or release-tool configuration require the `delivery` and `release-policy`
   skills. A push or a PR requires `delivery`, and a `CHANGELOG.md` entry requires `docs` (see
