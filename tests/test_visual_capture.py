@@ -981,8 +981,14 @@ capture.run(input.request, { chromium: { launch } }).then(
 process.on('exit', () => { fs.writeSync(1, JSON.stringify(out)); });
 """
 
-# A detector that never answers: it writes its pid into the file named by its first argument and waits two minutes.
-HUNG_DETECTOR = "require('fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 120000);"
+# A detector that never answers, started the way dev impeccable starts its engine: a wrapper process that runs the
+# engine as its own child, which shares the wrapper's stdout, and waits for it. Each writes its pid into the file
+# named by its first argument (the wrapper's line first, the engine's second), and the engine waits two minutes.
+HUNG_ENGINE = ("require('fs').appendFileSync(process.argv[1], String(process.pid) + '\\n'); "
+               "setTimeout(() => {}, 120000);")
+HUNG_DETECTOR = ("const fs = require('fs'); fs.appendFileSync(process.argv[1], String(process.pid) + '\\n'); "
+                 "require('child_process').spawn(process.execPath, ['-e', " + json.dumps(HUNG_ENGINE) + ", "
+                 "process.argv[1]], { stdio: ['ignore', 'inherit', 'ignore'] }).on('exit', () => process.exit(1));")
 
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
@@ -1021,9 +1027,9 @@ class TheBoundEndsWhatTheCaptureStarted(unittest.TestCase):
         self.assertEqual([line for line in ps.splitlines() if str(self.run_.tmp) in line], [],
                          "the browser outlived the capture")
 
-    def test_a_detector_still_running_at_the_bound_is_stopped_and_the_capture_process_ends(self):
+    def test_a_detector_still_running_at_the_bound_is_stopped_with_its_engine_and_the_capture_process_ends(self):
         # the bound leaves the capture time to reach its checks (step 8) on a loaded Mac; the detector it starts there
-        # never answers, and the capture would wait for it up to its own 60 s timeout
+        # never answers, and its engine, a child of its own, holds the detector's output open until it ends
         pid_file = self.run_.top / "detector.pid"
         self.addCleanup(self._kill, pid_file)
         request = self.run_.request(f"{self.server.base}/page.html",
@@ -1032,23 +1038,36 @@ class TheBoundEndsWhatTheCaptureStarted(unittest.TestCase):
         payload = {"mode": "capture", "core": PLAYWRIGHT["core"], "request": request,
                    "bounds": {"captureSeconds": 20}}
         started = time.monotonic()
-        p = noderun.run([NODE, str(HARNESS)], json.dumps(payload), timeout=120, env=self.run_.env(),
-                        tmpdir=str(self.run_.tmp), cwd=str(self.run_.work))
+        try:
+            p = noderun.run([NODE, str(HARNESS)], json.dumps(payload), timeout=60, env=self.run_.env(),
+                            tmpdir=str(self.run_.tmp), cwd=str(self.run_.work))
+        except subprocess.TimeoutExpired:
+            self.fail("the capture process waited for the detector's engine after its bound")
         took = time.monotonic() - started
         self.assertEqual(p.returncode, 0, p.stderr[-2000:])
         out = json.loads(p.stdout)
         self.assertEqual((out["ok"], out["code"], out["step"]), (False, "time-bound", 8), out)
-        self.assertTrue(pid_file.exists(), "the capture did not start the detector")
+        pids = self._pids(pid_file)
+        self.assertEqual(len(pids), 2, "the capture did not start the detector and its engine")
         self.assertLess(took, 45, "the capture process waited for the detector after its bound")
-        with self.assertRaises(ProcessLookupError, msg="the detector outlived the capture"):
-            os.kill(int(pid_file.read_text()), 0)
+        for pid, who in zip(pids, ("detector", "engine")):
+            with self.assertRaises(ProcessLookupError, msg=f"the {who} outlived the capture"):
+                os.kill(pid, 0)
 
     @staticmethod
-    def _kill(pid_file):
+    def _pids(pid_file):
         try:
-            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            return [int(line) for line in pid_file.read_text().split()]
         except (OSError, ValueError):
-            pass
+            return []
+
+    @classmethod
+    def _kill(cls, pid_file):
+        for pid in cls._pids(pid_file):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
