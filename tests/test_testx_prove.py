@@ -520,13 +520,14 @@ class JsModuleKeptTests(unittest.TestCase):
                               r"test/util.test.mjs::src\n")
 
     # a test of such a module that fails without the production change proves it, on an error too: only the
-    # production change was undone, so nothing else decided the failure
+    # production change was undone, so nothing else decided the failure. Here the failing test reads what the helper's
+    # edit gives first, so with the helper's base body it would fail on another error
     @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
     def test_a_test_of_a_kept_javascript_module_that_fails_without_the_change_proves_it(self):
         before = UTIL_HEAD + "function h() {\n  return null;\n}\n\n" + \
             'test("a", () => assert.equal(util.value(), 1));\n'
         after = before.replace("return null;", "return { k: 1 };") + \
-            'test("other", () => assert.equal(util.other(), 3));\n' + \
+            'test("other", () => {\n  const k = h().k;\n  assert.equal(util.other() * k, 3);\n});\n' + \
             'test("tripled", () => {\n  const k = h().k;\n' \
             '  assert.equal((util.other ?? (() => 0))() * 3 * k, 9);\n});\n'
         rc, out, err = node_prove(before, after, "--json")
