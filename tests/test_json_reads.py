@@ -32,7 +32,7 @@ import test_acceptance_hooks as acceptance  # noqa: E402  (the hook entry run as
 import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extension runs it)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import (audit, branches, bugs, canary, ciwatch, continuity, core, gates, gc,  # noqa: E402
+from devkit import (audit, branches, bugs, canary, ciwatch, codexlaunch, continuity, core, gates, gc,  # noqa: E402
                     hooks, language, lessonlint, lessons, mcp, policy, scope, shellparse, skillguard, state)
 from devkit.visual import compare as vcompare, map as vmap, report as vreport, store as vstore, walk as vwalk  # noqa: E402,E501
 
@@ -497,6 +497,48 @@ class HookReaderTests(TempFolder):
                     self.assertEqual(hooks._stdin_json(), {})
 
 
+class CodexLaunchReaderTests(TempFolder):
+    """A Codex parent's rollout, which its model's tool calls fill, read for native launches and interruptions."""
+
+    META = {"timestamp": "2026-11-23T10:00:00Z", "type": "session_meta", "payload": {"id": "T1"}}
+
+    @staticmethod
+    def activity(aid, kind="interrupted", extra=""):
+        return ('{"timestamp": "2026-11-23T10:00:05Z", "type": "event_msg", "payload": {"type": "item_completed", '
+                '"thread_id": "T1", "item": {"type": "SubAgentActivity", "kind": "' + kind + '", "agent_thread_id": "'
+                + aid + '", "id": "c-' + aid + '"' + extra + "}}}")
+
+    @staticmethod
+    def spawn(arguments: str):
+        return {"timestamp": "2026-11-23T10:00:01Z", "type": "response_item", "payload": {
+            "type": "function_call", "name": "spawn_agent", "namespace": "collaboration", "call_id": "c1",
+            "arguments": arguments}}
+
+    def test_a_deep_first_record_is_no_session_meta(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                t = self.write("r.jsonl", '{"type": "session_meta", "payload": {"id": "T1", "x": ' + deep(d) + "}}\n")
+                self.assertEqual(codexlaunch.session_meta(t), {})
+                self.assertEqual(codexlaunch.spawn_calls(t), ([], {}))
+
+    def test_lifecycle_events_skip_a_deep_interruption(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                t = self.write("r.jsonl", lines(self.META, self.activity("A1"),
+                                                self.activity("A2", extra=', "x": ' + deep(d))))
+                self.assertEqual(sorted(codexlaunch.lifecycle_events(t, "T1", ["A1", "A2"])), ["A1"])
+
+    def test_deep_spawn_arguments_leave_the_snapshot_incomplete(self):
+        t = self.write("r.jsonl", lines(self.META, self.spawn('{"task_name": "scan"}')))
+        self.assertEqual([c["task_name"] for c in codexlaunch.spawn_calls(t)[0]], ["scan"])
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                why = []
+                t = self.write("r.jsonl", lines(self.META, self.spawn('{"task_name": "scan", "x": ' + deep(d) + "}")))
+                self.assertEqual(codexlaunch.spawn_calls(t, diagnostics=why), ([], {}))
+                self.assertEqual(why, ["parent rollout is incomplete, unreadable, or malformed"])
+
+
 class HookInputTests(acceptance.Sandbox):
     """bin/dev hook end to end, as Claude Code starts it (-I -S, the payload on stdin): a hook input nested too deep
     reads as a malformed one (the hook fails open, its output the same, no error logged), and the ConfigChange hook
@@ -585,9 +627,6 @@ REVIEWED = {
     ("ciwatch", "job_annotation"): (1, TOOL),
     ("cli", "_config_broken"): (1, CONFIG),
     ("cli", "_config_validate"): (1, SHIPPED),
-    ("codexlaunch", "lifecycle_events"): (1, HELD),
-    ("codexlaunch", "session_meta"): (1, HELD),
-    ("codexlaunch", "spawn_calls"): (3, HELD),
     ("codexrpc", "CodexRPC.call"): (1, TOOL),
     ("configschema", "audit_config"): (1, COPY),
     ("configschema", "loads"): (1, CONFIG),
