@@ -4867,6 +4867,28 @@ def _built_installs(top, dest, linked, listed) -> tuple:
     return out, stuck
 
 
+def _put_now(top, dest, files) -> None:
+    """Put `files` in the copy at `dest` as they are now in the checkout at `top` (a file the change deletes goes),
+    and clear the copy's bytecode caches."""
+    for f in files:
+        dst = os.path.join(dest, f)
+        if os.path.islink(dst) or os.path.lexists(dst) and not os.path.exists(os.path.join(top, f)):
+            os.remove(dst)
+        if os.path.exists(os.path.join(top, f)):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "wb") as fh:
+                fh.write(Path(top, f).read_bytes())
+    _clear_caches(dest)
+
+
+def _clear_caches(dest) -> None:
+    for d, subs, _ in os.walk(dest):
+        subs[:] = [s for s in subs if s not in DEP_DIRS and s != ".git"]
+        if "__pycache__" in subs:
+            shutil.rmtree(os.path.join(d, "__pycache__"), ignore_errors=True)
+            subs.remove("__pycache__")
+
+
 def _restore_base(top, base, dest, files) -> None:
     for f in files:
         dst = os.path.join(dest, f)
@@ -4880,11 +4902,7 @@ def _restore_base(top, base, dest, files) -> None:
                 fh.write(p.stdout)
         elif os.path.lexists(dst):
             os.remove(dst)
-    for d, subs, _ in os.walk(dest):
-        subs[:] = [s for s in subs if s not in DEP_DIRS and s != ".git"]
-        if "__pycache__" in subs:
-            shutil.rmtree(os.path.join(d, "__pycache__"), ignore_errors=True)
-            subs.remove("__pycache__")
+    _clear_caches(dest)
 
 
 def _carry_git(top, dest) -> str:
@@ -4965,7 +4983,9 @@ _NOT_FROM_COPY = "cannot be proven: imported none of the changed files from the 
 # a test of a module that keeps its change (_rebuild_helpers) that passes without the change: + the module's first
 # difference outside its helpers' bodies
 _HELPERS_KEPT = "cannot be proven: its module keeps a change outside its helpers' bodies: "
-# a test of a rebuilt module that fails without the change on anything but an assertion: + what it raised
+# a test whose run without the change undid test support it reaches (its module rebuilt, a rebuilt module or a test
+# helper file it imports) that fails there on anything but an assertion, and passes once more with that support as it
+# is now (_prove): + what it raised
 _NOT_ASSERTION = "cannot be proven: without the change it fails on "
 
 _NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD,
@@ -5621,6 +5641,16 @@ def _prove(a, top, runners) -> int:
     # the tests that import a file the change adds cannot reach an assertion without it
     added = [f for f in undo if not at_base[f]]
     needs_added = _dependents(repo, added) if added else set()
+    # the test support the run without the change undoes: the rebuilt modules and the helper files restored. A test
+    # that reaches it (its own module, or one it imports, as the import graph or the run's record shows) proves the
+    # change by an assertion failure; any other failure there runs once more with the support as it is now, where a
+    # failure proves the production change and a pass leaves it unproven (a name or member only the support's edit
+    # gives says nothing about what the test asserts)
+    support = set(inner) | {h for h in undo if h in helpers}
+    reaches = {}  # test file -> the support files it imports, by the import graph
+    for g in sorted(support):
+        for x in _dependents(repo, [g]):
+            reaches.setdefault(x, set()).add(g)
     plan, unreached = [], []  # unreached: changed test files whose change reaches none of their tests
     for f in tests:
         r = owner(runners, f)
@@ -5660,6 +5690,7 @@ def _prove(a, top, runners) -> int:
     dest = tempfile.mkdtemp(prefix=f"{PROVE_COPY}{os.getpid()}-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
     found, problem, gitless, built_stuck = {}, None, "", []
+    rerun, again_now = set(), {}  # tests run once more with the support as it is now, and whether they failed there
     evidence = {"from_copy": [], "from_checkout": [], "recorded": 0, "unrecorded": [], "py": [], "js": []}
     # Ordinary proof execution is unchanged, but its import environment is not attested for lesson suppression.
     listed = _copy_files(top)  # one list: what the copy holds is what the evidence names, on both sides
@@ -5737,6 +5768,7 @@ def _prove(a, top, runners) -> int:
                         without[key] = ("failed", _tail_line(cover[1]), cover[0], "") if cover else \
                             ("not run", "", "", "")
             evidence = _import_evidence(records, top, dest, undo, linked)
+            seen = set(_import_evidence(records, top, dest, sorted(support), linked)["from_copy"]) if support else set()
             # a Python child that skipped the recorder leaves the run's record incomplete: run each test file again
             # with a record of its own, so only the files that start such a child lose their proof. Only a Python
             # test file outside --isolated-imports has its verdict read from a record: no other file runs again.
@@ -5754,6 +5786,23 @@ def _prove(a, top, runners) -> int:
                         # the file did not load this time (the first run left state that stops it): its record says
                         # nothing about what its tests import
                         by_file[f]["recorded"] = 0
+            rerun = {key for key, (st, msg, stop, failure) in without.items()
+                     if st == "failed" and failure != "assertion" and stop not in ("load", "setup") and
+                     not _stopped_at_import(msg) and (key[0] in support or reaches.get(key[0]) or
+                                                      _lang(key[0]) == "py" and seen - {key[0]})}
+            if rerun:
+                _put_now(top, dest, sorted(support))
+                for r, sel, members in groups.values():
+                    mine = [m for m in members if any(k[0] == m[0] for k in rerun)]
+                    if not mine:
+                        continue
+                    res = run_tests(dest, r, files=[f for f, _, ids in mine if not ids],
+                                    ids=[i for _, _, ids in mine for i in ids or ()], env=env,
+                                    **({"isolated_imports": True} if isolated else {}))
+                    for key, c in place(res, mine):
+                        if key in rerun:
+                            again_now[key] = again_now.get(key, False) or c["status"] == "failed" and \
+                                not c.get("load_failed") and not _stopped_at_import(c["message"])
     finally:
         shutil.rmtree(dest, ignore_errors=True)
         shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any
@@ -5789,10 +5838,10 @@ def _prove(a, top, runners) -> int:
                    _SETUP_STOPPED if st == "failed" and stop == "setup" else
                    # a failure proves the change only when the changed code it ran came from the copy
                    _NOT_FROM_COPY if st == "failed" and py and py_undo and not mine["from_copy"] else
-                   # a rebuilt module's test proves the change only by an assertion failure: anything else it raises
-                   # (a name or member only the change's helper edit gives) says nothing about what it asserts
-                   f"{_NOT_ASSERTION}{failure}, not on an assertion" if st == "failed" and rec["file"] in inner and
-                   failure != "assertion" else
+                   # a test that reached the support the run undid proves the change by an assertion failure, or by
+                   # failing once more with that support as it is now: anything else it raises (a name or member only
+                   # the support's edit gives) says nothing about what it asserts
+                   f"{_NOT_ASSERTION}{failure}, not on an assertion" if key in rerun and not again_now.get(key) else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
@@ -5866,8 +5915,10 @@ def _prove(a, top, runners) -> int:
                 (_HELPERS_KEPT, ui.WARN, "cannot be proven: their module keeps a change outside its helpers' bodies "
                                          "(named below), so the run without the change ran it as it is now, and they "
                                          "pass:"),
-                (_NOT_ASSERTION, ui.WARN, "cannot be proven: their module came back as the base module with the tests "
-                                          "now, and without the change they fail on an error, not on an assertion:"),
+                (_NOT_ASSERTION, ui.WARN, "cannot be proven: without the change their test support (their module "
+                                          "rebuilt, a rebuilt module or a test helper file they import) came back as "
+                                          "at the base, and they fail on an error, not on an assertion, and pass "
+                                          "with that support as it is now:"),
                 (_NOT_FROM_COPY, ui.WARN, "cannot be proven: the run without the change imported none of the changed "
                                           "Python files from the copy, so nothing shows that it ran the code without "
                                           "the change:"),

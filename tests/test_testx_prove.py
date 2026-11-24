@@ -576,6 +576,71 @@ class RebuildVerdictTests(unittest.TestCase):
                               r"test_calc.CalcTests.test_pair  · an added helper `pair` \(line 9\)")
 
 
+CROSS_HEAD = ("import sys\nimport unittest\nfrom pathlib import Path\n\nsys.path.insert(0, str(Path(__file__).resolve()"
+              ".parents[1]))\nsys.path.insert(0, str(Path(__file__).resolve().parent))\nimport calc  # noqa: E402\n")
+CROSS_TESTS = "\n\nclass CalcTests(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(calc.add(1, 2), 3)\n"
+OLD_MAKE = "class Old:\n    pass\n\n\ndef make():\n    return Old()\n"
+NEW_MAKE = OLD_MAKE.replace("return Old()", "class N:\n        def extra(self):\n            return 1\n    return N()")
+CROSS_NEW = "\n    def test_x(self):\n        self.assertEqual(make().extra(), 1)\n" + TEST_MUL
+
+
+class SupportRerunTests(unittest.TestCase):
+    # a test whose run without the change undid test support (its own module rebuilt, or a rebuilt module or a test
+    # helper file it imports) and failed there on an error, not on an assertion, runs once more with that support as
+    # it is now: a failure there proves the production change (here a function the change adds), a pass leaves it
+    # unproven, named by what it raised (a member only the support's edit gives)
+    def test_an_error_under_a_rebuild_proves_only_when_the_support_as_it_is_now_fails_too(self):
+        before = fake_module("def make():\n    return [0]\n\n\n")
+        after = before.replace("return [0]", "return {'k': 1}") + TEST_MUL + \
+            "\n    def test_key(self):\n        self.assertEqual(make()['k'], 1)\n"
+        rc, rows, text = prove_rows(before, after)
+        self.assertEqual([("test_calc.CalcTests.test_key", "cannot be proven: without the change it fails on "
+                                                            "TypeError, not on an assertion"),
+                          ("test_calc.CalcTests.test_mul", "proves the change")], rows, text)
+        self.assertEqual(0, rc, text)
+
+    def test_a_test_that_imports_another_rebuilt_module_proves_only_by_an_assertion_or_the_rerun(self):
+        b_old = CROSS_HEAD + "\n\n" + OLD_MAKE + CROSS_TESTS.replace("CalcTests", "BTests")
+        a_old = CROSS_HEAD + "from test_b import make  # noqa: E402\n" + CROSS_TESTS
+        with Env() as e:
+            r = e.repo({"calc.py": PROVE_BASE["calc.py"], "tests/test_b.py": b_old, "tests/test_a.py": a_old})
+            edit(r, {"calc.py": MUL, "tests/test_b.py": b_old.replace(OLD_MAKE, NEW_MAKE),
+                     "tests/test_a.py": a_old + CROSS_NEW})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+        self.assertEqual({"test_a.CalcTests.test_x": "cannot be proven: without the change it fails on AttributeError, "
+                                                     "not on an assertion",
+                          "test_a.CalcTests.test_mul": "proves the change",
+                          "test_b.BTests.test_add": "does not test the change"},
+                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
+
+    def test_a_test_that_imports_a_changed_helper_file_proves_only_by_an_assertion_or_the_rerun(self):
+        a_old = CROSS_HEAD + "from helpers import make  # noqa: E402\n" + CROSS_TESTS
+        with Env() as e:
+            r = e.repo({"calc.py": PROVE_BASE["calc.py"], "tests/helpers.py": OLD_MAKE, "tests/test_a.py": a_old})
+            edit(r, {"calc.py": MUL, "tests/helpers.py": NEW_MAKE, "tests/test_a.py": a_old + CROSS_NEW})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+        self.assertEqual({"test_a.CalcTests.test_x": "cannot be proven: without the change it fails on AttributeError, "
+                                                     "not on an assertion",
+                          "test_a.CalcTests.test_mul": "proves the change"},
+                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
+        self.assertEqual(0, rc, out + err)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_a_javascript_error_under_a_rebuild_proves_when_the_module_as_it_is_now_fails_too(self):
+        head = NODE_HEAD + 'import * as util from "../src/util.mjs";\n\n'
+        before = head + "function h() {\n  return 1;\n}\n\n" + 'test("a", () => assert.equal(util.value(), 1));\n'
+        after = before.replace("return 1;", "return 2 - 1;") + \
+            'test("other", () => assert.equal(util.other(), 3));\n'
+        with Env() as e:
+            r = e.repo({"package.json": NODE_PACKAGE, "src/util.mjs": "export const value = () => 1;\n",
+                        "test/util.test.mjs": before})
+            edit(r, {"src/util.mjs": "export const value = () => 1;\nexport const other = () => 3;\n",
+                     "test/util.test.mjs": after})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+        self.assertEqual({"test/util.test.mjs::other": "proves the change"},
+                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
+
+
 class SameShapeGroupTests(unittest.TestCase):
     # helpers of one class and name in the same places on both sides (a getter beside its setter, a beforeEach in
     # each of two describes) are matched place by place, so a fix in one comes back as its base text and is proven
