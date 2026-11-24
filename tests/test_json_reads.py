@@ -31,7 +31,7 @@ import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extensi
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import (audit, bugs, canary, ciwatch, continuity, core, gates, language, lessonlint,  # noqa: E402
-                    lessons, mcp, policy, scope, skillguard, state)
+                    lessons, mcp, policy, scope, shellparse, skillguard, state)
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
 # inside every reader's window (canary reads the last 400 KB of a transcript).
@@ -305,6 +305,47 @@ class ForeignTextReaderTests(TempFolder):
                 text = '{"env": {"DEVKIT_HOME": "/x", "DEVKIT_A": ' + deep(d) + '}, "y": ' + deep(d) + "}"
                 self.assertEqual(policy.devkit_env(text), {"DEVKIT_HOME": '"/x"', "DEVKIT_A": deep(d)})
 
+    def test_a_deep_package_json_names_no_main(self):
+        pkg = self.root / "tool"
+        for name in ("app.js", "index.js"):
+            self.write(f"tool/{name}", "")
+        self.write("tool/package.json", '{"main": "app.js"}')
+        self.assertEqual(shellparse._run_target(pkg, "node"), pkg / "app.js")
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                self.write("tool/package.json", '{"main": "app.js", "x": ' + deep(d) + "}")
+                self.assertEqual(shellparse._run_target(pkg, "node"), pkg / "index.js")
+
+
+class PreToolHookTests(acceptance.Sandbox):
+    """The PreToolUse hook end to end: a command that runs node on a folder outside the repository whose package.json
+    is deep, then `dev watch --wait`. The hook's readers of the command (the speaker stamp, the crew-lane advice) read
+    the folder's index.js instead, and none fails: a failing one logs its traceback and loses its rewrite or advice."""
+
+    def test_node_on_a_folder_with_a_deep_package_json(self):
+        tool = self.home / "vendor" / "tool"  # outside the repository: devkit reads a program it cannot trust
+        tool.mkdir(parents=True)
+        (tool / "index.js").write_text("console.log('hi')\n")
+        self.start_claude_turn()
+        log = self.state / "logs" / "hooks.log"
+        for n, d in enumerate(DEPTHS):
+            with self.subTest(depth=d):
+                (tool / "package.json").write_text('{"main": "index.js", "x": ' + deep(d) + "}")
+                cmd = f"node {tool} && dev watch --wait"
+                out = self.hook("pre-tool", "claude", self.claude("PreToolUse", tool_name="Bash",
+                                                                  tool_input={"command": cmd},
+                                                                  tool_use_id=f"toolu_0{n}"))
+                self.assertEqual(acceptance.decision(out), "allow")
+                failed = [ln for ln in (log.read_text() if log.exists() else "").splitlines()
+                          if ln.endswith("Error: maximum recursion depth exceeded while decoding a JSON array from a "
+                                         "unicode string") or "pre-tool route" in ln or "pre-tool advice" in ln]
+                self.assertEqual(failed, [])
+
+
+@unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
+class PreToolHookPython39Tests(PreToolHookTests):
+    python = "/usr/bin/python3"
+
 
 class McpServerTests(unittest.TestCase):
     """`dev mcp` end to end, as the Claude Desktop extension starts it (-I -S): a client message nested too deep gets
@@ -479,8 +520,6 @@ REVIEWED = {
     ("selfcheck", "d6_config_keys"): (1, SHIPPED),
     ("setup", "branch_cleanup_checks"): (1, TOOL),
     ("setup", "load_conf"): (1, SHIPPED),
-    ("shellparse", "_run_target"): (1, "OPEN: the package.json of a folder a shell command runs, read by the "
-                                       "PreToolUse hook; any cloned repository writes it"),
     ("sleep", "_old_record"): (1, OWN),
     ("testx", "_json_loose"): (1, COMMAND + " (the project's tsconfig)"),
     ("testx", "parse_go_json"): (1, TOOL),
