@@ -94,7 +94,9 @@ dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35
   on tags spelled as `dev release` spells them: `X.Y.Z` under CalVer; `X.Y.Z` and its pre-releases (`X.Y.Z-rc.1`)
   under SemVer; and under PEP 440, `X.Y.Z` with an `aN`, `bN`, or `rcN` pre-release, a `.postN`, and a `.devN`
   (`0.1.0a17`). On GitHub and GitLab no other tag starts a release, `v1.2.3junk` and SemVer build metadata
-  (`1.2.3+build.5`) included; the Bitbucket and Azure patterns are wider (`v*.*.*`, `v*`).
+  (`1.2.3+build.5`) included; the Bitbucket and Azure patterns are wider (`v*.*.*`, `v*`). `dev release` takes
+  `X.Y.Z` only, so a SemVer pre-release tag comes from `dev push`, and under PEP 440 a version without three release
+  numbers or with an epoch (`0.2a1`, `1!1.0.0`) starts no release workflow.
 - **Release work requires the `release-policy` skill.** Tags and releases (`git tag`, `dev release`, `gh release`),
   `release` work, and changes to `VERSION` or release-tool configuration require the `delivery` and `release-policy`
   skills. A push or a PR requires `delivery`, and a `CHANGELOG.md` entry requires `docs` (see
