@@ -80,6 +80,22 @@ class SpaceSeparatorScopeTests(unittest.TestCase):
             self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("scope"), ["lib/a b.py"])
 
 
+class BlankLetterScopeTests(unittest.TestCase):
+    # The Hangul fillers (U+115F, U+1160, U+3164, U+FFA0) are letters and the blank Braille pattern (U+2800) a symbol,
+    # so neither the format nor the space rule caught them, yet each shows as nothing or as a space while the path
+    # holds another character.
+    refused = PythonIndependentCharacterScopeTests.refused
+
+    def test_a_scope_with_a_hangul_filler_or_the_blank_braille_pattern_is_refused(self):
+        for c in ("\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"):
+            with self.subTest(code=f"U+{ord(c):04X}"):
+                self.refused(f"lib/a{c}b.py")
+        with TempState():  # Hangul letters that show (U+3131, U+314F) name a real file
+            pg.start("Feature", plan=["parser=30m"], now=T0)
+            pg.assign("parser", "Neo", scope="lib/\u3131\u314f.py", now=T0 + 60)
+            self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("scope"), ["lib/\u3131\u314f.py"])
+
+
 class AssignScopeTests(unittest.TestCase):
     def test_assign_refuses_a_scope_with_a_secret_and_saves_nothing(self):
         # assign saved the scope text unchecked: a token in it went into the run

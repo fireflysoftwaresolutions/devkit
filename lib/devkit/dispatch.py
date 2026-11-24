@@ -157,12 +157,15 @@ SCOPE_HELP = ("--scope takes repository-relative paths or globs, such as lib/** 
 # of the Python that reads the scope: a format character a newer version added (U+0890, in Unicode 14) is Cn, and so
 # kept, on a Python whose Unicode is older.
 _INVISIBLE = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# Letters and symbols that show as nothing or as a space: the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0) and the
+# blank Braille pattern (U+2800). Their categories (Lo, So) hold real path characters, so they are named one by one.
+_BLANK = frozenset("\u115f\u1160\u3164\uffa0\u2800")
 
 
 def _lookalike(c: str) -> bool:
-    """A space separator (Zs) other than the plain space: it shows as a plain space while the path holds another
-    character."""
-    return c != " " and unicodedata.category(c) == "Zs"
+    """A space separator (Zs) other than the plain space, or a blank letter or symbol (_BLANK): it shows as a plain
+    space, or as nothing, while the path holds another character."""
+    return c in _BLANK or (c != " " and unicodedata.category(c) == "Zs")
 
 
 def _scope_entries(scope: str) -> list:
