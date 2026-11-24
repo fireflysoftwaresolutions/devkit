@@ -193,8 +193,8 @@ def _section(heading: str, body: list, parts: list) -> list:
     """A version's section rebuilt with the fragments' entries: the lines before its first `###` subsection stay,
     each subsection keeps its lines and takes the new entries after them, and a missing Keep a Changelog subsection
     is added before the first one that comes after it in that order. Blank lines are normalized: one after each
-    heading and between subsections, and before new entries that follow a fenced code block. A `###` line in a fenced
-    code block is code, not a subsection."""
+    heading and between subsections, and before each new entry that follows a fenced code block, the subsection's
+    own or one that ends the entry before it. A `###` line in a fenced code block is code, not a subsection."""
     intro, subs, current = [], [], None
     for ln, code in zip(body, _fenced(body)):
         m = None if code else re.match(r"^###\s+(.*?)\s*$", ln)
@@ -211,7 +211,7 @@ def _section(heading: str, body: list, parts: list) -> list:
         return SECTIONS.index(key) if key in SECTIONS else None
 
     for name in SECTIONS:
-        new = [ln for p in parts for entry in p.get(name, []) for ln in entry.split("\n")]
+        new = [entry.split("\n") for p in parts for entry in p.get(name, [])]
         if not new:
             continue
         sub = next((s for s in subs if rank(s[0]) == SECTIONS.index(name)), None)
@@ -220,8 +220,12 @@ def _section(heading: str, body: list, parts: list) -> list:
             later = next((k for k, s in enumerate(subs)
                           if rank(s[0]) is not None and rank(s[0]) > SECTIONS.index(name)), len(subs))
             subs.insert(later, sub)
-        kept = _trim(sub[1])
-        sub[1] = kept + ([""] if kept and _fenced(kept)[-1] else []) + new  # a code block ends: a blank line
+        lines = _trim(sub[1])
+        for entry in new:
+            if lines and _fenced(lines)[-1]:  # a code block ends: a blank line before the next entry (MD031)
+                lines.append("")
+            lines += entry
+        sub[1] = lines
     out = [heading, ""]
     if _trim(intro):
         out += _trim(intro) + [""]

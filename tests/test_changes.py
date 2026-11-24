@@ -9,6 +9,8 @@ Run: python3 -m unittest tests.test_changes -v"""
 import argparse
 import contextlib
 import io
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -168,6 +170,20 @@ class MergeTests(unittest.TestCase):
                             [changes.parse(EXPORT, "changes/a.md")])
         self.assertEqual(out, PREAMBLE + "\n" + section + "\n- `dev export` writes CSV.\n\n### Fixed\n\n"
                               "- Exports keep quoted commas.\n\n" + OLD)
+
+    def test_a_new_entry_that_ends_in_a_code_block_is_followed_by_a_blank_line(self):
+        example = "### Added\n\n- A config example:\n\n  ```toml\n  a = 1\n  ```\n"
+        out = changes.merge(PREAMBLE + "\n" + OLD, "26.11.28", "2026-11-23",
+                            [changes.parse(example, "changes/a.md"), changes.parse(LOGIN, "changes/b.md")])
+        self.assertEqual(out, PREAMBLE + "\n## [26.11.28] - 2026-11-23\n\n### Added\n\n- A config example:\n\n"
+                              "  ```toml\n  a = 1\n  ```\n\n- The login page remembers the last user\n  for 30 days.\n\n"
+                              + OLD)
+        lint = shutil.which("markdownlint-cli2")
+        if lint:  # the written CHANGELOG passes markdownlint's defaults, blanks around fences (MD031) included
+            with tempfile.TemporaryDirectory() as d:
+                (Path(d) / "CHANGELOG.md").write_text(out)
+                run = subprocess.run([lint, "CHANGELOG.md"], cwd=d, capture_output=True, text=True, timeout=120)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
     def test_an_unreleased_section_stays_on_top(self):
         unreleased = "## [Unreleased]\n\n### Added\n\n- Not yet.\n"
