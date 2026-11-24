@@ -808,12 +808,31 @@ REVIEWED = {
     ("work", "_shown_lists"): (1, OWN),
     ("work", "writing"): (1, OWN),
 }
-PARSERS = ("load", "loads", "JSONDecoder")
+# json's parsers, and the submodules that hold them (json.decoder.JSONDecoder, json.scanner's scanner)
+PARSERS = ("load", "loads", "JSONDecoder", "decoder", "scanner")
+
+
+def _json_import(node) -> bool:
+    """An import that names json's parsers other than as json.<name>: `from json import loads`, `from json.decoder
+    import JSONDecoder`, `import json as j`, `import json.decoder`."""
+    if isinstance(node, ast.ImportFrom):
+        return node.level == 0 and (node.module == "json" or str(node.module).startswith("json."))
+    return isinstance(node, ast.Import) and any(a.name.startswith("json.") or a.name == "json" and a.asname
+                                                for a in node.names)
+
+
+def _json_parser_ref(node) -> bool:
+    """A reference to one of json's parsers, called or not: json.loads(t), map(json.loads, ...), parse = json.loads,
+    json.JSONDecoder() kept for later, json.decoder.JSONDecoder, and getattr(json, ...), whose name is any string."""
+    if isinstance(node, ast.Attribute):
+        return isinstance(node.value, ast.Name) and node.value.id == "json" and node.attr in PARSERS
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr" and \
+        bool(node.args) and isinstance(node.args[0], ast.Name) and node.args[0].id == "json"
 
 
 def raw_parses(package: Path):
-    """-> ({(module, enclosing function): count of json.load/loads/JSONDecoder calls}, [aliases that would hide one]):
-    `from json import loads`, `import json as j`. core.load_json, the depth-bounded parser, is left out."""
+    """-> ({(module, enclosing function): count of references to json's parsers}, [imports that would hide one]).
+    core.load_json, the depth-bounded parser, is left out."""
     found, aliases = {}, []
     for f in sorted(package.rglob("*.py")):
         module = ".".join(f.relative_to(package).with_suffix("").parts)
@@ -824,12 +843,9 @@ def raw_parses(package: Path):
                 inner = names
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     inner = names + [child.name]
-                if isinstance(child, ast.ImportFrom) and child.module == "json" or \
-                        isinstance(child, ast.Import) and any(a.name == "json" and a.asname for a in child.names):
+                if _json_import(child):
                     aliases.append(f"{module}:{child.lineno}")
-                if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) and \
-                        isinstance(child.func.value, ast.Name) and child.func.value.id == "json" and \
-                        child.func.attr in PARSERS:
+                if _json_parser_ref(child):
                     key = (module, ".".join(inner) or "<module>")
                     if key != ("core", "load_json"):
                         found[key] = found.get(key, 0) + 1
@@ -858,10 +874,20 @@ class RawParseGuardTests(unittest.TestCase):
                                               "        return json.loads(t), inner\n")
             (pkg / "core.py").write_text("import json\n\ndef load_json(t):\n    return json.loads(t)\n")
             (pkg / "c.py").write_text("from json import loads\nimport json as j\n")
+            # json's parsers reached without a json.loads(...) call: its submodules, a reference passed or kept, a
+            # name looked up at run time, and a decoder made once at import and used later
+            (pkg / "d.py").write_text(
+                "import json.decoder\nimport json.scanner\nfrom json.decoder import JSONDecoder as D\nimport json\n"
+                "DEC = json.JSONDecoder()\nparse = json.loads\n\n"
+                "def g(t):\n    return json.decoder.JSONDecoder().decode(t)\n\n"
+                "def h(ts):\n    return list(map(json.loads, ts))\n\n"
+                "def k(t, name):\n    return getattr(json, name)(t)\n\n"
+                "def m(t):\n    return DEC.decode(t)\n")
             found, aliases = raw_parses(pkg)
         self.assertEqual(found, {("a", "<module>"): 1, ("a", "f"): 1, ("sub.b", "C.m"): 1,
-                                 ("sub.b", "C.m.inner"): 1})
-        self.assertEqual(aliases, ["c:1", "c:2"])
+                                 ("sub.b", "C.m.inner"): 1, ("d", "<module>"): 2, ("d", "g"): 1, ("d", "h"): 1,
+                                 ("d", "k"): 1})
+        self.assertEqual(aliases, ["c:1", "c:2", "d:1", "d:2", "d:3"])
 
 
 if __name__ == "__main__":
