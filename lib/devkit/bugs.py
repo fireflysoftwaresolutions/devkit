@@ -1689,7 +1689,7 @@ def stdlib_namespaces() -> list:
     import marshal, math, os, pathlib, platform, plistlib, posixpath, pty, py_compile, random, re  # noqa: E401
     import secrets, select, selectors, shlex, shutil, signal, socket, stat, statistics, string, struct  # noqa: E401
     import subprocess, sys  # noqa: E401
-    import sysconfig, tarfile, tempfile, termios, textwrap, threading, time, traceback, types  # noqa: E401
+    import sysconfig, tarfile, tempfile, termios, textwrap, threading, time, tokenize, traceback, types  # noqa: E401
     import typing, unicodedata, uuid, warnings, zipfile, zlib  # noqa: E401
     import concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse  # noqa: E401
     import urllib.request, xml.etree.ElementTree, xml.parsers.expat  # noqa: E401
