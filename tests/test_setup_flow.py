@@ -181,7 +181,7 @@ class Mac:
         with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(wizard, "STATE", state), \
                 mock.patch.object(setup, "STATE", state), mock.patch.object(wizard, "survey", self.survey), \
                 mock.patch.object(wizard, "_exec", self.exec), mock.patch.object(wizard, "_attached", self.attach), \
-                mock.patch.object(wizard, "package_status", lambda groups: self.packages), \
+                mock.patch.object(wizard, "package_status", lambda groups, folder=None: self.packages), \
                 mock.patch.object(wizard, "_npm_globals", lambda groups: list(self.npm)), \
                 mock.patch.object(wizard, "detect_docker", lambda: {"colima": self.docker != "missing",
                                                                     "running": self.docker == "running"}), \

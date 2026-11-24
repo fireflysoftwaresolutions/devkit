@@ -177,15 +177,27 @@ class RecordTest(base.StoreCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(self.captures(), [c["id"]])
 
+    # the refusal names where the description is as every other command does (store.not_here): gone from this Mac's
+    # store when this Mac took the capture, else on the Mac that took it
     def test_a_capture_whose_description_is_not_on_this_mac_is_refused(self):
         c = self.shot()
         (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+        self.patched(base.work, "PRESENCE", new=self.tmp / "presence")
+        base.presence(self.tmp / "presence", "bob@m-studio01", "studio")
         path = self.records / "captures" / f"{c['id']}.json"
-        before = path.read_bytes()
-        with self.assertRaises(store.VisualError) as e:
-            capture_checks.check(P, c["id"])
-        self.assertIn(f"The description of {c['id']} is not on this Mac", str(e.exception))
-        self.assertEqual(path.read_bytes(), before)
+        then = ("so devkit cannot tell whether the page still lays out as its picture shows. Nothing was changed. "
+                f"Capture it again here, with its own signals: dev visual capture --again {c['id']}")
+        for where, said in (("m-test0001", "is no longer in this Mac's store"),
+                            ("m-studio01", "is not on this Mac: it was taken on studio (m-studio01)")):
+            with self.subTest(where=where):
+                rec = self.record(c["id"])
+                rec["image"]["where"] = f"local:{where}"
+                store.save(P, rec)
+                before = path.read_bytes()
+                with self.assertRaises(store.VisualError) as e:
+                    capture_checks.check(P, c["id"])
+                self.assertEqual(str(e.exception), f"The description of {c['id']} {said}, {then}")
+                self.assertEqual(path.read_bytes(), before)
 
     def test_an_audit_is_checked_capture_by_capture_and_an_external_picture_is_left_out(self):
         c = self.shot(check=False)

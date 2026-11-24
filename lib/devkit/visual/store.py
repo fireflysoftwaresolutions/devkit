@@ -262,12 +262,19 @@ def _where():
 def taken_here(c: dict) -> bool:
     """Did this Mac take capture `c`? Then a picture or description of it missing from the local store was pruned
     here, not left on another Mac. The picture's `where` names the Mac: this Mac's machine id, or, for a capture from
-    before the machine id, a hostname this Mac carried when the capture was taken (identity.was_this_mac at its
-    `taken` time, as work.mine reads an older record): another Mac may carry that name now."""
+    before the machine id (or from a Mac without one, which identity.machine names by its hostname), a hostname this
+    Mac carried when the capture was taken (identity.was_this_mac at its `taken` time, as work.mine reads an older
+    record). Another Mac may carry that name, now or at the same time, so a hostname names this Mac only when the
+    record's user is this user too, as work.mine requires."""
     on = str((c.get("image") or {}).get("where") or "").removeprefix("local:")
     if not on:
         return False
     m = identity.machine()
+    if identity.MACHINE_ID.fullmatch(on):
+        return on == m.id
+    user = _user()
+    if not user or str((c.get("by") or {}).get("user") or "") != user:
+        return False
     try:
         at = calendar.timegm(time.strptime(str(c.get("taken")), "%Y-%m-%dT%H:%M:%SZ"))
     except ValueError:
@@ -1147,8 +1154,8 @@ def add_finding(project: str, capture_id=None, *, element=None, mark=None, selec
             element = mark_element(c, mark)
         if element or selector:
             if desc is None:
-                raise VisualError(f"The description of {c['id']} is not on this Mac, so its elements cannot be "
-                                  f"read. Capture it here: dev visual capture --again {c['id']}")
+                raise VisualError(f"{not_here(c, 'description')}, so its elements cannot be read. Capture it "
+                                  f"here: dev visual capture --again {c['id']}")
             if element:
                 e = next((e for e in elements if e.get("id") == element), None)
                 if e is None:
@@ -1634,10 +1641,16 @@ def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = 
     taken = "picture before was taken on {} and is " + ("no longer in its store" if pruned else "not on this Mac")
     said = ("picture before is no longer in this Mac's store, so nothing was compared" if pruned
             else taken.format(vmap.mac_name(before_on)))
-    # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history
-    on_id = (vmap.this_mac() if pruned else before_on if identity.MACHINE_ID.fullmatch(str(before_on or "")) else
-             None) or "another Mac"
-    kept = f" · nothing compared: the {taken.format(on_id)}" if away else ""
+    # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history.
+    # This Mac without a machine id (identity.machine names it by its hostname) has none to give, so the words say the
+    # Mac that took the picture no longer has it, never that another Mac took it
+    mine = vmap.this_mac() if pruned else None
+    if pruned and not mine:
+        recorded = "picture before is no longer in the store of the Mac that took it"
+    else:
+        recorded = taken.format((mine if pruned else before_on if identity.MACHINE_ID.fullmatch(str(before_on or ""))
+                                 else None) or "another Mac")
+    kept = f" · nothing compared: the {recorded}" if away else ""
     # the words a person reads
     nothing = (f" · the {said}" if pruned else f" · nothing compared: the {said}") if away else ""
 

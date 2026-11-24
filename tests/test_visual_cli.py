@@ -28,7 +28,7 @@ _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import cli, core, work  # noqa: E402
-from devkit.visual import commands, store, walk  # noqa: E402
+from devkit.visual import commands, npmroot, store, walk  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
 import test_visual_store as base  # noqa: E402
 
@@ -446,7 +446,7 @@ class CaptureLinesTest(unittest.TestCase):
                                                                          "impeccable": "not installed"},
                                             "signals": []}}
         err, out = io.StringIO(), io.StringIO()
-        with mock.patch.object(commands, "_npm_root", return_value=Path("/opt/homebrew/lib/node_modules")), \
+        with mock.patch.object(npmroot, "global_root", return_value=Path("/opt/homebrew/lib/node_modules")), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             commands._print_captures([rec], "VA-g33z0k2m4q", "next")
         self.assertIn("axe.min.js in /opt/homebrew/lib/node_modules/axe-core does not match axe-core 4.14.0. The "
