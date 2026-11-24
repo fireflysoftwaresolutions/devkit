@@ -1394,9 +1394,12 @@ def config_change(agent: str):
     if settings is None:
         _refuse_unreadable(path, project)
         return
-    drift = [] if project else [d for d in policy.diff_claude(settings)
-                                if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
-    env_keys = _devkit_env_change(path, settings, managed=not project)
+    try:
+        drift = [] if project else [d for d in policy.diff_claude(settings)
+                                    if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
+        env_keys = _devkit_env_change(path, settings, managed=not project)
+    except Exception as e:  # a hook that crashed exits without blocking: the change would pass unchecked
+        _refuse_unchecked(path, project, e)
     if not drift and not env_keys:
         return
     ks = sorted({d.key for d in drift} | {f"env.{k}" for k in env_keys})
@@ -1429,6 +1432,33 @@ def config_change(agent: str):
     print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
           f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`.",
           file=sys.stderr)
+    sys.exit(2)
+
+
+def _refuse_unchecked(path: str, project: bool, error: Exception):
+    """Refuse a change to a settings file devkit read but could not check (config_change): its checks raised, on
+    JSON whose shape they do not take (not an object, a hooks event that is not a list) or on devkit's own
+    configuration (policy.claude_desired). Exit 2, recorded, and the file never rewritten: devkit names what to fix."""
+    from . import audit, policy
+    own = None
+    if not project:  # the project's and local settings are checked against no configuration of devkit's
+        try:
+            policy.claude_desired()
+        except Exception as e:
+            own = e
+    if own is not None:
+        _log(f"config-change blocked, devkit's configuration failed: {type(own).__name__}")
+        audit.record("config.blocked", path, "unchecked: devkit's configuration", "blocked")
+        print(f"devkit's own configuration failed to load ({type(own).__name__}), so it cannot check the settings it "
+              f"manages in {tilde(path)}: refused the change, the file left as it is. Run dev doctor.", file=sys.stderr)
+        sys.exit(2)
+    what = (f"{tilde(path)} for devkit's DEVKIT_* variables" if project else
+            f"the settings it manages in {tilde(path)}")
+    _log(f"config-change blocked, settings devkit could not check: {type(error).__name__}")
+    audit.record("config.blocked", path, "unchecked", "blocked")
+    print(f"devkit could not check {what} ({type(error).__name__}): refused the change, the file left "
+          f"as it is. Make it a settings object as Claude Code documents it (hooks and env as objects); if it is one, "
+          f"run dev doctor.", file=sys.stderr)
     sys.exit(2)
 
 

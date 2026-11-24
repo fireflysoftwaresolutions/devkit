@@ -804,6 +804,29 @@ class HookInputTests(acceptance.Sandbox):
                 self.assertEqual(self.audit("config.blocked")[-1]["detail"], "unreadable")
         self.assertEqual(self.failures(), [])
 
+    def test_config_change_refuses_a_readable_settings_file_it_cannot_check(self):
+        """JSON devkit reads but whose shape its checks of the managed keys and DEVKIT_* variables do not take (not an
+        object, or a hooks event that is not a list) made the hook crash, and a crashed hook lets the change pass:
+        the change is refused whole, the file left as it is."""
+        user = self.home / ".claude" / "settings.json"
+        user.parent.mkdir(exist_ok=True)
+        project = self.repo / ".claude" / "settings.json"
+        project.parent.mkdir()
+        cases = [(user, "user_settings", '{"hooks": {"Stop": "x"}}'), (user, "user_settings", "[1]"),
+                 (user, "user_settings", '"x"'), (project, "project_settings", '[{"env": {"DEVKIT_HOME": "/x"}}]')]
+        for f, source, text in cases:
+            with self.subTest(source=source, text=text):
+                f.write_text(text)
+                code, _, err = self.dev_hook("config-change", json.dumps(
+                    {"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange", "source": source,
+                     "file_path": str(f), "cwd": str(self.repo)}))
+                self.assertEqual(code, 2, err)
+                self.assertIn("devkit could not check", err)
+                self.assertEqual(f.read_text(), text)
+                self.assertEqual(self.audit("config.blocked")[-1]["detail"], "unchecked")
+                log = self.state / "logs" / "hooks.log"
+                self.assertNotIn("config-change claude error", log.read_text() if log.exists() else "")
+
 @unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
 class HookInputPython39Tests(HookInputTests):
     python = "/usr/bin/python3"

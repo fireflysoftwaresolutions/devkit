@@ -116,6 +116,33 @@ class ConfigChangeTests(unittest.TestCase):
         self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unreadable")
         self.assertEqual(self.spawned, [])  # a file devkit cannot read it never rewrites
 
+    def test_readable_user_settings_are_refused_when_devkit_configuration_fails(self):
+        # a hook that crashed would exit without blocking, so the change would pass unchecked
+        s = managed_settings()
+        s["env"] = dict(s.get("env") or {}, DEVKIT_GUARD="off")
+        self.settings.write_text(json.dumps(s))
+        before = self.settings.read_bytes()
+        with mock.patch.object(policy, "claude_desired", side_effect=KeyError("hooks")):
+            code, err = self.change_written()
+        self.assertEqual(code, 2)
+        self.assertIn("devkit's own configuration failed to load (KeyError)", err)
+        self.assertIn("Run dev doctor.", err)
+        self.assertEqual(self.settings.read_bytes(), before)
+        self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unchecked: devkit's configuration")
+        self.assertEqual(self.spawned, [])
+
+    def test_readable_user_settings_are_refused_when_the_managed_keys_check_fails(self):
+        before = json.dumps(managed_settings())
+        self.settings.write_text(before)
+        with mock.patch.object(policy, "diff_claude", side_effect=TypeError("unhashable")):
+            code, err = self.change_written()
+        self.assertEqual(code, 2)
+        self.assertIn("devkit could not check the settings it manages", err)
+        self.assertIn("(TypeError)", err)
+        self.assertEqual(self.settings.read_text(), before)
+        self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unchecked")
+        self.assertEqual(self.spawned, [])
+
     def change_written(self):
         """The ConfigChange hook on the user settings as they are on disk -> (exit code, stderr)."""
         payload = {"session_id": "s1", "hook_event_name": "ConfigChange", "source": "user_settings",
