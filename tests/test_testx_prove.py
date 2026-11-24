@@ -470,21 +470,30 @@ class FailureKindTests(unittest.TestCase):
                 "</testsuites>\n")
         self.assertEqual({"test/a.test.mjs::value": "assertion", "test/a.test.mjs::get": "TypeError"},
                          {c["id"]: c.get("failure") for c in testx.parse_node_junit(node, top, top)})
+        # jest's expect.assertions(n) and expect.hasAssertions() fail a test that asserted too little: an assertion
         jest = {"testResults": [{"name": "/w/src/a.test.ts", "assertionResults": [
             {"fullName": f"t{i}", "status": "failed", "failureMessages": [m]} for i, m in enumerate((
                 "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 1\nReceived: 0",
                 "AssertionError: expected 0 to be 1 // Object.is equality",
-                "TypeError: make(...).get is not a function\n    at Object.<anonymous> (/w/src/a.test.ts:6:20)"))]}]}
+                "TypeError: make(...).get is not a function\n    at Object.<anonymous> (/w/src/a.test.ts:6:20)",
+                "Error: expect.assertions(2)\n\nExpected two assertions to be called but received one assertion call.",
+                "expect.hasAssertions()\n\nExpected at least one assertion to be called but received none."))]}]}
         self.assertEqual({"src/a.test.ts::t0": "assertion", "src/a.test.ts::t1": "assertion",
-                          "src/a.test.ts::t2": "TypeError"},
+                          "src/a.test.ts::t2": "TypeError", "src/a.test.ts::t3": "assertion",
+                          "src/a.test.ts::t4": "assertion"},
                          {c["id"]: c.get("failure") for c in testx.parse_jest_json(json.dumps(jest), top)})
+        # pytest's Failed (pytest.raises or pytest.warns that saw nothing, pytest.fail) is the test's own check
         pytest = ('<testsuites><testsuite name="pytest">'
                   '<testcase classname="tests.test_x" name="test_a"><failure message="assert 0 == 1">x</failure>'
                   '</testcase><testcase classname="tests.test_x" name="test_b"><failure message="TypeError: '
                   "'list' object is not callable\">x</failure></testcase>"
                   '<testcase classname="tests.test_x" name="test_c"><failure message="json.decoder.JSONDecodeError: '
-                  'Expecting value: line 1 column 1 (char 0)">x</failure></testcase></testsuite></testsuites>')
-        self.assertEqual(["assertion", "TypeError", "json.decoder.JSONDecodeError"],
+                  'Expecting value: line 1 column 1 (char 0)">x</failure></testcase>'
+                  '<testcase classname="tests.test_x" name="test_d"><failure message="Failed: DID NOT RAISE '
+                  '&lt;class \'ValueError\'&gt;">x</failure></testcase>'
+                  '<testcase classname="tests.test_x" name="test_e"><failure message="Failed: add is off by one">x'
+                  '</failure></testcase></testsuite></testsuites>')
+        self.assertEqual(["assertion", "TypeError", "json.decoder.JSONDecodeError", "assertion", "assertion"],
                          [c.get("failure") for c in testx.parse_junit(pytest, top, top, "pytest")])
 
 
