@@ -143,7 +143,7 @@ def sessions_to_restart(sessions_dir=None, alive=None) -> list:
     out = []
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
-            s = json.loads(f.read_text())
+            s = core.load_json(f.read_text())
         except (OSError, ValueError):
             continue
         if not isinstance(s, dict) or s.get("agent") not in AGENT_NAMES or not s.get("pid"):
@@ -2334,7 +2334,7 @@ def codex_rollout(transcript) -> tuple:
         if b'"CommandExecution"' not in ln:
             continue
         try:
-            rec = json.loads(ln)
+            rec = core.load_json(ln)
         except ValueError:
             continue
         p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
@@ -2350,7 +2350,7 @@ def codex_rollout(transcript) -> tuple:
 def _item_record(line: bytes) -> bool:
     """Is a rollout line an item record (event_msg item_completed) that Codex wrote itself?"""
     try:
-        rec = json.loads(line)
+        rec = core.load_json(line)
     except ValueError:
         return False
     p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
@@ -2360,7 +2360,7 @@ def _item_record(line: bytes) -> bool:
 def _codex_version(line: bytes) -> tuple:
     """The Codex CLI version a rollout's first record (its session_meta) names, as numbers; () when it names none."""
     try:
-        rec = json.loads(line)
+        rec = core.load_json(line)
     except ValueError:
         return ()
     meta = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "session_meta" else None

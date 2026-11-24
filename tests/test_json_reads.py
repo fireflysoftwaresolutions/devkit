@@ -446,6 +446,38 @@ class HookReaderTests(TempFolder):
     """What the hooks read besides their input: a Codex rollout's command records, its first record and devkit's
     session records; and the hook input as the capture and the identity read it."""
 
+    def test_codex_rollout_skips_a_deep_command_record(self):
+        meta = {"type": "session_meta", "payload": {"cli_version": "0.167.0"}}
+
+        def item(n):
+            return {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "CommandExecution", "id": f"E{n}", "command": ["ls"]}}}
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                t = self.write("r.jsonl", lines(meta, item(1), json.dumps(item(2))[:-3] + ', "x": ' + deep(d) + "}}}"))
+                items, _ = hooks.codex_rollout(str(t))
+                self.assertEqual(sorted(items), ["E1"])
+
+    def test_a_deep_item_or_meta_record_names_no_item_and_no_version(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                self.assertFalse(hooks._item_record(('{"type": "event_msg", "payload": {"type": "item_completed", '
+                                                     '"item": {"x": ' + deep(d) + "}}}").encode()))
+                self.assertEqual(hooks._codex_version(('{"type": "session_meta", "payload": {"cli_version": '
+                                                       '"0.167.0", "x": ' + deep(d) + "}}").encode()), ())
+        self.assertEqual(hooks._codex_version(b'{"type": "session_meta", "payload": {"cli_version": "0.167.0"}}'),
+                         (0, 167, 0))
+
+    def test_sessions_to_restart_skips_a_deep_session_record(self):
+        rec = {"agent": "claude", "pid": 1, "session": "s1", "started": 1}
+        self.write("sessions/claude-s1.json", json.dumps(rec))
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                self.write("sessions/claude-s2.json", json.dumps(dict(rec, session="s2"))[:-1] + ', "x": ' + deep(d)
+                           + "}")
+                got = hooks.sessions_to_restart(self.root / "sessions", alive=lambda *a: True)
+                self.assertEqual([s["session"] for s in got], ["s1"])
+
     def test_a_deep_hook_input_is_captured_unparsed_and_names_no_session(self):
         for d in DEPTHS:
             with self.subTest(depth=d):
@@ -592,11 +624,7 @@ REVIEWED = {
     ("gitx", "_only_skipped"): (1, TOOL),
     ("gitx", "ctx"): (1, TOOL),
     ("gitx", "gh_json"): (2, TOOL),
-    ("hooks", "_codex_version"): (1, HELD),
     ("hooks", "_devkit_env_change"): (1, HELD),
-    ("hooks", "_item_record"): (1, HELD),
-    ("hooks", "codex_rollout"): (1, HELD),
-    ("hooks", "sessions_to_restart"): (1, HELD),
     ("identity", "_read_kept"): (1, OWN),
     ("identity", "_read_used"): (1, OWN),
     ("identity", "read_uses"): (1, OWN),
