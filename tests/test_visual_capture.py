@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +34,9 @@ import _hermetic  # noqa: E402
 
 _hermetic.activate()
 import _sandbox  # noqa: E402  (the net against this Mac's real codex, claude, brew and gh)
+
+sys.path.insert(0, str(ROOT / "lib"))
+from devkit.visual import noderun  # noqa: E402
 
 MODULE = ROOT / "lib" / "devkit" / "visual" / "capture.cjs"
 FIXTURES = ROOT / "tests" / "fixtures" / "visual" / "capture"
@@ -859,23 +863,34 @@ class TextChangesAfterTheScreenshot(unittest.TestCase):
         self.assertEqual((record["redaction"]["text_changed"], record["redaction"]["retried"]), (True, False))
 
 
-# Runs capture.run with the capture bound lowered and the browser's start held back, then prints how the capture ended:
-# "late" holds the real start until after the bound; "hung" never starts, and fails the way Playwright's launch does
-# when its `timeout` runs out (180 s when none is given), so a pending start keeps node alive as a real one does.
+# Runs capture.run with the capture bound lowered and the browser's start held back, then prints, when node exits, how
+# the capture ended and whether the held-back browser did start: "late" holds the real start until after the bound and
+# then starts with a timeout of its own (the one capture.cjs gives it, computed before the hold, is spent by then);
+# "hung" never starts, and fails the way Playwright's launch does when its `timeout` runs out (180 s when none is
+# given), so a pending start keeps node alive as a real one does.
 START_DRIVER = r"""
-const [module, input] = [process.argv[1], JSON.parse(require('fs').readFileSync(0, 'utf8'))];
+const fs = require('fs');
+const [module, input] = [process.argv[1], JSON.parse(fs.readFileSync(0, 'utf8'))];
 const capture = require(module);
 const { chromium } = require(input.core);
 capture.BOUNDS.captureSeconds = input.bound;
 const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+const out = { started: false };
 const launch = input.start === 'late'
-  ? async (options) => { await wait(input.hold_ms); return chromium.launch(options); }
+  ? async (options) => {
+    await wait(input.hold_ms);
+    const browser = await chromium.launch({ ...options, timeout: 60000 });
+    out.started = true;
+    return browser;
+  }
   : (options) => new Promise((_, fail) => setTimeout(() => fail(Object.assign(
     new Error(`browserType.launch: Timeout ${options.timeout || 180000}ms exceeded.`), { name: 'TimeoutError' })),
   options.timeout || 180000));
 capture.run(input.request, { chromium: { launch } }).then(
-  () => { process.stdout.write(JSON.stringify({ ok: true })); },
-  (e) => { process.stdout.write(JSON.stringify({ ok: false, code: e.code, step: e.step })); });
+  () => { Object.assign(out, { ok: true }); },
+  (e) => { Object.assign(out, { ok: false, code: e.code, step: e.step }); });
+// the capture fails at its bound, before a late browser has started: node ends once that browser is closed
+process.on('exit', () => { fs.writeSync(1, JSON.stringify(out)); });
 """
 
 
@@ -900,7 +915,8 @@ class TheBoundCoversTheBrowsersStart(unittest.TestCase):
         try:
             out, err = proc.communicate(json.dumps(payload), timeout=self.HANG_GUARD)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            # node's group, and the browser's own group, which names its profile in the run's TMPDIR
+            noderun.stop(proc, str(self.run_.tmp))
             out, err = proc.communicate()
             out = None
         if out is None:
@@ -915,9 +931,124 @@ class TheBoundCoversTheBrowsersStart(unittest.TestCase):
 
     def test_a_browser_that_starts_after_the_bound_is_closed_before_it_loads_the_page(self):
         out = self.start("late", hold_ms=3000)
-        self.assertEqual((out["ok"], out["code"], out["step"]), (False, "time-bound", 1))
+        self.assertEqual((out["ok"], out["code"], out["step"], out["started"]), (False, "time-bound", 1, True))
         self.assertEqual(self.server.httpd.hits, [], "the capture went on after its bound and loaded the page")
         self.assertEqual(self.run_.stored(), [])
+
+
+# Runs capture.run with the capture bound lowered, a step that outlasts it, and a browser slow to exit: the first call
+# to its close ends `exit_ms` after Playwright's own, the way a browser that disconnected keeps writing its profile
+# for a moment, or never ends (`exit_ms` null: a browser that does not answer). Prints, when node exits, how the
+# capture ended, how often the browser was closed, whether the capture killed a process group, and, when the
+# capture's folder was removed, whether that first close had ended and how many processes still named the folder.
+CLOSE_DRIVER = r"""
+const fs = require('fs');
+const path = require('path');
+const [module, input] = [process.argv[1], JSON.parse(fs.readFileSync(0, 'utf8'))];
+const capture = require(module);
+const { chromium } = require(input.core);
+capture.BOUNDS.captureSeconds = input.bound;
+const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+const out = { closes: 0, exited: false, killed: false, removed: null };
+const kill = process.kill;
+process.kill = (pid, sig) => {
+  if (pid < 0) out.killed = true;
+  return kill.call(process, pid, sig);
+};
+const launch = async (options) => {
+  const browser = await chromium.launch(options);
+  const close = browser.close.bind(browser);
+  browser.close = async () => {
+    out.closes += 1;
+    if (out.closes > 1) return close();
+    if (input.exit_ms === null) return new Promise(() => {});
+    await close();
+    await wait(input.exit_ms);
+    out.exited = true;
+  };
+  return browser;
+};
+const rmSync = fs.rmSync;
+fs.rmSync = (target, options) => {
+  if (path.basename(String(target)).startsWith('devkit-capture-')) {
+    const ps = require('child_process').execFileSync('ps', ['-A', '-ww', '-o', 'command='], { encoding: 'utf8' });
+    out.removed = { exited: out.exited, browsers: ps.split('\n').filter((line) => line.includes(target)).length };
+  }
+  return rmSync(target, options);
+};
+capture.run(input.request, { chromium: { launch } }).then(
+  () => { out.code = null; }, (e) => { out.code = e.code; });
+process.on('exit', () => { fs.writeSync(1, JSON.stringify(out)); });
+"""
+
+# A detector that never answers: it writes its pid into the file named by its first argument and waits two minutes.
+HUNG_DETECTOR = "require('fs').writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 120000);"
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class TheBoundEndsWhatTheCaptureStarted(unittest.TestCase):
+    # At the bound the capture stops the browser and the detector, and removes its folder only once the browser has
+    # exited, so nothing the capture started outlives it.
+    def setUp(self):
+        self.run_ = _Run()
+        self.addCleanup(self.run_.close)
+        self.server = _Server().__enter__()
+        self.addCleanup(self.server.__exit__)
+
+    def close_at_the_bound(self, exit_ms):
+        payload = {"request": self.run_.request(f"{self.server.base}/page.html", recipe=recipe(steps=["wait 10000"])),
+                   "core": PLAYWRIGHT["core"], "bound": 3, "exit_ms": exit_ms}
+        p = noderun.run([NODE, "-e", CLOSE_DRIVER, str(MODULE)], json.dumps(payload), timeout=90,
+                        env=self.run_.env(), tmpdir=str(self.run_.tmp), cwd=str(self.run_.work))
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        out = json.loads(p.stdout)
+        self.assertEqual(out["code"], "time-bound", out)
+        self.assertEqual(list(self.run_.tmp.iterdir()), [], "the capture's folder is left behind")
+        return out
+
+    def test_the_capture_removes_its_folder_after_the_browser_closed_at_the_bound_has_exited(self):
+        # the browser exits 2 s after Playwright's close; on a loaded Mac that can pass the wait for it, and then the
+        # capture kills it: either way no browser process is left to write in the folder when it is removed
+        out = self.close_at_the_bound(2000)
+        self.assertEqual(out["closes"], 1, out)
+        self.assertEqual(out["removed"]["browsers"], 0, out)
+        self.assertTrue(out["removed"]["exited"] or out["killed"], f"the folder was removed while the browser ran: {out}")
+
+    def test_a_browser_that_does_not_close_at_the_bound_is_stopped_before_its_folder_is_removed(self):
+        out = self.close_at_the_bound(None)
+        self.assertEqual((out["killed"], out["removed"]["browsers"]), (True, 0), out)
+        ps = subprocess.run(["ps", "-A", "-ww", "-o", "command="], capture_output=True, text=True, timeout=30).stdout
+        self.assertEqual([line for line in ps.splitlines() if str(self.run_.tmp) in line], [],
+                         "the browser outlived the capture")
+
+    def test_a_detector_still_running_at_the_bound_is_stopped_and_the_capture_process_ends(self):
+        # the bound leaves the capture time to reach its checks (step 8) on a loaded Mac; the detector it starts there
+        # never answers, and the capture would wait for it up to its own 60 s timeout
+        pid_file = self.run_.top / "detector.pid"
+        self.addCleanup(self._kill, pid_file)
+        request = self.run_.request(f"{self.server.base}/page.html",
+                                    impeccable={"command": [NODE, "-e", HUNG_DETECTOR, str(pid_file)],
+                                                "version": "hung"})
+        payload = {"mode": "capture", "core": PLAYWRIGHT["core"], "request": request,
+                   "bounds": {"captureSeconds": 20}}
+        started = time.monotonic()
+        p = noderun.run([NODE, str(HARNESS)], json.dumps(payload), timeout=120, env=self.run_.env(),
+                        tmpdir=str(self.run_.tmp), cwd=str(self.run_.work))
+        took = time.monotonic() - started
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        out = json.loads(p.stdout)
+        self.assertEqual((out["ok"], out["code"], out["step"]), (False, "time-bound", 8), out)
+        self.assertTrue(pid_file.exists(), "the capture did not start the detector")
+        self.assertLess(took, 45, "the capture process waited for the detector after its bound")
+        with self.assertRaises(ProcessLookupError, msg="the detector outlived the capture"):
+            os.kill(int(pid_file.read_text()), 0)
+
+    @staticmethod
+    def _kill(pid_file):
+        try:
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
 
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
