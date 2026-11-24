@@ -3775,13 +3775,16 @@ def _exception_security(exc):
     return is_security({"frames": frames}, _message(exc))
 
 
-def swallowed(component: str, exc: BaseException) -> None:
+def swallowed(component: str, exc: BaseException, impact: str = "minor") -> None:
     """An error a hook handler goes on without (`component`: its hook event): recorded as a `hook` occurrence with
-    impact `minor`. The durable outbox coalesces identical failures; distinct exceptions are never suppressed."""
+    `impact` (IMPACT): `minor` when the session goes on as before, `blocked` when the error stopped the developer's
+    work (a settings change refused because its check failed). The durable outbox coalesces identical failures;
+    distinct exceptions are never suppressed."""
     try:
         frames = devkit_frames(exc.__traceback__, cached_only=True)
         exc_class = _fits(type(exc).__name__, _IDENT_RE) or "Exception"
-        record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames), impact="minor",
+        record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames),
+                          impact=impact if impact in IMPACT else "minor",
                           event=component if component in _hook_events() else "", exc_class=exc_class,
                           frames=frames, text=_message(exc), security=_exception_security(exc))
     except Exception:  # recording a swallowed error must never break the handler that swallowed it

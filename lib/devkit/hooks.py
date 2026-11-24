@@ -62,14 +62,14 @@ def _stdin_json() -> dict:
     return parsed
 
 
-def _swallowed(component: str, exc: BaseException):
-    """An error a hook handler goes on without, recorded as a minor devkit bug once an hour per component (its hook
-    event): bugs.swallowed, which never raises."""
+def _swallowed(component: str, exc: BaseException, impact: str = "minor"):
+    """An error a hook handler goes on without, recorded as a devkit bug of `impact` (bugs.IMPACT; minor unless it
+    stopped the developer's work) once an hour per component (its hook event): bugs.swallowed, which never raises."""
     try:
         from . import bugs
     except Exception:  # the recorder cannot load: the handler goes on as it always did
         return
-    bugs.swallowed(component, exc)
+    bugs.swallowed(component, exc, impact)
 
 
 def _session_file(agent: str, sid: str) -> Path:
@@ -1405,20 +1405,27 @@ def config_change(agent: str):
     """Claude ConfigChange. The user settings: refuse changes to devkit-managed keys, then restore the file. The
     project and local settings: refuse a DEVKIT_* variable in their env block and remove it; devkit
     manages nothing else there. Exit 2 refuses; hooks.run turns any exception into exit 0, which would let the change
-    pass, so an error of the check itself refuses the change too."""
+    pass, so an error of the check itself refuses the change too, recorded as a devkit bug that blocked the
+    developer."""
     try:
         _config_change(agent)
     except SystemExit:
         raise
     except Exception as e:
-        _swallowed("config-change", e)
-        from . import audit
-        _log(f"config-change blocked, its check failed: {type(e).__name__}")
-        audit.record("config.blocked", str(_PAYLOAD.get("file_path") or "settings"), f"failed: {type(e).__name__}",
-                     "blocked")
+        _swallowed("config-change", e, "blocked")
+        what = str(_PAYLOAD.get("file_path") or "settings")
+        _quietly("config-change", _log, f"config-change blocked, its check failed: {type(e).__name__}")
+        _quietly("config-change", _audit_blocked, what, f"failed: {type(e).__name__}")
         print(f"devkit's check of this settings change failed ({type(e).__name__}), so it cannot tell whether the "
-              f"change turns off what devkit manages: refused the change. Run dev doctor.", file=sys.stderr)
+              f"change turns off what devkit manages: refused the change. The file still holds the change, and a new "
+              f"session reads it: undo the change if you did not mean it, and run dev bug report so devkit's failure "
+              f"gets fixed.", file=sys.stderr)
         sys.exit(2)
+
+
+def _audit_blocked(target: str, detail: str):
+    from . import audit
+    audit.record("config.blocked", target, detail, "blocked")
 
 
 def _config_change(agent: str):

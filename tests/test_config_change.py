@@ -322,11 +322,30 @@ class ConfigChangeTests(unittest.TestCase):
         self.assertIn("refused env.DEVKIT_GUARD", err)
 
     def test_a_check_that_fails_unexpectedly_refuses_the_change(self):
-        with mock.patch.object(core, "older_copy", side_effect=RuntimeError("broken")):
+        from devkit import bugs
+        with mock.patch.object(core, "older_copy", side_effect=RuntimeError("broken")), \
+                mock.patch.object(bugs, "BUGS", self.root / "bugs"):
             code, err = self.change(self.drifted())
+            occurrences = [json.loads(ln) for ln in (self.root / "bugs" / "occurrences.jsonl").read_text().splitlines()]
         self.assertEqual(code, 2)
         self.assertIn("(RuntimeError)", err)
         self.assertIn("refused the change", err)
+        # the way out: the file keeps the change, a new session reads it, and the failure is devkit's bug to report
+        self.assertIn("still holds the change", err)
+        self.assertIn("a new session reads it", err)
+        self.assertIn("dev bug report", err)
+        self.assertNotIn("dev doctor", err)
+        # the developer's change was blocked by devkit's own failure: more than a minor bug
+        self.assertEqual([o["impact"] for o in occurrences if o["kind"] == "hook"], ["blocked"])
+
+    def test_a_refusal_holds_when_the_failed_checks_own_log_and_audit_fail(self):
+        boom = RuntimeError("no log")
+        with mock.patch.object(core, "older_copy", side_effect=RuntimeError("broken")), \
+                mock.patch.object(hooks, "_log", side_effect=boom), mock.patch.object(audit, "record", side_effect=boom):
+            code, err = self.change(self.drifted())
+        self.assertEqual(code, 2)
+        self.assertIn("(RuntimeError)", err)
+        self.assertIn("dev bug report", err)
 
     # devkit's hooks count only as dev install writes them: under a matcher that never matches, as another type, with
     # another timeout or run in the background, they never stop anything, and disableAllHooks turns them all off.

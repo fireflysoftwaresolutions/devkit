@@ -122,9 +122,10 @@ def _same_matcher(a, b) -> bool:
 
 def diff_claude(settings=None):
     """The user settings' devkit-managed keys that differ from devkit's. A devkit hook counts only as devkit writes it
-    (claude_hooks): in a group of its event with its matcher, with the same type, timeout and no other field. Under a
-    matcher that never matches, as another type, with a shorter timeout or run in the background ("async") it would
-    stop nothing, so it is drift. So is any disableAllHooks but false, which turns every hook off."""
+    (claude_hooks): in a group of its event with its matcher, with the same type, timeout and no other field. Any
+    other matcher, type or timeout, longer or shorter, is drift, and so is any other field, "async": false included:
+    under a matcher that never matches, as another type, cut short or run in the background it would stop nothing.
+    So is any disableAllHooks but false (hooks_off), which turns every hook off."""
     s = settings if settings is not None else (read_json(CLAUDE_HOME / "settings.json", {}) or {})
     flat, hooks = claude_desired()
     out = [Drift("claude", _key(p), _get(s, p), v) for p, v in flat.items() if _get(s, p) != v]
