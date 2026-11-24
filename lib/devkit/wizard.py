@@ -661,7 +661,7 @@ NPM_ROOT_TIMEOUT = 15
 def _npm_root():
     """npm's global folder, or None when npm is not installed. visual/npmroot.py asks `npm root -g`, NPM_ROOT_TIMEOUT
     seconds a try, again when npm names no folder, and keeps a good answer for the process; npmroot.NoFolder when npm
-    names none twice."""
+    names no folder (twice, or once when npm went missing after the check above)."""
     return npmroot.global_root(NPM_ROOT_TIMEOUT) if core.have("npm") else None
 
 

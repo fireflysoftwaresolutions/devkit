@@ -28,8 +28,8 @@ import subprocess
 from pathlib import Path
 
 TRIES = 2
-TIMEOUT = 30  # seconds a try waits unless its caller gives a limit; npmroot.cjs's is the same, so two tries fit the
-#               time a capture leaves for them (store.CAPTURE_TIMEOUT less capture.cjs's own bound)
+TIMEOUT = 25  # seconds a try waits unless its caller gives a limit; npmroot.cjs's is the same, so two tries fit the
+#               time a capture leaves for them (store.CAPTURE_TIMEOUT less capture.cjs's own bound), with 10 s to spare
 NOT_INSTALLED = "npm is not installed: run dev install --only tools"
 
 _kept = None  # the good answer, for the rest of the process

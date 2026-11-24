@@ -9,7 +9,7 @@
 # `dev visual verify`, `dev visual compare` and the marks use) and the folder `dev visual` names for axe-core
 # (commands.py); wizard.py's are in tests/test_wizard.py.
 #
-# Each try waits as long as its caller allows (30 s unless the caller gives its own limit: the wizard and dev doctor give
+# Each try waits as long as its caller allows (25 s unless the caller gives its own limit: the wizard and dev doctor give
 # 15 s), and npm missing from PATH is named with the command that installs it, without a second ask. npmroot.cjs keeps
 # the same rule for the capture driver and axe; NodeLookup runs what the capture tests do not reach.
 #
@@ -266,7 +266,21 @@ class NodeLookup(NpmStandIn, unittest.TestCase):
         out = self.node("const { BOUNDS } = require(process.argv[2]);"
                         "process.stdout.write(JSON.stringify("
                         "{lookup: npmroot.TRIES * npmroot.TIMEOUT_MS / 1000, capture: BOUNDS.captureSeconds}));")
-        self.assertLessEqual(out["lookup"] + out["capture"], store.CAPTURE_TIMEOUT, out)
+        # Node's start and the 5 s the browser gets to close need room too: at least 10 s left
+        self.assertLessEqual(out["lookup"] + out["capture"] + 10, store.CAPTURE_TIMEOUT, out)
+
+    def test_a_limit_of_zero_or_none_waits_the_default_one_as_python_does(self):
+        # spawnSync waits with no limit at all when its timeout is 0, and npmroot.py falls back to its own limit
+        script = ("const cp = require('child_process'); const seen = [];"
+                  "cp.spawnSync = (c, a, o) => { seen.push(o.timeout); return {status: 1, stdout: ''}; };"
+                  "const npmroot = require(process.argv[1]);"
+                  "for (const t of [0, null, undefined]) { npmroot.globalRoot(t); }"
+                  "process.stdout.write(JSON.stringify({seen, limit: npmroot.TIMEOUT_MS}));")
+        p = subprocess.run([NODE, "-e", script, str(NPMROOT_CJS)], capture_output=True, text=True, timeout=60,
+                           env=_sandbox.env(), cwd=str(self.top))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        out = json.loads(p.stdout)
+        self.assertEqual(out["seen"], [out["limit"]] * 6)
 
 
 if __name__ == "__main__":
