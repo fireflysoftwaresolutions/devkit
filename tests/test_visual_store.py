@@ -1172,7 +1172,8 @@ setInterval(() => {}, 1000);
 
     def test_a_stopped_capture_leaves_a_process_whose_folder_only_starts_like_its_own(self):
         # the capture's folder is found on a command line as a path, as noderun.stop finds it: a process of another
-        # run whose folder's name only starts with it keeps running
+        # run whose folder's name only starts with it keeps running. The driver starts that process through a shell
+        # that exits at once, so it is no child of the driver: noderun.stop also stops the driver's own children
         driver = self.tmp / "driver.cjs"
         pids = self.tmp / "pids.json"
         driver.write_text(r"""
@@ -1182,10 +1183,10 @@ const path = require('path');
 const forever = ['-e', 'setInterval(() => {}, 1000)', '--'];
 const browser = spawn(process.execPath, [...forever, '--user-data-dir=' + path.join(process.env.TMPDIR, 'profile')],
   { stdio: 'ignore', detached: true });
-const other = spawn(process.execPath, ['-e', "require('fs').writeFileSync(process.env.OTHER_UP, '1'); " +
-  'setInterval(() => {}, 1000)', '--', '--user-data-dir=' + process.env.TMPDIR + '-other/profile'],
-  { stdio: 'ignore', detached: true });
-fs.writeFileSync(process.env.PIDS_FILE, JSON.stringify([browser.pid, other.pid]));
+spawn('/bin/sh', ['-c', '"$@" &', 'sh', process.execPath, '-e',
+  "require('fs').writeFileSync(process.env.OTHER_UP, String(process.pid)); setInterval(() => {}, 1000)", '--',
+  '--user-data-dir=' + process.env.TMPDIR + '-other/profile'], { stdio: 'ignore', detached: true });
+fs.writeFileSync(process.env.PIDS_FILE, JSON.stringify([browser.pid]));
 setInterval(() => {}, 1000);
 """)
         up = self.tmp / "other-up"  # the other run's process writes it once it runs
@@ -1194,8 +1195,9 @@ setInterval(() => {}, 1000);
                 mock.patch.dict(os.environ, {"PIDS_FILE": str(pids), "OTHER_UP": str(up)}):
             with self.assertRaises(store.VisualError):
                 store._run_capture({"id": "VC-x"}, self.tmp)
-        browser, other = json.loads(pids.read_text())
         self.assertTrue(up.exists(), "the other run's process never started, so this proves nothing")
+        browser, other = json.loads(pids.read_text())[0], int(up.read_text())
+        pids.write_text(json.dumps([browser, other]))  # the cleanup stops both
         for _ in range(50):
             if not _running(browser):
                 break
