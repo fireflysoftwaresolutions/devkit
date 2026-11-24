@@ -17,3 +17,11 @@
   the delivery policy's tag format, or the repository's own version tags, have no `v`, and `v26.11.4` otherwise. It
   tagged `v26.11.4` everywhere, so the release workflow that `dev ci init` generates for a repository without the
   `v` never started. `dev calver` and devkit's CI watch name the tag the same way.
+- In a repository with version tags in both spellings, `dev delivery`, `dev release`, and `dev ci init` take the
+  tag format from the newest version tag: `26.11.3` follows `v26.10.0` and `26.11.2`. They took the `v` wherever any
+  tag had one, because git lists every `v` tag first.
+- A tag the delivery policy refuses is told in the repository's spelling when the policy names no tag format
+  (`Use MAJOR.MINOR.PATCH`), not always with the `v`.
+- The release workflow that `dev ci init` generates also runs on SemVer pre-releases (`v1.2.3-rc.1`) and PEP 440
+  pre-, post-, and dev releases (`v0.1.0a17`), one GitHub pattern per form, and on GitHub and GitLab on no other tag;
+  it ran on `X.Y.Z` tags only. `dev ci audit` no longer reports a PEP 440 tag format as a mismatch with that workflow.
