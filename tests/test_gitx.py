@@ -2457,6 +2457,29 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(rc, 2, err)
                 self.assertIn(f"tag {want} already exists", err)
 
+    def test_a_recorded_tag_format_decides_the_tag_over_the_tags_spelling_and_refuses_the_other_spelling(self):
+        # the policy and the repository's tags disagree: the policy names the new tag, and a version the repository
+        # already shipped in the other spelling is still refused, so it cannot ship twice
+        for fmt, shipped, want, other in (("YY.MM.PATCH", "v26.11.3", "26.11.4", "v26.11.4"),
+                                          ("vYY.MM.PATCH", "26.11.3", "v26.11.4", "26.11.4")):
+            with self.subTest(fmt), Sandbox() as s:
+                f = delivery.POLICIES / "acme" / "widget.json"
+                f.parent.mkdir(parents=True)
+                f.write_text(json.dumps({"versioning": "calver", "tag_format": fmt}))
+                git(s.repo, "tag", shipped)
+                git(s.repo, "push", "-q", "origin", "--tags")
+                dev("ci", "--mark-passed")
+                s.gh.on(["run", "list"], [])
+                rc, out, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 0, out + err)
+                self.assertIn(f"dry run: release {want} (calver)", out)
+                git(s.repo, "tag", other)
+                git(s.repo, "push", "-q", "origin", f"refs/tags/{other}")
+                git(s.repo, "tag", "-d", other)  # shipped from another clone: only origin has it
+                rc, out, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(f"tag {other} already exists", err)
+
     def test_the_recorded_delivery_policy_wins(self):
         with Sandbox() as s:
             dev("ci", "--mark-passed")
