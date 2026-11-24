@@ -481,6 +481,28 @@ class UnseenLineBreakTests(unittest.TestCase):
                 self.assertEqual({"text": None, "first": first}, rebuilt("test/util.test.mjs", before, after))
 
 
+class HelperIndentGuardTests(unittest.TestCase):
+    # a JS reader that takes a regular expression for a division, or a division for a regular expression, can misplace
+    # a helper's closing brace and read the statements after the helper as its body: a line of code in a helper's body
+    # (outside strings and template literals) indented no deeper than the helper's first line keeps the module, named
+    # by that line
+    def test_a_line_of_code_not_indented_under_its_helper_keeps_the_module(self):
+        head = 'import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n'
+        t = 'test("t", () => {\n  assert.equal(globalThis.LIMIT, %s);\n});\n'
+        cases = {  # name: (the code between the imports and the test, the first difference)
+            "a regular expression after a closing parenthesis": (
+                "function h(s) {\n  if (s) /'/.test(s); }\nglobalThis.LIMIT = %s;\nif (globalThis.LIMIT) /}/.test('x');"
+                "\n\n", "a line of code in a helper's body not indented under the helper (line 6)"),
+            "a division after a variable named of": (
+                "const of = 4;\nfunction h() {\n  return of / 2; // {\n}\nglobalThis.LIMIT = %s;\nlet r = of / 2; // }"
+                "\n\n", "a line of code in a helper's body not indented under the helper (line 7)"),
+        }
+        for name, (mid, first) in cases.items():
+            with self.subTest(name):
+                self.assertEqual({"text": None, "first": first},
+                                 rebuilt("test/util.test.mjs", head + mid % "2" + t % "2", head + mid % "3" + t % "3"))
+
+
 class FailureKindTests(unittest.TestCase):
     # a failure without the change proves a rebuilt module's test only when it is an assertion failure, so each
     # runner's failed case says which it is: "assertion", or the name of what it raised

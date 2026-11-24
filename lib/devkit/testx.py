@@ -4176,7 +4176,9 @@ def _js_layout(text):
     test's whole lines (the outermost test of nested ones) with the comment and blank lines right above it; bodies:
     the inside of the braces of each helper's body (a function, a const, let or var that holds one, a hook, a class
     method: the entries _js_entries reads); blank: the blank lines no string or template literal holds; problem: the
-    first test that shares a line with other code, which no rebuild can splice, or ''."""
+    first test that shares a line with other code, which no rebuild can splice, or the first line of code in a helper's
+    body indented no deeper than the helper's first line (a misread regular expression or division can move the brace
+    that closes the body past the statements after it), or ''."""
     masked, (_, literals) = _js_mask(text), _js_scan(text)
     lines, starts, nl = text.split("\n"), _line_starts(text), _newlines(text)
     inside = set()  # lines that start inside a string or a template literal
@@ -4204,6 +4206,9 @@ def _js_layout(text):
         while s > 1 and (s - 1 in blank or comment(s - 1)):
             s -= 1
         tests.append((starts[s - 1], starts[e] if e < len(starts) else len(text)))
+
+    def width(k):  # how deep line k is indented
+        return len(re.match(r"[ \t]*", lines[k - 1]).group().expandtabs(8))
     bodies = []
     for (cls, _, _), s, e, kind, _ in _js_entries(text):
         a, b = starts[s - 1], starts[e] - 1 if e < len(starts) else len(text)
@@ -4213,6 +4218,12 @@ def _js_layout(text):
         close = _js_close(masked, body.end() - 1) if body else b
         if body and close < b:
             bodies.append((body.end(), close))
+            k = bisect.bisect_left(starts, body.end()) + 1  # each line that starts inside the body
+            while not problem and k <= len(starts) and starts[k - 1] <= close:
+                if k not in inside and masked[starts[k - 1]:min(close, starts[k - 1] + len(lines[k - 1]))].strip() \
+                        and width(k) <= width(s):
+                    problem = f"a line of code in a helper's body not indented under the helper (line {k})"
+                k += 1
     return sorted(tests), sorted(bodies), blank, problem
 
 
