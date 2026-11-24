@@ -1927,6 +1927,43 @@ class LedgerFolderTests(TextPinCase):
         identity._drop_marks("s-link", "toolu_k")
         self.assertEqual(os.listdir(outside), [".toolu_k.contested"])
 
+    # a contest flag is never made or read through a linked session folder: a flag planted where the link points
+    # marks nothing, and none is made there; in a real folder the flag is made and read
+    def test_a_contest_flag_is_never_made_or_read_through_a_linked_session_folder(self):
+        outside = self.linked()
+        self.assertFalse(identity._contest({"session": "s-link", "tool_use_id": "toolu_c"}))
+        self.assertEqual(os.listdir(outside), [])
+        (outside / ".toolu_k.contested").write_text("")
+        self.assertEqual(identity._contest_mark({"session": "s-link", "tool_use_id": "toolu_k"}), "")
+        self.assertEqual(os.listdir(outside), [".toolu_k.contested"])
+        (pg.CALLS / "s1").mkdir()
+        real = {"session": "s1", "tool_use_id": "toolu_r"}
+        self.assertTrue(identity._contest(real))
+        self.assertEqual(identity._contest_mark(real), "ledger")
+
+    # a call's end never takes a kept record seen through a linked session folder for its own, so its pin goes; and
+    # its use marks are never made, read or removed there
+    def test_a_calls_end_and_use_marks_never_go_through_a_linked_session_folder(self):
+        outside = self.linked()
+        planted = {".toolu_k.background": self.kept_record("s-link", "toolu_k", time.time()),
+                   ".toolu_k.used": json.dumps({"pid": 1, "start": 1.0, "inode": 1}),
+                   ".toolu_k.uses": json.dumps({"use": "x", "change": True, "listed": False}) + "\n",
+                   "toolu_k.json": json.dumps({"tool_use_id": "toolu_k", "session": "s-link", "caller": "main"})}
+        for name, text in planted.items():
+            (outside / name).write_text(text)
+        pin = identity.pin_path("s-link", "toolu_k")
+        pin.parent.mkdir(parents=True, exist_ok=True)
+        pin.write_text("123")
+        identity.note_closed("claude", "s-link", "toolu_k")
+        self.assertFalse(os.path.lexists(pin))
+        self.assertEqual((identity._read_used("s-link", "toolu_k"), identity.read_uses("s-link", "toolu_k"),
+                          identity._read_entry("s-link", "toolu_k")), ({}, [], None))
+        identity._mark_used("s-link", "toolu_n", 1, 1.0, 1)
+        self.assertFalse(identity._note_use("s-link", "toolu_n", {"cmd": "dev progress add x"},
+                                            ["progress", "add", "x"]))
+        self.assertEqual(sorted(os.listdir(outside)), sorted(planted))
+        self.assertEqual([(outside / n).read_text() for n in sorted(planted)], [planted[n] for n in sorted(planted)])
+
     # the hook's ledger writes (call_opened, call_note) never change the mode of a folder a link points to, nor
     # write there
     def test_a_ledger_write_never_goes_through_a_linked_session_folder(self):

@@ -605,25 +605,65 @@ def note_opened(agent: str, sid: str, tid: str = "", every: bool = False) -> boo
 
 
 def _drop_marks(sid: str, tid: str):
-    """Call `tid`'s pin, its contested marker and contest flag, and its use marks go."""
+    """Call `tid`'s pin, its contested marker and contest flag, and its use marks go: the ones in the ledger through
+    the session's folder opened without following a link (ledger_folder)."""
     if not tid:
         return
     pin = pin_path(sid, tid)
-    for f in (used_path(sid, tid), uses_path(sid, tid), pin, pin.with_name(pin.name + ".contested")):
+    for f in (pin, pin.with_name(pin.name + ".contested")):
         try:
             f.unlink()
         except OSError:
             pass
-    try:  # the contest flag, in the session's folder opened without following a link
+    try:
         folder = ledger_folder(sid)
     except OSError:
         return
     try:
-        os.unlink(contest_path("-", tid).name, dir_fd=folder)
-    except OSError:
-        pass
+        for name in (used_path("-", tid).name, uses_path("-", tid).name, contest_path("-", tid).name):
+            try:
+                os.unlink(name, dir_fd=folder)
+            except OSError:
+                pass
     finally:
         os.close(folder)
+
+
+def _in_ledger(sid: str, name: str) -> bool:
+    """Is there anything named `name` (a link counts, never followed) in session `sid`'s folder, opened without
+    following a link (ledger_folder)? False when that folder cannot be opened so."""
+    try:
+        folder = ledger_folder(sid)
+    except OSError:
+        return False
+    try:
+        os.stat(name, dir_fd=folder, follow_symlinks=False)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(folder)
+
+
+def _read_ledger_text(sid: str, name: str):
+    """File `name` of session `sid`'s folder as text, read through the folder opened without following a link, never
+    through a link and only from a regular file (a FIFO is never waited on); None when it cannot be read so."""
+    import stat
+    try:
+        folder = ledger_folder(sid)
+    except OSError:
+        return None
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+    except OSError:
+        return None
+    finally:
+        os.close(folder)
+    try:
+        with os.fdopen(fd) as fh:
+            return fh.read(1 << 20) if stat.S_ISREG(os.fstat(fh.fileno()).st_mode) else None
+    except (OSError, ValueError):
+        return None
 
 
 def note_closed(agent: str, sid: str, tid: str, entry: dict | None = None, ended: str = ""):
@@ -646,7 +686,7 @@ def note_closed(agent: str, sid: str, tid: str, entry: dict | None = None, ended
                              command=str(entry.get("cmd") or "")[:300])
             except Exception:
                 pass
-    if not os.path.lexists(background_path(sid, tid)):
+    if not _in_ledger(sid, background_path("-", tid).name):
         _drop_marks(sid, tid)
 
     def put(d):
@@ -1142,19 +1182,29 @@ def used_path(sid: str, tid: str):
 
 
 def _read_used(sid: str, tid: str) -> dict:
+    """The first verified use's mark (_mark_used), read through the session's folder (_read_ledger_text); {} when
+    there is none."""
     try:
-        doc = json.loads(used_path(sid, tid).read_text() or "{}")
-    except (OSError, ValueError):
+        doc = json.loads(_read_ledger_text(sid, used_path("-", tid).name) or "{}")
+    except ValueError:
         return {}
     return doc if isinstance(doc, dict) else {}
 
 
 def _mark_used(sid: str, tid: str, pid=None, start=None, inode=None):
-    """Record the first verified use: the pinned pid, its start time and the pin's inode (O_EXCL: the first one)."""
+    """Record the first verified use: the pinned pid, its start time and the pin's inode (O_EXCL: the first one), in
+    the session's folder opened without following a link (ledger_folder), never through a link."""
     try:
-        fd = os.open(used_path(sid, tid), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        folder = ledger_folder(sid)
     except OSError:
         return
+    try:
+        fd = os.open(used_path("-", tid).name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+                     dir_fd=folder)
+    except OSError:
+        return
+    finally:
+        os.close(folder)
     with os.fdopen(fd, "w") as fh:
         fh.write(json.dumps({"pid": pid, "start": start, "inode": inode}))
 
@@ -1193,36 +1243,42 @@ def _note_use(sid: str, tid: str, entry: dict, args: list) -> bool:
     and whether the call's text runs it (_listed). Appended (O_APPEND), so each dev command of one call keeps its own
     line; the PostToolUse hook audits the changes the text does not run (caller.token-unlisted-use). Never through a
     link: one planted there is removed and the list made anew. False when the use could not be recorded."""
+    import stat
     from . import progress
     line = json.dumps({"use": progress.args_hash(args), "change": bool(state_changing(args)),
                        "listed": _listed(entry, args)}) + "\n"
-    path = uses_path(sid, tid)
-    for _ in range(2):
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-        except OSError:
-            if not os.path.islink(path):
-                return False
+    name = uses_path("-", tid).name
+    try:  # the session's folder, never through a link
+        folder = ledger_folder(sid)
+    except OSError:
+        return False
+    try:
+        for _ in range(2):
             try:
-                os.unlink(path)
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+            except OSError:
+                try:
+                    if not stat.S_ISLNK(os.stat(name, dir_fd=folder, follow_symlinks=False).st_mode):
+                        return False
+                    os.unlink(name, dir_fd=folder)
+                except OSError:
+                    return False
+                continue
+            try:
+                return os.write(fd, line.encode()) == len(line.encode())
             except OSError:
                 return False
-            continue
-        try:
-            return os.write(fd, line.encode()) == len(line.encode())
-        except OSError:
-            return False
-        finally:
-            os.close(fd)
-    return False
+            finally:
+                os.close(fd)
+        return False
+    finally:
+        os.close(folder)
 
 
 def read_uses(sid: str, tid: str) -> list:
-    """The verified uses _note_use appended for call `tid`, oldest first ([] when none)."""
-    try:
-        lines = uses_path(sid, tid).read_text().splitlines()
-    except OSError:
-        return []
+    """The verified uses _note_use appended for call `tid`, oldest first ([] when none), read through the session's
+    folder (_read_ledger_text)."""
+    lines = (_read_ledger_text(sid, uses_path("-", tid).name) or "").splitlines()
     out = []
     for ln in lines:
         try:
@@ -1243,9 +1299,10 @@ def _session_of(pid):
 
 
 def _read_entry(sid: str, tid: str):
-    """The ledger entry of call `tid` in session `sid`'s folder only, None when it has none."""
-    from . import core, progress
-    e = core.read_json(progress.CALLS / progress._safe_name(sid) / f"{tid}.json", None)
+    """The ledger entry of call `tid` in session `sid`'s folder only, None when it has none (read through the folder
+    opened without following a link: progress._read_ledger)."""
+    from . import progress
+    e = progress._read_ledger(sid, f"{progress._safe_name(tid)}.json")
     return e if isinstance(e, dict) else None
 
 
@@ -1562,21 +1619,37 @@ def _contest(entry: dict) -> bool:
     """Mark a text call contested, which refuses it for every later claimant: its pin's `.contested` marker, made where
     the name is, never through a link (O_EXCL, O_NOFOLLOW; anything already there, a link included, is the marker
     already: _text_verdict and _pinned refuse on it, os.path.lexists). When the marker cannot be made, the call's
-    contest flag in the ledger (contest_path), made the same way, which they refuse on too (a kept background call's
-    claims read it as well). The call's ledger entry is never rewritten: its close may remove it at any moment, and a
-    rewrite would bring it back as an open call. False when neither could be made: the claimant is still refused, and
-    a later one finds no contest, though the folders that refused these files refuse its pin or its use record too."""
+    contest flag in the ledger (contest_path), made the same way in the session's folder opened without following a
+    link (ledger_folder), which they refuse on too (a kept background call's claims read it as well). The call's
+    ledger entry is never rewritten: its close may remove it at any moment, and a rewrite would bring it back as an
+    open call. False when neither could be made: the claimant is still refused, and a later one finds no contest,
+    though the folders that refused these files refuse its pin or its use record too."""
     sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
     pin = str(entry.get("pin") or "")
-    for path in ([f"{pin}.contested"] if pin else []) + ([str(contest_path(sid, tid))] if sid and tid else []):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    if pin:
         try:
-            os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+            os.close(os.open(f"{pin}.contested", flags, 0o600))
             return True
         except FileExistsError:  # it is contested already
             return True
         except OSError:
             pass
-    return False
+    if not (sid and tid):
+        return False
+    try:  # the contest flag, in the session's folder opened without following a link (ledger_folder)
+        folder = ledger_folder(sid)
+    except OSError:
+        return False
+    try:
+        os.close(os.open(contest_path("-", tid).name, flags, 0o600, dir_fd=folder))
+        return True
+    except FileExistsError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(folder)
 
 
 def _contest_mark(entry: dict) -> str:
@@ -1587,7 +1660,7 @@ def _contest_mark(entry: dict) -> str:
     sid, tid = str(entry.get("session") or ""), str(entry.get("tool_use_id") or "")
     if pin and os.path.lexists(f"{pin}.contested"):
         return "pin"
-    return "ledger" if sid and tid and os.path.lexists(contest_path(sid, tid)) else ""
+    return "ledger" if sid and tid and _in_ledger(sid, contest_path("-", tid).name) else ""
 
 
 def _was_contested(entry: dict) -> bool:
