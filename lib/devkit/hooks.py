@@ -1415,7 +1415,9 @@ def _config_change(agent: str):
     from . import policy
     path = data.get("file_path") or str(core.CLAUDE_HOME / "settings.json")
     project = data.get("source") in ("project_settings", "local_settings")
-    settings = core.read_json(path, None)
+    # Claude Code reads its settings with Node's JSON.parse, which refuses NaN and Infinity: read as Python reads them,
+    # they would pass a check of a file Claude Code then reads differently
+    settings = core.read_json(path, None, allow_nan=False)
     if settings is None and not project and not os.path.lexists(path):
         settings = {}  # no user settings: none of devkit's managed keys, checked as an empty file is
     if settings is None:
@@ -1492,18 +1494,24 @@ def _refuse_unchecked(path: str, project: bool, error: Exception):
 
 def _unreadable_why(raw: bytes) -> str:
     """Why devkit cannot read a settings file's bytes, in the words of a refusal: a byte that is not UTF-8 (Claude Code
-    reads it replaced), not JSON, or nested deeper than core.JSON_MAX_DEPTH (Claude Code reads it all the same)."""
+    reads it replaced), not JSON, nested deeper than core.JSON_MAX_DEPTH (Claude Code reads it all the same), NaN or
+    Infinity (Node refuses them, Python reads them), or a value Python's parser refuses (an integer of more digits
+    than it converts), named as the parser names it."""
     why = []
     try:
         raw.decode("utf-8")
     except UnicodeDecodeError:
         why.append("it holds a byte that is not UTF-8")
     try:
-        core.load_json(raw.decode("utf-8", "replace"))
+        core.load_json(raw.decode("utf-8", "replace"), allow_nan=False)
     except json.JSONDecodeError:
         why.append("it is not JSON")
-    except ValueError:  # load_json's own: past the parser's stack or JSON_MAX_DEPTH
+    except core.JSONDepthError:
         why.append(f"it nests deeper than {core.JSON_MAX_DEPTH} levels")
+    except core.JSONNonFiniteError:
+        why.append("it holds NaN or Infinity, which JSON does not allow")
+    except ValueError as e:
+        why.append(f"it holds a value devkit's JSON reader cannot take: {str(e).split(';')[0][:160]}")
     return ", and ".join(why) or "it changed while devkit read it"
 
 

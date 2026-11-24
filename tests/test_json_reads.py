@@ -884,6 +884,27 @@ class HookInputTests(acceptance.Sandbox):
             self.assertEqual(code, 2, err)
             self.assertIn("devkit manages these settings: permissions.", err)
 
+    def test_config_change_refuses_what_claude_code_reads_otherwise(self):
+        """Settings Node's JSON.parse refuses (NaN, Infinity), devkit's hooks where they never run, and every hook
+        turned off: each would pass a check that read them as Python does or looked only for devkit's commands."""
+        base = self.managed_user_settings()
+        text = json.dumps(base)
+        self.assertEqual(self.user_change(text, repair=False)[:2], (0, ""))
+        never = json.loads(text)
+        never["hooks"]["ConfigChange"][0]["matcher"] = "no_such_source"
+        cases = {"NaN": (text[:-1] + ', "x": NaN}', "(it holds NaN or Infinity, which JSON does not allow)"),
+                 "-Infinity": (text[:-1] + ', "x": -Infinity}', "(it holds NaN or Infinity, which JSON does not allow)"),
+                 "a matcher that never matches": (json.dumps(never), "devkit manages these settings: "
+                                                                     "hooks.ConfigChange."),
+                 "disableAllHooks": (text[:-1] + ', "disableAllHooks": true}', "devkit manages these settings: "
+                                                                               "disableAllHooks.")}
+        for name, (raw, said) in cases.items():
+            with self.subTest(name):
+                code, err, _ = self.user_change(raw, repair=False)
+                self.assertEqual(code, 2, err)
+                self.assertIn(said, err)
+        self.assertEqual(self.failures(), [])
+
 @unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
 class HookInputPython39Tests(HookInputTests):
     python = "/usr/bin/python3"

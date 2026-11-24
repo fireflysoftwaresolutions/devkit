@@ -389,6 +389,30 @@ class ConfigChangeTests(unittest.TestCase):
             self.assertIs(json.loads(self.settings.read_text())["disableAllHooks"], False)
 
     # Claude Code reads its settings with Node's JSON.parse, which refuses NaN and Infinity; Python's json reads them.
+    def test_settings_with_nan_or_infinity_are_refused_and_left_alone(self):
+        base = json.dumps(managed_settings())
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant):
+                text = base[:-1] + ', "x": ' + constant + "}"
+                self.settings.write_text(text)
+                code, err = self.change_written()
+                self.assertEqual(code, 2)
+                self.assertIn("(it holds NaN or Infinity, which JSON does not allow)", err)
+                self.assertEqual(self.settings.read_text(), text)
+                self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unreadable")
+        self.assertEqual(self.spawned, [])
+
+    @unittest.skipUnless(hasattr(sys, "get_int_max_str_digits"), "Python before 3.11 reads any integer")
+    def test_a_number_python_cannot_read_is_named_as_such(self):
+        text = '{"x": ' + "1" * 5000 + "}"
+        self.settings.write_text(text)
+        code, err = self.change_written()
+        self.assertEqual(code, 2)
+        self.assertIn("(it holds a value devkit's JSON reader cannot take: Exceeds the limit (4300 digits) for "
+                      "integer string conversion: value has 5000 digits)", err)
+        self.assertNotIn("nests deeper", err)
+        self.assertEqual(self.settings.read_text(), text)
+
     def test_the_hook_listens_to_project_and_local_settings_changes(self):
         import re
         root = Path(__file__).resolve().parents[1]

@@ -856,23 +856,40 @@ def _json_deeper(v, text) -> bool:
     return False
 
 
-def load_json(text):
+class JSONDepthError(ValueError):
+    """load_json: the text nests past what the parser can hold, or deeper than JSON_MAX_DEPTH."""
+
+
+class JSONNonFiniteError(ValueError):
+    """load_json(allow_nan=False): the text holds NaN, Infinity or -Infinity, which JSON (RFC 8259) and Node's
+    JSON.parse refuse and Python's json reads."""
+
+
+def _no_nonfinite(constant):
+    raise JSONNonFiniteError(f"{constant} is not JSON")
+
+
+def load_json(text, allow_nan=True):
     """json.loads for text another machine or person may have written -> its value, or ValueError when no reader can
-    read it: not JSON (cut short, say), past what the parser can nest or hold (RecursionError, MemoryError), or nested
-    deeper than JSON_MAX_DEPTH. Every devkit read of such text parses it with this (read_json, audit.parse_line)."""
+    read it: json.JSONDecodeError when it is not JSON (cut short, say), JSONDepthError past what the parser can nest
+    or hold (RecursionError, MemoryError) or nested deeper than JSON_MAX_DEPTH, JSONNonFiniteError for NaN or Infinity
+    when `allow_nan` is false (text a Node program reads too, such as Claude Code's settings), and the parser's own
+    ValueError otherwise (an integer of more digits than Python converts). Every devkit read of such text parses it
+    with this (read_json, audit.parse_line)."""
     try:
-        v = json.loads(text)
+        v = json.loads(text) if allow_nan else json.loads(text, parse_constant=_no_nonfinite)
     except (RecursionError, MemoryError):
-        raise ValueError("nested too deep to parse") from None
+        raise JSONDepthError("nested too deep to parse") from None
     if _json_deeper(v, text):
-        raise ValueError(f"nested deeper than {JSON_MAX_DEPTH} levels")
+        raise JSONDepthError(f"nested deeper than {JSON_MAX_DEPTH} levels")
     return v
 
 
-def read_json(path, default=None):
-    """A JSON file's value (load_json), or `default` when it cannot be read or is no JSON a reader can read."""
+def read_json(path, default=None, allow_nan=True):
+    """A JSON file's value (load_json, with its `allow_nan`), or `default` when it cannot be read or is no JSON a
+    reader can read."""
     try:
-        return load_json(Path(path).read_text())
+        return load_json(Path(path).read_text(), allow_nan=allow_nan)
     except (OSError, ValueError):
         return default
 
