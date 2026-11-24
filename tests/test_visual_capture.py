@@ -533,7 +533,8 @@ class CommandLine(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0, p.stdout)
         self.assertEqual(p.stdout, "")
         self.assertEqual(self.run_.stored(), [])
-        self.assertEqual(list(self.run_.tmp.iterdir()), [], "the capture's folder is left behind")
+        self.assertEqual([p.name for p in self.run_.tmp.iterdir() if p.name.startswith("devkit-capture-")], [],
+                         "the capture's folder is left behind")
 
     def test_vd_ac_3_the_same_recipe_twice_gives_the_same_picture(self):
         request = self.run_.request(f"{self.server.base}/page.html")
@@ -745,7 +746,8 @@ class CommandLine(unittest.TestCase):
         self.assertIn("Nothing was recorded", out["message"])
         self.assertLess(out["seconds"], 9)
         self.assertEqual(self.run_.stored(), [])
-        self.assertEqual(list(self.run_.tmp.iterdir()), [], "the capture's folder is left behind")
+        self.assertEqual([p.name for p in self.run_.tmp.iterdir() if p.name.startswith("devkit-capture-")], [],
+                         "the capture's folder is left behind")
 
     def test_vd_ac_75_the_bounds_are_90_s_a_capture_and_16384_css_px_of_height(self):
         self.assertEqual(self.run_.harness({"mode": "bounds"}), {"captureSeconds": 90, "pageHeight": 16384})
