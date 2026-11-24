@@ -450,13 +450,13 @@ class ConfigChangeTests(unittest.TestCase):
         s["disableAllHooks"] = True
         text = json.dumps(s)[:-1] + ', "big": 1e400}'
         self.settings.write_text(text)
-        out = io.StringIO()
         with mock.patch.object(setup, "CLAUDE_HOME", self.settings.parent), \
-                mock.patch.object(setup, "STATE", self.root / "state"), contextlib.redirect_stdout(out):
-            self.assertFalse(setup.write_claude_settings())
+                mock.patch.object(setup, "STATE", self.root / "state"), \
+                self.assertRaises(setup.SettingsNotWritten) as refused:
+            setup.write_claude_settings()
         self.assertEqual(self.settings.read_text(), text)
-        self.assertIn(str(self.settings.name), out.getvalue())
-        self.assertIn("1e400", out.getvalue())
+        self.assertIn(str(self.settings.name), str(refused.exception))
+        self.assertIn("1e400", str(refused.exception))
 
     def test_disable_all_hooks_in_the_project_or_local_settings_is_refused_and_left_in_the_file(self):
         for name, source in (("settings.json", "project_settings"), ("settings.local.json", "local_settings")):
@@ -554,6 +554,108 @@ class ConfigChangeTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("removed env.DEVKIT_GUARD from ~/repo/.claude/settings.json", err)
         self.assertNotIn(str(self.root), err)
+
+    # The user settings devkit cannot parse (a byte order mark, nested deeper than it reads, an integer Python does not
+    # convert, a byte that is not UTF-8) may still be read by Claude Code: devkit leaves them as they are, names what
+    # to fix, and fails the install, where it used to replace them with its own keys after a backup.
+    def unparsable_user_settings(self) -> dict:
+        body = '{"theme": "dark", "permissions": {"allow": ["Bash(make test)"]}'
+        cases = {"it starts with a byte order mark": b"\xef\xbb\xbf" + (body + "}").encode(),
+                 f"it nests deeper than {core.JSON_MAX_DEPTH} levels": (body + ', "d": ' + DEEP + "}").encode(),
+                 "it holds a byte that is not UTF-8": (body + ', "note": "caf').encode() + b'\xe9"}'}
+        if hasattr(sys, "get_int_max_str_digits"):  # Python before 3.11 reads any integer
+            cases["it holds a value devkit's JSON reader cannot take"] = (body + ', "n": 1' + "0" * 5000 + "}").encode()
+        return cases
+
+    def claude_home(self):
+        out = io.StringIO()
+        stack = contextlib.ExitStack()
+        for p in (mock.patch.object(setup, "CLAUDE_HOME", self.settings.parent),
+                  mock.patch.object(setup, "STATE", self.root / "state"),
+                  mock.patch.object(policy, "lock_status", lambda: "off"), contextlib.redirect_stdout(out)):
+            stack.enter_context(p)
+        self.addCleanup(stack.close)
+        return out
+
+    def test_dev_install_fails_and_leaves_user_settings_it_cannot_parse_as_they_are(self):
+        out = self.claude_home()
+        for why, raw in self.unparsable_user_settings().items():
+            with self.subTest(why):
+                self.settings.write_bytes(raw)
+                with self.assertRaises(setup.SettingsNotWritten) as refused:
+                    setup.setup_claude()
+                self.assertEqual(self.settings.read_bytes(), raw)
+                self.assertIn(f"{core.tilde(self.settings)} ({why}", str(refused.exception))
+                self.assertIn("dev install --only claude", str(refused.exception))
+        self.assertNotIn("settings.json:", out.getvalue())  # no ✓ for settings left unwritten
+        self.assertFalse((self.root / "state" / "backups").exists())  # nor a backup of them: nothing was replaced
+
+    def test_dev_install_fails_on_user_settings_holding_a_number_past_a_floats_range(self):
+        self.claude_home()
+        text = json.dumps(managed_settings())[:-1] + ', "big": 1e400}'
+        self.settings.write_text(text)
+        with self.assertRaises(setup.SettingsNotWritten) as refused:
+            setup.setup_claude()
+        self.assertIn("1e400", str(refused.exception))
+        self.assertEqual(self.settings.read_text(), text)
+
+    def test_repair_logs_no_claude_setting_as_repaired_when_the_user_settings_are_left_unwritten(self):
+        self.claude_home()
+        raw = self.unparsable_user_settings()[f"it nests deeper than {core.JSON_MAX_DEPTH} levels"]
+        self.settings.write_bytes(raw)
+        drifts = [policy.Drift("claude", "permissions.defaultMode", policy.MISSING, "bypassPermissions")]
+        with mock.patch.object(policy, "diff", lambda **k: list(drifts)), \
+                mock.patch.object(core, "is_current_pin", lambda: False):
+            got = policy.repair(quiet=True)
+        self.assertEqual(list(got), [])
+        self.assertEqual(len(got.left), 1)
+        self.assertIn(core.tilde(self.settings), got.left[0])
+        log = self.root / "state" / "logs" / "config.log"
+        self.assertNotIn("repaired claude", log.read_text() if log.exists() else "")
+        self.assertEqual(self.settings.read_bytes(), raw)
+
+    def test_dev_config_repair_exits_1_naming_user_settings_it_left_unwritten(self):
+        from devkit import cli
+        self.claude_home()
+        self.settings.write_bytes(b'{"note": "caf\xe9"}')
+        drifts = [policy.Drift("claude", "permissions.defaultMode", policy.MISSING, "bypassPermissions")]
+        err = io.StringIO()
+        with mock.patch.object(policy, "diff", lambda **k: list(drifts)), \
+                mock.patch.object(core, "is_current_pin", lambda: False), contextlib.redirect_stderr(err):
+            code = cli.cmd_config(cli.build_parser().parse_args(["config", "repair"]))
+        self.assertEqual(code, 1)
+        self.assertIn("it holds a byte that is not UTF-8", err.getvalue())
+
+    def test_lock_and_unlock_fail_and_change_nothing_while_the_user_settings_cannot_be_written(self):
+        self.claude_home()
+        managed = self.root / "managed-settings.json"
+        managed.write_text('{"_devkit": {}}')
+        raw = b'{"note": "caf\xe9"}'
+        self.settings.write_bytes(raw)
+        sudo = []
+        with mock.patch.object(policy, "MANAGED_FILE", managed), \
+                mock.patch.object(policy.subprocess, "call", lambda argv, *a, **k: sudo.append(argv) or 0), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(policy.unlock(), 1)
+            self.assertEqual(policy.lock(), 1)
+        self.assertEqual(sudo, [])  # neither asked for the admin password: the managed file stays as it was
+        self.assertEqual(managed.read_text(), '{"_devkit": {}}')
+        self.assertEqual(self.settings.read_bytes(), raw)
+        self.assertIn("it holds a byte that is not UTF-8", err.getvalue())
+        log = self.root / "state" / "logs" / "config.log"
+        self.assertNotIn("lock ", log.read_text() if log.exists() else "")
+
+    def test_unlock_fails_when_the_user_settings_write_is_refused_after_the_managed_file_went(self):
+        self.claude_home()
+        self.settings.write_text(json.dumps(managed_settings()))
+        with mock.patch.object(policy, "MANAGED_FILE", self.root / "managed-settings.json"), \
+                mock.patch.object(policy.subprocess, "call", lambda *a, **k: 0), \
+                mock.patch.object(core, "replace_text", side_effect=PermissionError(13, "Permission denied")), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(policy.unlock(), 1)
+        self.assertIn("Permission denied", err.getvalue())
+        log = self.root / "state" / "logs" / "config.log"
+        self.assertNotIn("lock off: managed-settings drop-in removed", log.read_text() if log.exists() else "")
 
     def test_a_settings_file_that_is_json_null_is_refused_as_no_settings_object(self):
         self.settings.write_text("null")

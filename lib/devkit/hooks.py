@@ -1542,11 +1542,14 @@ def _refuse_unchecked(path: str, project: bool, why: str):
 
 
 def _unreadable_why(raw: bytes) -> str:
-    """Why devkit cannot read a settings file's bytes, in the words of a refusal: a byte that is not UTF-8 (Claude Code
-    reads it replaced), not JSON, nested deeper than core.JSON_MAX_DEPTH (Claude Code reads it all the same), NaN or
-    Infinity (Node refuses them, Python reads them), or a value Python's parser refuses (an integer of more digits
-    than it converts), named as the parser names it."""
+    """Why devkit cannot read a settings file's bytes, in the words of a refusal: a byte order mark, a byte that is not
+    UTF-8 (Claude Code reads it replaced), not JSON, nested deeper than core.JSON_MAX_DEPTH (Claude Code reads it all
+    the same), NaN or Infinity (Node refuses them, Python reads them), or a value Python's parser refuses (an integer
+    of more digits than it converts), named as the parser names it."""
     why = []
+    if raw.startswith(b"\xef\xbb\xbf"):  # Python's parser refuses it; what follows it is checked as well
+        why.append("it starts with a byte order mark")
+        raw = raw[3:]
     try:
         raw.decode("utf-8")
     except UnicodeDecodeError:

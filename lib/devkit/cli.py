@@ -4254,11 +4254,14 @@ def cmd_config(a):
             fixed = policy.repair()
         if fixed:
             write_install_record(create=False)  # a repair after a crashed install is no finished install
-        if not a.quiet:
+        left = getattr(fixed, "left", [])  # a writer refused: those settings stay as they were
+        if not a.quiet and (fixed or not left):
             print(f"{ui.OK} restored {len(fixed)} setting(s)" if fixed else f"{ui.OK} nothing to repair")
             for d in fixed:
                 print(f"    {d.target:<12} {d.key}")
-        return 0
+        for why in left:
+            print(f"{ui.FAIL} {why}", file=sys.stderr)
+        return 1 if left else 0
     if act == "status":
         print(ui.kv("lock", policy.lock_status(), 10))
         log = STATE / "logs" / "config.log"

@@ -359,10 +359,20 @@ def _older_refuses(what: str, quiet: bool = False) -> bool:
     return bool(old)
 
 
+class Repaired(list):
+    """What repair restored, a list of Drift, and `left`: why it left the others as they were (a writer that refused:
+    the user settings it cannot parse or write), each naming the file and the fix. The caller checks `left`."""
+
+    def __init__(self, drifts=(), left=()):
+        super().__init__(drifts)
+        self.left = list(left)
+
+
 def repair(quiet=False, include_codex=True) -> list:
-    """Restore every drifted managed key. Returns the list of Drift that was repaired. A copy older than the pinned
-    release repairs nothing: what it would restore are its own, older values. The pinned release first retires the
-    other pinned copies (core.retire_other_pins), so a session that still runs one runs the pinned release instead."""
+    """Restore every drifted managed key. Returns the Drift that was repaired (Repaired: its `left` says what was not,
+    and why). A copy older than the pinned release repairs nothing: what it would restore are its own, older values.
+    The pinned release first retires the other pinned copies (core.retire_other_pins), so a session that still runs
+    one runs the pinned release instead."""
     from . import setup
     if _older_refuses("dev config repair", quiet):
         return []
@@ -374,10 +384,16 @@ def repair(quiet=False, include_codex=True) -> list:
             audit.record("install.retire", tilde(core.pin_root()), f"could not retire the other copies: {e}", "failed")
     drifts = diff(include_codex=include_codex)
     if not drifts:
-        return []
+        return Repaired()
     targets = {d.target for d in drifts}
+    left = []
     if "claude" in targets:
-        setup.write_claude_settings()
+        try:
+            setup.write_claude_settings()
+        except setup.SettingsNotWritten as e:  # the user settings left as they are: their drifts stay unrepaired
+            left.append(str(e))
+            drifts = [d for d in drifts if d.target != "claude"]
+            _log(f"left claude unrepaired: {e}")
     if "instructions" in targets:
         setup.write_agent_instructions(quiet=True)
     if "skills" in targets:
@@ -389,13 +405,14 @@ def repair(quiet=False, include_codex=True) -> list:
     for d in drifts:
         cur = "missing" if d.current is MISSING else json.dumps(d.current, ensure_ascii=False)
         _log(f"repaired {d.target} {d.key}: {cur} -> {json.dumps(d.desired, ensure_ascii=False)}")
-    try:
-        from . import gc
-        gc._log(f"config · restored {len(drifts)} devkit-managed setting(s): "
-                + ", ".join(sorted({f'{d.target}:{d.key}' for d in drifts}))[:300])
-    except Exception:
-        pass
-    return drifts
+    if drifts:
+        try:
+            from . import gc
+            gc._log(f"config · restored {len(drifts)} devkit-managed setting(s): "
+                    + ", ".join(sorted({f'{d.target}:{d.key}' for d in drifts}))[:300])
+        except Exception:
+            pass
+    return Repaired(drifts, left)
 
 
 # --------------------------------------------------------------------------- lock (Claude managed settings)
@@ -423,9 +440,40 @@ def lock_status() -> str:
     return "on" if cur == want else "stale"
 
 
+def _user_settings_refused(what: str) -> bool:
+    """True, said on stderr, when the user settings are a file devkit leaves as it is (setup.read_claude_settings):
+    lock and unlock then change nothing, the managed file included, rather than leave devkit's hooks in neither tier or
+    in both."""
+    import sys
+    from . import setup
+    try:
+        setup.read_claude_settings()
+    except setup.SettingsNotWritten as e:
+        print(f"{e} Nothing changed: {what} needs the user settings written too.", file=sys.stderr)
+        return True
+    return False
+
+
+def _user_settings_written(include_hooks: bool, done: str) -> bool:
+    """Write the user settings after the managed file changed (lock, unlock); False, said on stderr and logged, when
+    the write was refused."""
+    import sys
+    from . import setup
+    try:
+        setup.write_claude_settings(include_hooks=include_hooks)
+    except setup.SettingsNotWritten as e:
+        print(f"{e} ({done[0].upper()}{done[1:]}.)", file=sys.stderr)
+        _log(f"{done}, but the user settings were left unwritten: {e}")
+        return False
+    return True
+
+
 def lock() -> int:
-    """Install the managed-settings drop-in (asks for the admin password via sudo)."""
+    """Install the managed-settings drop-in (asks for the admin password via sudo). 1, with nothing changed, when the
+    user settings are a file devkit leaves as it is; 1 when their write fails once the drop-in is installed."""
     if _older_refuses("dev config lock"):
+        return 1
+    if _user_settings_refused("dev config lock"):
         return 1
     payload = json.dumps(managed_payload(), indent=2, ensure_ascii=False) + "\n"
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
@@ -435,18 +483,23 @@ def lock() -> int:
                           f'mkdir -p "{MANAGED_DIR}" && install -m 0644 -o root -g wheel "{tmp}" "{MANAGED_FILE}"'])
     os.unlink(tmp)
     if rc == 0:
-        from . import setup
-        setup.write_claude_settings(include_hooks=False)  # hooks now come from the managed tier only
+        # hooks now come from the managed tier only
+        if not _user_settings_written(False, "the managed-settings drop-in is installed"):
+            return 1
         _log("lock on: managed-settings drop-in installed")
     return rc
 
 
 def unlock() -> int:
+    """Remove the managed-settings drop-in and put devkit's hooks back in the user settings. 1, the drop-in kept, when
+    the user settings are a file devkit leaves as it is; 1 when their write fails once the drop-in is gone."""
     if _older_refuses("dev config unlock"):
+        return 1
+    if _user_settings_refused("dev config unlock"):
         return 1
     rc = subprocess.call(["sudo", "rm", "-f", str(MANAGED_FILE)])
     if rc == 0:
-        from . import setup
-        setup.write_claude_settings()
+        if not _user_settings_written(True, "the managed-settings drop-in is removed"):
+            return 1
         _log("lock off: managed-settings drop-in removed")
     return rc

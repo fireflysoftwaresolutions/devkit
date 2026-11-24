@@ -1544,21 +1544,55 @@ def _install_skills():
     print("    " + ui.dim(", ".join(sorted(wanted))))
 
 
+class SettingsNotWritten(RuntimeError):
+    """devkit left the user settings (~/.claude/settings.json) as they are: a file it cannot open, parse or write
+    (read_claude_settings, write_claude_settings). The message names the file, the problem and the fix. dev install
+    fails its Claude step on it, dev config repair leaves the Claude drifts unrepaired, lock and unlock exit 1."""
+
+
+def read_claude_settings() -> dict:
+    """The user settings devkit merges its keys into: {} when there is no file, or it is empty or JSON null. Raises
+    SettingsNotWritten for a file devkit leaves as it is, naming the problem and the fix: one that does not open; one it
+    cannot parse (a byte order mark, a byte that is not UTF-8, nested deeper than core.JSON_MAX_DEPTH, an integer of
+    more digits than Python converts, JSON that is no object), which Claude Code may still read, so devkit's keys
+    written over it would lose the developer's own; or NaN, Infinity or a number past a float's range: Python reads
+    1e400 as inf, and json.dumps would write Infinity, which Claude Code (Node's JSON.parse) cannot read."""
+    f = CLAUDE_HOME / "settings.json"
+    fix = "then run dev install --only claude"
+    try:
+        raw = f.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise SettingsNotWritten(f"devkit cannot open {tilde(f)} ({type(e).__name__}: {e.strerror or e}): it left the "
+                                 f"file as it is. Make it a file you can read, {fix}") from None
+    try:
+        cur = core.load_json(raw.decode("utf-8"), allow_nan=False)
+    except core.JSONNonFiniteError as e:
+        raise SettingsNotWritten(f"{tilde(f)} holds {e}: devkit left the file as it is. Fix that value, {fix}") from None
+    except ValueError:  # a byte that is not UTF-8 included
+        if not raw.strip():
+            return {}
+        from .hooks import _unreadable_why
+        raise SettingsNotWritten(f"devkit cannot parse {tilde(f)} ({_unreadable_why(raw)}): it left the file as it is, "
+                                 f"since Claude Code may still read it. Make it plain JSON (UTF-8 without a byte order "
+                                 f"mark, nested at most {core.JSON_MAX_DEPTH} levels), {fix}") from None
+    if cur and not isinstance(cur, dict):
+        from .hooks import _not_settings
+        raise SettingsNotWritten(f"devkit cannot merge its settings into {tilde(f)} ({_not_settings(cur)}): it left "
+                                 f"the file as it is. Make it a settings object, {fix}")
+    return cur or {}
+
+
 def write_claude_settings(include_hooks=True):
     """Merge devkit's managed keys into ~/.claude/settings.json (other keys untouched). -> whether it changed. A copy
-    older than the pinned release writes nothing (core.older_copy_skip). Neither does a file that holds NaN, Infinity
-    or a number past a float's range: Python reads 1e400 as inf, and json.dumps would write Infinity, which Claude
-    Code (Node's JSON.parse) cannot read; devkit names the value to fix instead."""
+    older than the pinned release writes nothing (core.older_copy_skip). Neither does a file read_claude_settings
+    refuses, nor one that cannot be written: both raise SettingsNotWritten, the file left as it was, and every caller
+    fails on it rather than report the settings as written."""
     f = CLAUDE_HOME / "settings.json"
     if core.older_copy_skip(tilde(f)):
         return False
-    try:
-        cur = core.load_json(f.read_text(), allow_nan=False) or {}
-    except core.JSONNonFiniteError as e:
-        fail(f"{tilde(f)} holds {e}: devkit left the file as it is. Fix that value, then run dev install --only claude")
-        return False
-    except (OSError, ValueError):
-        cur = {}
+    cur = read_claude_settings()
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
     new = core.deep_merge(cur, {k: v for k, v in frag.items() if k != "hooks"})
@@ -1587,10 +1621,15 @@ def write_claude_settings(include_hooks=True):
     elif mine and not (core.CFG.get("claude") or {}).get("statusline", True):
         new.pop("statusLine", None)
     if new != cur:
-        backup(f)
-        f.parent.mkdir(parents=True, exist_ok=True)
-        # a temporary file of its own; never NaN or Infinity, which Node cannot read
-        core.replace_text(f, json.dumps(new, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+        try:
+            backup(f)
+            f.parent.mkdir(parents=True, exist_ok=True)
+            # a temporary file of its own; never NaN or Infinity, which Node cannot read
+            core.replace_text(f, json.dumps(new, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+        except OSError as e:
+            raise SettingsNotWritten(f"devkit could not write {tilde(f)} ({type(e).__name__}: {e.strerror or e}): the "
+                                     f"file is left as it was. Make it writable, then run dev install --only claude") \
+                from None
     return new != cur
 
 
