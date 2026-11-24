@@ -341,6 +341,18 @@ class CodexAskingThreadTests(CodexTokenCase):
         self.assertEqual(found[0]["crew"]["tool_use_id"], data["tool_use_id"])
         self.assertIn(SUB, found[0]["detail"])
 
+    def test_a_plain_call_pin_written_before_its_shell_started_names_nobody(self):
+        # the plain form's dev command writes the pin itself; a shell that started after that write cannot be the
+        # call's (its pid went to a newer process), so its token names nobody
+        _, token, _ = self.exec("dev progress add extra")
+        self.starts[self.shell] = time.time() + 1
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        found = self.records("caller.token-foreign-use")
+        self.assertEqual(len(found), 1)
+        self.assertIn("outside the first", found[0]["detail"])
+
 
 class PinRaceTests(TokenCase):
     # the pin is written after the shell sourced its snapshot or login profile: a member polling ps may write it first
