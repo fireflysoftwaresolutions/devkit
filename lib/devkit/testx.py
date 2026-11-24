@@ -4417,6 +4417,14 @@ def _first_difference(old, now) -> str:
     return say("an edited", b)
 
 
+# a line break that Python reads (a carriage return without a new line) or that ends a JavaScript comment (that, a line
+# separator, a paragraph separator), where the rebuild's readers end lines at new lines only: it would move what they
+# read, a statement into a helper's body or out of a comment
+_UNSEEN_BREAK = {"py": re.compile("\r(?!\n)"), "js": re.compile("\r(?!\n)|[\u2028\u2029]")}
+_BREAK_NAME = {"\r": "a carriage return without a new line", "\u2028": "a line separator U+2028",
+               "\u2029": "a paragraph separator U+2029"}
+
+
 def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
     """Test module `f` (`text`, its text now) rebuilt for the run without the change from `old_text`, its text at the
     base. When its text outside its tests (_py_layout, _js_layout: each test with the comment and blank lines right
@@ -4425,8 +4433,9 @@ def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
     it (after the same text outside the tests), and nothing else: outside its tests it is the base module byte for
     byte, which the result is checked to be. Any other difference keeps the module as it is now: a comment, a
     docstring, a coding declaration, an import, a statement, a helper's signature or decorators, a class, a helper
-    added, removed or moved, the describes around the tests. `functions`: a module-level function named test… is a
-    test (pytest), not a helper (unittest).
+    added, removed or moved, the describes around the tests. A side that holds a line break its readers do not see
+    (_UNSEEN_BREAK) keeps the module too, named by that line break. `functions`: a module-level function named test… is
+    a test (pytest), not a helper (unittest).
     -> None when a side does not parse, or nothing outside the tests differs but blank lines: nothing to rebuild.
     Else {"text": the rebuilt module, or None when the module keeps its change; "first": the first difference that keeps
     it, else ''}."""
@@ -4437,6 +4446,11 @@ def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
     old, now = read(old_text), read(text)
     if old is None or now is None:
         return None
+    for t, where in ((text, ""), (old_text, " at the base")):
+        m = _UNSEEN_BREAK["py" if py else "js"].search(t)
+        if m:
+            return {"text": None, "first": f"{_BREAK_NAME[m.group()]}, a line break the rebuild does not read "
+                                           f"(line {t.count(chr(10), 0, m.start()) + 1}{where})"}
     for layout, t in ((now, text), (old, old_text)):
         if layout[3]:
             return {"text": None, "first": layout[3] if t is text else layout[3].replace(")", " at the base)")}

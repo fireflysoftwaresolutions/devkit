@@ -439,6 +439,48 @@ class RebuildByteTests(unittest.TestCase):
         self.assertIn("const k = typeof /  /;", masked)
 
 
+# a class attribute right after a method, below a comment: the rebuild must not take the attribute for the method's body
+LIMIT_FAKE = ("class Fake:\n    def get(self):\n        x = 1\n        return self.limit + x - 1\n    limit = %d\n\n\n"
+              "class LimitTests(unittest.TestCase):\n    def test_limit(self):\n"
+              "        self.assertEqual(Fake().get(), %d)\n")
+# a statement between a helper and a comment that a line break ends for the engine (`{sep}`)
+UNSEEN_JS = ('import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n'
+             "function h() {\n  return 1; // a{sep}}\nglobalThis.LIMIT = {v};\n// b{sep}{\n}\n\n"
+             'test("t", () => {\n  assert.equal(globalThis.LIMIT, {v});\n});\n')
+
+
+class UnseenLineBreakTests(unittest.TestCase):
+    # Python ends a line at a carriage return without a new line, and a // comment of JavaScript ends there too and at
+    # a line separator or a paragraph separator; the rebuild's readers end lines at new lines only. A module that holds
+    # such a line break keeps its change, named by it: here a comment that holds one moves a class attribute edit into
+    # the method above it for the readers, and a rebuild would run the base attribute against the test now
+    def test_a_python_carriage_return_without_a_new_line_keeps_the_module(self):
+        before = with_tests("\n\n# a\r# b\n" + LIMIT_FAKE % (2, 2))
+        after = with_tests("\n\n# a\r# b\n" + LIMIT_FAKE % (3, 3))
+        rc, rows, text = prove_rows(before, after)
+        self.assertEqual([("test_calc.LimitTests.test_limit",
+                           "cannot be proven: its module keeps a change outside its helpers' bodies: a carriage return "
+                           "without a new line, a line break the rebuild does not read (line 14)")], rows, text)
+
+    def test_a_javascript_line_break_that_ends_a_comment_keeps_the_module(self):
+        def js(sep, v):
+            return UNSEEN_JS.replace("{sep}", sep).replace("{v}", v)
+        cases = {  # name: (base, now, the first difference)
+            "a line separator": (js("\u2028", "2"), js("\u2028", "3"),
+                                 "a line separator U+2028, a line break the rebuild does not read (line 5)"),
+            "a paragraph separator": (js("\u2029", "2"), js("\u2029", "3"),
+                                      "a paragraph separator U+2029, a line break the rebuild does not read (line 5)"),
+            "a carriage return": (js("\r", "2"), js("\r", "3"), "a carriage return without a new line, a line break "
+                                                                "the rebuild does not read (line 5)"),
+            "a line separator at the base only": (
+                js("\u2028", "2"), js("\n", "3"),
+                "a line separator U+2028, a line break the rebuild does not read (line 5 at the base)"),
+        }
+        for name, (before, after, first) in cases.items():
+            with self.subTest(name):
+                self.assertEqual({"text": None, "first": first}, rebuilt("test/util.test.mjs", before, after))
+
+
 class FailureKindTests(unittest.TestCase):
     # a failure without the change proves a rebuilt module's test only when it is an assertion failure, so each
     # runner's failed case says which it is: "assertion", or the name of what it raised
