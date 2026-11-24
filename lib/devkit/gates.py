@@ -637,21 +637,21 @@ def _execution_receipt_words(words, receipt, cwd, repo=""):
     return normalized
 
 
-def _step_text(words) -> str:
-    """The text a `dev progress step [options] <text…>` call records, read with the CLI's own grammar, so an option's
-    value is never taken for it; '' when the words are not such a call."""
+def _step_said(words) -> tuple:
+    """(text, Check) a `dev progress step [options] <text…>` call records, read with the CLI's own grammar, so an
+    option's value is never taken for its text; ('', '') when the words are not such a call."""
     import contextlib
     import io
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             args = _proof_parser().parse_args(words[1:])
     except (SystemExit, ValueError):
-        return ""
+        return "", ""
     text = getattr(args, "text", None)
     if getattr(args, "cmd", None) != "progress" or getattr(args, "progress_cmd", None) != "step" or \
             not isinstance(text, list):
-        return ""
-    return " ".join(text).strip()
+        return "", ""
+    return " ".join(text).strip(), str(getattr(args, "check", "") or "").strip()
 
 
 def _lane_steps(agent, session, lane, positive=False) -> list:
@@ -884,16 +884,12 @@ def _number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="", recorded=()):
-    """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
-    (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
-    member's repository (`_member_checkout`), where a proof counts too. `recorded`: the steps the member's lane
-    recorded in its run (`_lane_steps`), which a `dev progress step` piped into a filter proves by: the pipe hides its
-    exit code, not the step devkit keeps. Only a step recorded with the piped call's own text since the call started
-    (the receipt's `ts`) counts, so an earlier step of the lane, even one with the same text, never stands in for a
-    later call that recorded nothing; a call whose start no record gives is never proven this way."""
-    relevant, missed, said = [], None, []
-    for receipt in receipts:
+def _attempts(proof, receipts, cwd, agent, repo=""):
+    """The receipts that ran `proof`, oldest first, as (receipt, kind, words), and the reason the latest call that
+    names it but proves nothing was not counted (`_unproven`), or None. Help and version output never counts, nor does
+    `dev test audit` for `dev test`."""
+    relevant, missed = [], None
+    for receipt in receipts or []:
         words = _receipt_words(receipt, cwd, agent, repo)
         if not words and receipt.get("unproven") and _names(proof, receipt["command"]):
             missed = receipt["unproven"]
@@ -902,16 +898,18 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="",
         if proof == "dev test" and words[:3] == ["dev", "test", "audit"]:
             continue  # an audit proves its own procedure, not that tests executed
         if _ran(proof, [words]):
-            kind = "dev test prove" if words[:3] == ["dev", "test", "prove"] else proof
-            relevant.append((receipt, kind))
-            said = words
-    if relevant and (not successful or _verification_eligible(*relevant[-1])):
+            relevant.append((receipt, "dev test prove" if words[:3] == ["dev", "test", "prove"] else proof, words))
+    return relevant, missed
+
+
+def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo=""):
+    """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
+    (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
+    member's repository (`_member_checkout`), where a proof counts too. A piped receipt verifies no success: a piped
+    `dev progress step` can still be met by its lane's record (`_step_recorded`), which the audit trail keeps."""
+    relevant, missed = _attempts(proof, receipts, cwd, agent, repo)
+    if relevant and (not successful or _verification_eligible(*relevant[-1][:2])):
         return True
-    if proof == "dev progress step" and relevant and relevant[-1][0].get("piped"):
-        text, since = _step_text(said), relevant[-1][0].get("ts")
-        if text and _number(since) and any(str(u.get("text") or "").strip() == text and _number(u.get("ts"))
-                                           and u["ts"] >= since - STEP_TS_SLACK for u in recorded):
-            return True
     if why is not None:
         run = f"`{proof}{PROOF_ARGS.get(proof, '')}`"
         last = relevant[-1][0] if relevant else None
@@ -931,47 +929,28 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="",
     return False
 
 
-def _step_args(args) -> tuple:
-    """(text, Check) of `dev progress step` arguments as its parser reads them: the words outside its options, joined
-    by one space, and the value of --check."""
-    text, check, i = [], "", 0
-    while i < len(args):
-        a = str(args[i])
-        if a in ("--check", "--step", "--next", "--approves", "--why") and i + 1 < len(args):
-            check = str(args[i + 1]) if a == "--check" else check
-            i += 2
-            continue
-        if a.startswith("--"):
-            check = a.split("=", 1)[1] if a.startswith("--check=") else check
-        else:
-            text.append(a)
-        i += 1
-    return " ".join(text), check
-
-
-def _step_recorded(proof, receipts, cwd, agent, repo="", session="", lane="") -> str:
-    """How a `dev progress step` piped into a read-only filter (`| tail -3`) still proves itself: the member's lane
-    holds the update that very command recorded (its text and Check), so the step went where it was sent, though the
-    pipe hid the command's own exit code. -> how the proof was met, for the audit trail, with that warning; '' when
-    it is another proof, or the lane recorded no such update (the command was refused, or never ran)."""
-    if " ".join(str(proof).split()) != "dev progress step" or not session or not lane:
+def _step_recorded(proof, receipts, cwd, agent, repo="", recorded=()) -> str:
+    """How a `dev progress step` piped into a read-only filter (`| tail -3`) still proves itself: the pipe hides the
+    command's exit code, not the step devkit keeps, so the member's lane holding the step that very call recorded is
+    the proof. `recorded`: the lane's steps (`_lane_steps`). As for every proof, the latest call that ran it decides,
+    and only a step with that call's text and Check, recorded since the call started (the receipt's `ts`), is its
+    own: an earlier step of the lane, even one with the same text, never stands in for a later call that recorded
+    nothing (refused, or never ran), and a call whose start no record gives is never proven this way. -> how the proof
+    was met, for the audit trail, with the warning that the pipe hid the exit code; '' otherwise."""
+    if " ".join(str(proof).split()) != "dev progress step":
         return ""
-    try:
-        from . import progress
-        run = progress.load_run(agent or "claude", session) or {}
-    except Exception:
+    relevant, _ = _attempts(proof, receipts, cwd, agent, repo)
+    if not relevant or not relevant[-1][0].get("piped"):
         return ""
-    ups = [u for u in ((run.get("agents") or {}).get(lane) or {}).get("updates") or []
-           if isinstance(u, dict) and u.get("kind") == "step"]
-    for receipt in reversed(receipts or []):
-        words = _receipt_words(receipt, cwd, agent, repo)
-        if not receipt.get("piped") or words[:3] != ["dev", "progress", "step"]:
-            continue
-        text, check = _step_args(words[3:])
-        if check and any(u.get("text") == text and u.get("check") == check for u in ups):
-            return (f"its lane's record of that `dev progress step`, which ran piped into `{receipt['piped']}`, whose "
-                    "exit code hid its own exit code: run it alone next time")
-    return ""
+    receipt, _, words = relevant[-1]
+    (text, check), since = _step_said(words), receipt.get("ts")
+    if not text or not check or not _number(since):
+        return ""
+    if not any(str(u.get("text") or "").strip() == text and str(u.get("check") or "").strip() == check
+               and _number(u.get("ts")) and u["ts"] >= since - STEP_TS_SLACK for u in recorded or ()):
+        return ""
+    return (f"its lane's record of that `dev progress step`, which ran piped into `{receipt['piped']}`, whose exit "
+            "code hid its own exit code: run it alone next time")
 
 
 # The full local CI run is the one proof the tech lead may meet for a member. A brief can forbid the run (in a shared
@@ -1299,10 +1278,10 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
                 proof_kinds = [_rel(f, top) for f in delivered]
             why = []
             if proof and _proof_owed(x, proof_kinds, inv) and not _proof_met(proof, receipts, cwd, agent, successful, why,
-                                                                        repo, recorded):
+                                                                        repo):
                 ci = " ".join(str(proof).split()) == CI_PROOF
                 how = _ci_instead(transcript_path, top, by_lead) if ci else \
-                    _step_recorded(proof, receipts, cwd, agent, repo, session, lane)
+                    _step_recorded(proof, receipts, cwd, agent, repo, recorded)
                 if how:
                     if accepted is not None:
                         accepted.append({"proof": proof, "how": how})

@@ -777,8 +777,10 @@ must establish that the command checked the same checkout as the reviewed change
 
 A proof piped into a read-only filter (`dev test | tail -40`) shows it ran, but its receipt holds the filter's exit
 code, so a positive report needs the proof run alone. `dev progress step` is the exception: when the member's lane
-holds the update that same command recorded (its text and Check), the gate takes that record as the proof, and the
-audit trail keeps the warning that the pipe hid the command's exit code.
+holds the update that same command recorded (its text and Check) since the call started, the gate takes that record
+as the proof, and the audit trail keeps the warning that the pipe hid the command's exit code. As for every proof,
+the latest call decides: an earlier step of the lane, even one with the same text, never stands in for a later call
+that recorded nothing, and a call whose start time the transcript does not give is never proven this way.
 
 **When the brief or the project forbids `dev ci --run`.** In a shared checkout, other members' uncommitted work fails
 the full suite, and a project can have runner preparation that must not run twice. Only the tech lead can then meet
