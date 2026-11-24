@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -856,6 +857,67 @@ class TextChangesAfterTheScreenshot(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         record = json.loads(p.stdout)
         self.assertEqual((record["redaction"]["text_changed"], record["redaction"]["retried"]), (True, False))
+
+
+# Runs capture.run with the capture bound lowered and the browser's start held back, then prints how the capture ended:
+# "late" holds the real start until after the bound; "hung" never starts, and fails the way Playwright's launch does
+# when its `timeout` runs out (180 s when none is given), so a pending start keeps node alive as a real one does.
+START_DRIVER = r"""
+const [module, input] = [process.argv[1], JSON.parse(require('fs').readFileSync(0, 'utf8'))];
+const capture = require(module);
+const { chromium } = require(input.core);
+capture.BOUNDS.captureSeconds = input.bound;
+const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+const launch = input.start === 'late'
+  ? async (options) => { await wait(input.hold_ms); return chromium.launch(options); }
+  : (options) => new Promise((_, fail) => setTimeout(() => fail(Object.assign(
+    new Error(`browserType.launch: Timeout ${options.timeout || 180000}ms exceeded.`), { name: 'TimeoutError' })),
+  options.timeout || 180000));
+capture.run(input.request, { chromium: { launch } }).then(
+  () => { process.stdout.write(JSON.stringify({ ok: true })); },
+  (e) => { process.stdout.write(JSON.stringify({ ok: false, code: e.code, step: e.step })); });
+"""
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class TheBoundCoversTheBrowsersStart(unittest.TestCase):
+    # The capture bound ends the capture process, even when the bound runs out before the browser has started: a start
+    # that hangs (a Chrome that never answers on a loaded Mac) and a start that ends after the bound both end there.
+    HANG_GUARD = 60  # s: the process ends a second after its 1 s bound; a start the bound does not end runs 180 s
+
+    def setUp(self):
+        self.run_ = _Run()
+        self.addCleanup(self.run_.close)
+        self.server = _Server().__enter__()
+        self.addCleanup(self.server.__exit__)
+
+    def start(self, how, **extra):
+        payload = {"request": self.run_.request(f"{self.server.base}/page.html"), "core": PLAYWRIGHT["core"],
+                   "bound": 1, "start": how, **extra}
+        proc = subprocess.Popen([NODE, "-e", START_DRIVER, str(MODULE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=self.run_.env(), cwd=str(self.run_.work),
+                                start_new_session=True)
+        try:
+            out, err = proc.communicate(json.dumps(payload), timeout=self.HANG_GUARD)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            out, err = proc.communicate()
+            out = None
+        if out is None:
+            self.fail(f"the capture process still ran {self.HANG_GUARD} s after its 1 s bound")
+        self.assertEqual(proc.returncode, 0, err[-2000:])
+        return json.loads(out)
+
+    def test_a_start_that_hangs_ends_with_the_bound_and_writes_nothing(self):
+        out = self.start("hung")
+        self.assertEqual((out["ok"], out["code"], out["step"]), (False, "time-bound", 1))
+        self.assertEqual(self.run_.stored(), [])
+
+    def test_a_browser_that_starts_after_the_bound_is_closed_before_it_loads_the_page(self):
+        out = self.start("late", hold_ms=3000)
+        self.assertEqual((out["ok"], out["code"], out["step"]), (False, "time-bound", 1))
+        self.assertEqual(self.server.httpd.hits, [], "the capture went on after its bound and loaded the page")
+        self.assertEqual(self.run_.stored(), [])
 
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
