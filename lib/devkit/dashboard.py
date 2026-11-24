@@ -719,7 +719,8 @@ def people(team: list, items: list, slog: list, now: float = None, local: list =
 
 
 def _host_label(who: str, team: list) -> str:
-    """The hostname part of `who` as a person reads it (work.display): `mac-158` for `ana@m-…`."""
+    """The machine part of `who` as a person reads it (work.display): its machine id, `m-0a1b2c3d` for
+    `ana@m-0a1b2c3d`, never a hostname; a record from before the machine id keeps the host it named."""
     from . import work
     return work.display(who, team).partition("@")[2]
 

@@ -677,6 +677,36 @@ class EmbargoAcrossProjectsTests(BackupCase):
         self.assertEqual(self.on_origin("feat/x"), "")
 
 
+class DeepTrailLineTests(Sandbox):
+    # Any teammate can write a line into the handoff repository's audit copies, which the embargo reader reads on
+    # every push, backup and sync. A line nested 100,000 levels deep reads as one no reader can read, as a line cut
+    # short does: the records around it still count. A million levels is past the JSON parser's limit on every Python.
+    def test_a_deeply_nested_trail_line_leaves_the_embargoes_and_backups_around_it(self):
+        for d in (100_000, 1_000_000):
+            deep = "[" * d + "]" * d
+            with self.subTest(depth=d):
+                team = core.HANDOFF / "audit" / "mate@mini" / f"{time.strftime('%Y-%m')}.jsonl"
+                team.parent.mkdir(parents=True, exist_ok=True)
+                team.write_text("\n".join((
+                    json.dumps({"v": 2, "id": "E1", "ts": self.now, "time": "2026-11-23T10:00:00Z",
+                                "action": "git.embargo", "outcome": "ok", "project": PID, "branch": "fix/hole",
+                                "detail": "set until the release", "actor": {"user": "mate"},
+                                "evidence": {"commit": "a" * 40}}),
+                    '{"action": "git.embargo", "outcome": "ok", "project": "%s", "branch": "fix/other", '
+                    '"detail": %s}' % (PID, deep))) + "\n")
+                local = Path(audit.AUDIT) / f"{time.strftime('%Y-%m')}.jsonl"
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_text("\n".join((
+                    json.dumps({"action": "git.backup", "outcome": "ok", "project": PID, "branch": "feat/y",
+                                "ts": self.now}),
+                    '{"action": "git.backup", "outcome": "ok", "project": "%s", "branch": "feat/x", "ts": 1, '
+                    '"detail": %s}' % (PID, deep))) + "\n")
+                trails, why = branches.embargo_trails()
+                self.assertEqual(why, "")
+                self.assertEqual({b: e["commits"] for b, e in trails[PID].items()}, {"fix/hole": ["a" * 40]})
+                self.assertEqual(branches.backups(PID), {"feat/y": {"backup": self.now, "skipped": None}})
+
+
 class NoteEncodingTests(Sandbox):
     # a note saved with a byte-order mark or CRLF line endings keeps its embargo and its backup policy: read as "no
     # embargo" and "no backup policy", its branches would be backed up

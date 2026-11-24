@@ -51,8 +51,9 @@ LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even
 
 def actor(agent: str = None, session: str = None, user: str = None) -> dict:
     """Who acts: the GitHub user, this Mac (`host`: its machine id, the same whatever the hostname), the agent and its
-    session. `label` is the Mac's hostname, for display only; every hostname devkit runs under is recorded as one this
-    Mac carried (identity.machine), so records that name the Mac by a former hostname stay its own (mine)."""
+    session. No hostname: what reads the actor (locks, presence, records) lands in the shared handoff, and a hostname
+    often names the person. Every hostname devkit runs under is recorded as one this Mac carried (identity.machine),
+    so records that name the Mac by a former hostname stay its own (mine)."""
     user = user or core.github_user() or os.environ.get("USER", "unknown")
     m = identity.machine()
     host = m.id
@@ -61,7 +62,7 @@ def actor(agent: str = None, session: str = None, user: str = None) -> dict:
                                                         os.environ.get("CODEX_THREAD_ID") else "human")
     sid = session or os.environ.get("DEVKIT_SESSION", "")
     sid = sid.split(":", 1)[1] if ":" in sid else sid  # DEVKIT_SESSION is "<agent>:<session id>"
-    return {"user": user, "host": host, "label": m.label, "agent": agent, "session": sid[:12]}
+    return {"user": user, "host": host, "agent": agent, "session": sid[:12]}
 
 
 def mine(who: str, a: dict = None, at: float = None) -> bool:
@@ -82,28 +83,13 @@ def mine(who: str, a: dict = None, at: float = None) -> bool:
     return host == m.id or identity.was_this_mac(host, at, m)
 
 
-_LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # a short hostname: what a label must look like to be shown
-
-
 def display(who: str, team: list = None) -> str:
-    """`who` as a person reads it: `user@<machine id>` (or a lock holder `user@<id> (agent:session)`) becomes
-    `user@<hostname>`. This Mac's id shows its hostname now; another Mac's the `label` its presence publishes (from
-    `team` when given, else its presence file). A label that is not a plain hostname (presence is another person's
-    text), an id with no presence, and a record that names a hostname already stay as they are. For display only:
-    compare people with mine() and the id."""
-    head, sep, rest = str(who or "").partition(" ")
-    user, at, host = head.partition("@")
-    if not at or not identity.MACHINE_ID.fullmatch(host) or not re.fullmatch(r"[A-Za-z0-9._-]+", user):
-        return str(who or "")
-    m = identity.machine()
-    label = m.label if host == m.id else ""
-    if not label:
-        found = [t for t in team if isinstance(t, dict) and t.get("user") == user and t.get("host") == host] \
-            if team is not None else [core.read_json(PRESENCE / f"{user}@{host}.json", None)]
-        label = next((str(t.get("label") or "") for t in found if isinstance(t, dict)), "")
-    if not _LABEL.fullmatch(label):
-        return str(who)
-    return f"{user}@{label}" + (sep + rest if sep else "")
+    """`who` as a person reads it: as it is written, `user@<machine id>` (or a lock holder `user@<id> (agent:session)`),
+    never `user@<hostname>`. What devkit shows lands in the handoff note, in screenshots and in logs shared with the
+    team, and a hostname often names the person, so no reader turns the id into a hostname: presence no longer
+    publishes one (write_presence), and this Mac's own is not shown either. A record from before the machine id
+    names its host already and stays as it is. `team` is accepted for the callers that pass the team they read."""
+    return str(who or "")
 
 
 def actor_str(a: dict) -> str:
@@ -175,16 +161,21 @@ _HEADING = re.compile(r"^ {0,3}#{1,6}(\s|$)")
 _KEY = re.compile(r"^([A-Za-z_][\w.-]*)[ \t]*:(.*)$")
 
 
-class RecordLossError(ValueError):
-    """A write would drop text of the record on disk that it does not edit. `path`: the file; `lost`: those lines."""
+class RecordLossError(core.Refusal, ValueError):
+    """A write would drop text of the record on disk that it does not edit. `path`: the file; `lost`: those lines.
+
+    Two causes look the same here: the file changed after the caller read it (running the command again reads it
+    anew), or devkit misread the record, a defect. A refusal files no crash report, so the fix names `dev bug report`
+    for the second; its title holds no file name or line, which can be private."""
 
     def __init__(self, path, lost):
         self.path, self.lost = Path(path), list(lost)
         super().__init__(
             f"refused to write {path}: it would drop {len(self.lost)} line(s) of the record that this change does not "
             f"edit, first “{self.lost[0][:100]}”. Nothing was written. If the file changed after devkit read it, run "
-            f"the command again; otherwise devkit misread the record: leave the file as it is and report the bug with "
-            f"it.")
+            f"the command again; otherwise devkit misread the record: leave the file as it is.",
+            fix="run the command again; if it refuses the same way, leave the file as it is and run dev bug report "
+                "--title \"a write of a work item or plan would drop lines it does not edit\"")
 
 
 def split_frontmatter(text: str):
@@ -303,8 +294,9 @@ def _replace(path: Path, text: str) -> None:
 RECORD_WAIT = 30  # seconds a write waits for another process's write of the same file on this Mac
 
 
-class RecordBusyError(RecordLossError):
-    """Another devkit process held the record's lock for RECORD_WAIT seconds: nothing was written."""
+class RecordBusyError(core.Busy, RecordLossError):
+    """Another devkit process held the record's lock for RECORD_WAIT seconds: nothing was written. Exit 75: running the
+    command again can work."""
 
     def __init__(self, path, wait):
         self.path, self.lost = Path(path), []
@@ -888,6 +880,248 @@ def push_failed_file() -> Path:
     return core.STATE / "handoff-push-failed.json"
 
 
+# --------------------------------------------------------------------------- team policy files this Mac cannot load
+#
+# A team policy file (policy/<name>.json in the handoff repository) that no Mac could load must never be pushed: a
+# broken policy/audit.json makes every Mac withhold all audit text, refuse crew messages and hold every lesson. Left
+# in the repository uncommitted, it stopped this Mac's syncing instead: once a teammate changed the same file, every
+# pull's git reset --keep refused to move the checkout. So the text is moved out of the repository, under devkit's
+# state (HELD_POLICIES), with the time and the reason; the repository keeps the version it last pulled (origin's),
+# the hold is recorded (a critical, blocked handoff.push), and devkit says so at every sync and session start until
+# the developer drops the held copy (deletes it), after putting the repaired change back if they want it.
+
+_POLICY_FILE = re.compile(r"policy/[^/]+\.json")
+
+
+def held_policy_dir() -> Path:
+    return core.STATE / "policy-held"
+
+
+def _changed_policies(root: Path) -> list:
+    """The team policy files (policy/<name>.json) changed in the repository at `root` and not committed yet."""
+    parts = core.gitout(root, "status", "--porcelain", "-z", "--untracked-files=all", "--", "policy").split("\0")
+    out, i = [], 0
+    while i < len(parts):
+        entry, i = parts[i], i + 1
+        if len(entry) < 4:
+            continue
+        if "R" in entry[:2] or "C" in entry[:2]:  # a rename or copy names its source next
+            i += 1
+        if _POLICY_FILE.fullmatch(entry[3:]):
+            out.append(entry[3:])
+    return out
+
+
+def _held_copy(rel: str) -> Path:
+    """A new file for this Mac's text of `rel`: STATE/policy-held/<rel without .json>.<time>[-n].json."""
+    stem = f"{rel[:-len('.json')]}.{time.strftime('%Y%m%d-%H%M%S')}"
+    saved, n = held_policy_dir() / f"{stem}.json", 1
+    while saved.exists() or saved.with_suffix(".why").exists():
+        n += 1
+        saved = held_policy_dir() / f"{stem}-{n}.json"
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    return saved
+
+
+def policy_records_file() -> Path:
+    return core.STATE / "policy-recorded.json"
+
+
+def _not_recorded(kind: str, root: Path, now: dict) -> dict:
+    """Of `now` ({path: reason}), what the last check of `kind` ("refused" a push, "stuck" a hold that could not move
+    the file) in the repository at `root` has not recorded with the same reason; `now` becomes what is recorded, so a
+    file the check no longer finds is recorded again when it comes back. Every sync says each one; the audit trail and
+    the sessions hear of it once per file and reason. When the state cannot be written, each is recorded again."""
+    f = policy_records_file()
+    state = core.read_json(f, {})
+    state = state if isinstance(state, dict) and state.get("repo") == str(root) else {"repo": str(root)}
+    known = state.get(kind) if isinstance(state.get(kind), dict) else {}
+    if known == now:
+        return {}
+    state[kind] = now
+    with contextlib.suppress(OSError):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        core.replace_text(f, json.dumps(state, sort_keys=True) + "\n")
+    return {rel: why for rel, why in now.items() if known.get(rel) != why}
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # the text may hold a secret
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
+def _blob(root: Path, spec: str):
+    """The bytes git holds for `spec` (HEAD:<path>, :<path> for the staged version) in the repository at `root`, or
+    None when it holds none."""
+    import subprocess
+    try:
+        p = subprocess.run(["git", "-C", str(root), "cat-file", "blob", spec], capture_output=True, timeout=30,
+                           env=core.GIT_ENV)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def _write_why(saved: Path, rel: str, why: str) -> None:
+    """The time and reason of a held copy, beside it (.why)."""
+    with contextlib.suppress(OSError):  # without it, held_policies reads the path and time from the copy's name
+        _write_private(saved.with_suffix(".why"), json.dumps(
+            {"path": rel, "time": time.strftime("%Y-%m-%d %H:%M"), "why": why}).encode())
+
+
+def _hold_text(rel: str, data: bytes, why: str) -> None:
+    """Write `data`, a staged text of `rel` no Mac could load either, to a new private held copy and its reason."""
+    saved = _held_copy(rel)
+    _write_private(saved, data)
+    _write_why(saved, rel, why)
+
+
+def hold_broken_policies(root: Path, paths=None) -> list:
+    """Move each changed team policy file at `root` that no Mac could load (audit.publishable_policy) out of the
+    repository: this Mac's text to a private file under held_policy_dir(), its time and reason beside it (.why), and
+    the repository's file back to its last commit (deleted when it has none), so a pull and a commit find nothing
+    to keep. A good version staged before the file broke stays staged, and the file goes back to it; a staged
+    deletion stays staged, and the file goes; a staged version no Mac could load either is held too. Each hold is
+    recorded (a critical, blocked handoff.push) and told to the live sessions. A file that cannot be moved (the state
+    folder cannot be written, the disk is full, git cannot put the repository's version back) stays as it is and is
+    returned with no held copy: the caller leaves it out of every commit, a staged version of it no Mac could load is
+    unstaged, and it is recorded once per file and reason (_not_recorded). `paths`: the changed files, when the
+    caller listed them. Under _repo_lock.
+    -> [(path, reason, held copy, or None when it could not be moved)]."""
+    from . import audit
+    out, stuck, problems = [], {}, {}
+    for rel in [p for p in paths if _POLICY_FILE.fullmatch(p)] if paths is not None else _changed_policies(root):
+        src = root / rel
+        why = audit.publishable_policy(src)
+        if not why:
+            continue
+        literal = f":(literal){rel}"
+        staged = core.git(root, "diff", "--cached", "--quiet", "--", literal)[0] == 1
+        staged_text = _blob(root, f":{rel}") if staged else None  # None too for a staged deletion
+        deleted = staged and bool(core.gitout(root, "diff", "--cached", "--name-only", "--no-renames",
+                                              "--diff-filter=D", "--", literal))
+        keep_index = staged_text is not None and not audit.publishable_text(Path(rel).name, staged_text)
+        saved = problem = None
+        try:
+            saved = _held_copy(rel)
+            try:
+                _write_private(saved, src.read_bytes())
+            except OSError:  # a file this Mac cannot read moves as it is
+                os.replace(src, saved)
+        except OSError as e:
+            problem = e.strerror or type(e).__name__
+            if saved is not None and src.exists():  # a copy cut short holds nothing the repository lost
+                with contextlib.suppress(OSError):
+                    saved.unlink()
+        theirs = ""  # why the repository's own version no Mac could load either
+        if problem is None:
+            if staged_text is not None and not keep_index:  # staged and broken too: held as well, once
+                with contextlib.suppress(OSError):
+                    if saved.read_bytes() != staged_text:
+                        _hold_text(rel, staged_text, audit.publishable_text(Path(rel).name, staged_text))
+            if deleted:  # the deletion the developer staged stays staged, and the file goes
+                rc, drop = 0, True
+            elif keep_index:  # the working copy back to the staged version
+                rc, drop = core.git(root, "checkout", "-q", "--", literal)[0], False
+            elif core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
+                rc, drop = core.git(root, "checkout", "-q", "HEAD", "--", literal)[0], False
+            else:  # new since the last commit: out of the index, and gone
+                rc, drop = core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)[0], True
+            if rc == 0 and drop:
+                try:
+                    src.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:  # a folder this Mac cannot write: the file stays, as a restore that failed
+                    rc = 1
+            if rc == 0 and not drop and src.exists():  # git put the repository's version back: broken too?
+                theirs = audit.publishable_policy(src)
+            if rc != 0 or drop and src.exists():  # git could not put the file back
+                problem = "git could not restore the repository's version"
+                with contextlib.suppress(OSError):
+                    if not src.exists():  # moved, and nothing came back: a git add -A would commit a deletion
+                        os.replace(saved, src)
+                    elif src.read_bytes() == saved.read_bytes():  # nothing moved: the copy is not a hold
+                        saved.unlink()
+                    saved.with_suffix(".why").unlink(missing_ok=True)
+        if problem is not None:
+            unstaged = _blob(root, f":{rel}")
+            if unstaged is not None and audit.publishable_text(Path(rel).name, unstaged) and \
+                    core.git(root, "diff", "--cached", "--quiet", "--", literal)[0] == 1:
+                core.git(root, "reset", "-q", "--", literal)  # never committed from the index either
+            stuck[rel], problems[rel] = why, problem
+            out.append((rel, why, None))
+            continue
+        _write_why(saved, rel, why)
+        text = (f"held: it {why}, so no Mac could load it; this Mac's text was moved to {core.tilde(saved)} and the "
+                "handoff repository keeps " + ("the deletion staged before it" if deleted else
+                                               "the version staged before it" if keep_index else
+                                               "the version it last pulled"))
+        if theirs:  # pushed by an older Mac, a raw commit, or an import: this Mac's commits leave it as it is
+            text += f", but the handoff repository's version cannot be loaded either: it {theirs}"
+        audit.record("handoff.push", rel, text, "blocked", severity="critical")
+        try:  # each live session hears of it once, with its next wake or hook
+            from . import watch
+            watch.notice_all("notice", f"policy-held:{saved.name}", f"{rel} {text}. {_REPAIR}")
+        except Exception:
+            pass
+        out.append((rel, why, saved))
+    for rel, why in _not_recorded("stuck", root, stuck).items():
+        audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository "
+                     f"({problems[rel]}), so it stays on this Mac, never committed or pushed", "blocked",
+                     severity="critical")
+    return out
+
+
+_REPAIR = ("To keep the change, repair it (dev audit config shows what is wrong) and put it back into the handoff "
+           "repository; then delete the held copy, or delete it to drop the change")
+
+
+_HELD_NAME = re.compile(r"(.+)\.(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)\d\d(?:-\d+)?\.json")
+
+
+def held_policies() -> list:
+    """This Mac's held team policy texts (hold_broken_policies) that the developer has not dropped yet, oldest first:
+    [{"path", "why", "time", "saved"}], from the note beside each copy, or from the copy's own name when there is
+    none. The note beside a copy the developer deleted goes with it."""
+    folder = held_policy_dir()
+    out = []
+    for why_file in sorted(folder.rglob("*.why")) if folder.is_dir() else []:
+        if not why_file.with_suffix(".json").exists():
+            with contextlib.suppress(OSError):
+                why_file.unlink()
+    for saved in sorted(folder.rglob("*.json")) if folder.is_dir() else []:
+        m = _HELD_NAME.fullmatch(saved.relative_to(folder).as_posix())
+        if not m:
+            continue
+        meta = core.read_json(saved.with_suffix(".why"), {}) or {}
+        meta = meta if isinstance(meta, dict) else {}
+        out.append({"path": str(meta.get("path") or m.group(1) + ".json"), "why": str(meta.get("why") or ""),
+                    "time": str(meta.get("time") or "{}-{}-{} {}:{}".format(*m.groups()[1:])), "saved": str(saved)})
+    return sorted(out, key=lambda h: (h["time"], h["saved"]))
+
+
+def held_policy_line() -> str:
+    """What a sync and a session start tell the developer while a held team policy text waits: each file, why no Mac
+    could load it, when it was held and where its text is, and how to repair or drop it. "" when none waits."""
+    from . import audit
+    held = held_policies()
+    if not held:
+        return ""
+
+    def theirs(rel: str) -> str:  # the repository's own version is broken too (an older Mac pushed it)
+        f = HANDOFF / rel
+        why = audit.publishable_policy(f) if _POLICY_FILE.fullmatch(rel) and f.is_file() else ""
+        return f", and the handoff repository's version cannot be loaded either: it {why}" if why else ""
+    each = "; ".join(f"{h['path']}{' ' + h['why'] if h['why'] else ''} (held {h['time']}: {core.tilde(h['saved'])})"
+                     f"{theirs(h['path'])}" for h in held[:5])
+    more = f"; and {len(held) - 5} more in {core.tilde(held_policy_dir())}" if len(held) > 5 else ""
+    return (f"devkit moved this Mac's copy of {len(held)} team policy file{'s' if len(held) != 1 else ''} that no "
+            f"Mac could load out of the handoff repository, which keeps the version it last pulled, so syncing goes "
+            f"on: {each}{more}. {_REPAIR}.")
+
+
 def sync_problem(problem: str, action: str = "handoff.push", target: str = "") -> None:
     """Record a sync of the handoff repository that did not reach the remote: an audit record that every audit level
     keeps (`target`: the files involved), and handoff-push-failed.json, shown as a problem until a push succeeds."""
@@ -1222,6 +1456,7 @@ def rebase_fetched(retake=()) -> tuple:
         if not got:
             return False, "another devkit process kept the handoff notes or repository busy"
         recover_rebase("a pull")
+        hold_broken_policies(HANDOFF)  # git reset --keep refuses while such a file has a change not committed yet
         return _rebase(retake)
 
 
@@ -1364,11 +1599,111 @@ def push_now(retake=()) -> tuple:
     return push_handoff() if ok else (False, problem)
 
 
+POLICY_REFUSED = "refused to push: "
+
+
+def unpublishable_commits(root: Path) -> list:
+    """The team policy files (policy/<name>.json) that a commit of this Mac not pushed yet (@{u}..HEAD; every commit
+    when there is no upstream) changes to a version no Mac could load (audit.publishable_text): committed by a raw git
+    commit, an import, or an older devkit whose push failed, they never went through hold_broken_policies. Every such
+    commit counts, not only HEAD's version: a repair on top still publishes the broken text in the history. A merge
+    counts for what it changes itself (git's combined diff), so a broken file the remote already has publishes
+    nothing new. A deletion publishes nothing broken. One git log reads the policy paths each commit changed, then
+    one read per change. When the commits cannot be read (git log fails or gives output that is no commit id and no
+    policy file, a policy file the commit holds cannot be read), the push is refused too, with no commit:
+    [("policy", the cause, "")], which _refuse_policy_push says in its own words.
+    -> [(path, reason, short commit)], oldest first."""
+    from . import audit
+    has_upstream = core.git(root, "rev-parse", "-q", "--verify", "@{u}")[0] == 0
+    rc, log, _ = core.git(root, "log", "-z", "--reverse", "--format=%x01%h", "--name-only", "--no-renames",
+                          "--full-history", "--diff-merges=combined", "@{u}..HEAD" if has_upstream else "HEAD",
+                          "--", "policy", timeout=120)
+    if rc != 0 and core.git(root, "rev-parse", "-q", "--verify", "HEAD")[0] == 0:
+        return [("policy", "git log failed", "")]
+    out, sha, seen = [], "", set()
+    # -z ends every commit id and every name with NUL, which no path can hold. A field is a commit when it begins with
+    # \x01 and a name when it begins with "policy" (git names only the paths under the pathspec), so a name that holds
+    # \x01 or copies a commit id stays a name; any other field is output this check cannot read.
+    for field in log.split("\0"):
+        field = field.lstrip("\n")
+        if not field:
+            continue
+        if field.startswith("\x01"):
+            sha = field[1:]
+            if not _SHORT_SHA.fullmatch(sha):
+                return [("policy", "git log gave a commit id that cannot be read", "")]
+            continue
+        if not sha or not (field == "policy" or field.startswith("policy/")):
+            return [("policy", "git log gave a line that is no commit and no policy file", "")]
+        if not _POLICY_FILE.fullmatch(field) or (sha, field) in seen:
+            continue
+        seen.add((sha, field))
+        data = _blob(root, f"{sha}:{field}")
+        if data is None and core.git(root, "cat-file", "-e", f"{sha}:{field}")[0] == 0:
+            return [("policy", f"{field} at commit {sha} could not be read", "")]  # there, but not read
+        why = audit.publishable_text(Path(field).name, data) if data is not None else ""
+        if why:
+            out.append((field, why, sha))
+    return out
+
+
+_SHORT_SHA = re.compile(r"[0-9a-f]{4,64}")
+
+
+_AMEND = ("and a repair on top still publishes it, secrets too. Undo the unpushed commits (git reset --soft @{u}); "
+          "dev sync recommits the rest and holds the file for repair (dev audit config)")
+# what a refusal says before its files: every short copy of it (the saved failure, 300 characters; the session notice,
+# 200; dev status, 120) keeps the repair
+_REFUSAL_REPAIR = ("a team policy no Mac could load is in an unpushed commit; run git reset --soft @{u}, then dev sync, "
+                   "which holds it for repair (dev audit config), as a repair on top still publishes it")
+REFUSAL_FILES_SHOWN = 3  # files a refusal names; the rest are counted
+
+
+def _named(rel: str, sha: str) -> str:
+    return f"{rel} (commit {sha})" if sha else rel
+
+
+def _refuse_policy_push(root: Path, refused) -> str:
+    """Record each committed team policy file no Mac could load (a critical, blocked handoff.push), once per file,
+    commit and reason (_not_recorded) -> the problem, said at every refusal. The broken text may hold a pasted secret,
+    and a repair committed on top would still publish it in the history, so the repair undoes the commits."""
+    from . import audit
+    unchecked = [why for _, why, sha in refused if not sha]
+    if unchecked:  # the check could not run: no file is known broken, so no repair applies
+        problem = f"could not check the unpushed commits ({unchecked[0]}); run dev sync again"
+        for _ in _not_recorded("refused", root, {"policy": unchecked[0]}):
+            audit.record("handoff.push", "policy", f"refused: {problem}", "blocked", severity="warning")
+        return POLICY_REFUSED + problem
+    now = {_named(rel, sha): (rel, sha, why) for rel, why, sha in refused}
+    for key in _not_recorded("refused", root, {k: v[2] for k, v in now.items()}):
+        rel, sha, why = now[key]
+        text = f"refused: commit {sha} not pushed yet changes it to a version that {why}, so no Mac could load it, " \
+               f"{_AMEND}"
+        audit.record("handoff.push", rel, text, "blocked", severity="critical")
+    named = [f"{_named(rel, sha)} {why}" for rel, why, sha in refused]
+    more = len(named) - REFUSAL_FILES_SHOWN
+    return f"{POLICY_REFUSED}{_REFUSAL_REPAIR}; {len(named)} file(s): " + "; ".join(named[:REFUSAL_FILES_SHOWN]) + \
+        (f"; and {more} more" if more > 0 else "")
+
+
+def refusal_pairs(root: Path) -> list:
+    """What a refused push is about, to tell one refusal from another (cli._refused_again): [[file (commit), reason],
+    …], sorted. The refusal's text is cut short where it is saved, so a new file past the cut would read as the same
+    refusal."""
+    return sorted([_named(rel, sha), why] for rel, why, sha in unpublishable_commits(root))
+
+
 def push_handoff(timeout: int = 60) -> tuple:
-    """Push the handoff repository's commits (the network), under _repo_lock alone. -> (ok, the problem when not ok)."""
+    """Push the handoff repository's commits (the network), under _repo_lock alone. Refused, and recorded, while a
+    commit not pushed yet leaves a team policy file that no Mac could load (unpublishable_commits): pushed, it would
+    make every Mac withhold text. -> (ok, the problem when not ok; POLICY_REFUSED starts a refusal)."""
     with _repo_lock() as got:
         if not got:
             return False, _BUSY
+        refused = unpublishable_commits(HANDOFF)
+        if refused:
+            return False, _refuse_policy_push(HANDOFF, refused)
+        _not_recorded("refused", HANDOFF, {})  # the same refusal later is recorded again
         rc, _, err = core.git(HANDOFF, "push", "-q", timeout=timeout)
         return rc == 0, (err.strip()[:300] if rc else "")
 
@@ -2094,8 +2429,9 @@ def _presence_now(d: dict) -> tuple:
 def write_presence(sessions: list, a=None):
     """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
     tracked a while after its agent stopped is not active) and a summary of its run (run_summary), and held locks
-    (written only by this machine). `host` is the machine id and `label` the hostname, for display. This Mac's
-    presence files from before the machine id go (_drop_former_presence).
+    (written only by this machine). `host` is the machine id; the hostname is never published (the handoff is
+    shared and keeps its history, and a hostname often names the person), so another Mac shows this one as
+    `user@<machine id>`. This Mac's presence files from before the machine id go (_drop_former_presence).
     Written when a session starts or ends, or changes project, branch or `active`, or a lock changes; any other change
     (status line, last seen, run summary) only once the file is PRESENCE_HEARTBEAT seconds old. -> whether a file was
     written or removed (the sync commits it)."""
@@ -2105,7 +2441,7 @@ def write_presence(sessions: list, a=None):
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
              "until": i["meta"]["lock_expires"]} for i in all_items()
             if mine(i["meta"].get("claimed_by"), a, _claimed_at(i)) and not lock_holder(i)[1]]
-    data = {"user": a["user"], "host": a["host"], "label": a.get("label") or a["host"], "updated": now_iso(),
+    data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
             "sessions": [dict({k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
                                                      "subagents", "turn_started", "active")},
                               progress=run_summary(s.get("progress")))

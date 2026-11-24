@@ -269,14 +269,26 @@ def _waiting(root: Path) -> bool:
     return bool(_handoff_changes(root)[0]) or _ahead(root) > 0
 
 
-def _commit_handoff(root: Path, st: dict, quiet: bool) -> bool:
+def _commit_handoff(root: Path, st: dict, quiet: bool, policies=None) -> bool:
     """Stage and commit every change but a file over the size limit, which is left out (unstaged when someone staged
-    it) and recorded once: a critical, blocked `handoff.push` that names it. A record a running devkit command has
-    written and not committed yet (work.writing) is left out too: its writer commits it with its own message and
-    audit record. -> whether it committed."""
+    it) and recorded once: a critical, blocked `handoff.push` that names it. A team policy file no Mac could load is
+    moved out of the repository first (work.hold_broken_policies): the repository keeps the version it last pulled,
+    so nothing broken is committed and no pull waits for it. One that cannot be moved (the state folder cannot be
+    written, the disk is full) is left out of the commit and stays on this Mac: it may stop a pull, never reach the
+    remote. A record a running devkit command has written and not committed yet (work.writing) is left out too: its
+    writer commits it with its own message and audit record. `policies`: what work.hold_broken_policies returned
+    when the caller ran it under the same lock, so a file it could not move is not recorded twice.
+    -> whether it committed."""
     from . import audit, identity, work
-    _, held = _handoff_changes(root)
-    skip = [p for p, _ in held] + sorted(work.writing(root) - {p for p, _ in held})
+    paths, held = _handoff_changes(root)
+    policies = work.hold_broken_policies(root, paths) if policies is None else policies
+    stuck = [(p, why) for p, why, saved in policies if saved is None]
+    for path, why in stuck if not quiet else ():
+        ui.warn(f"handoff repository: {path} {why}, and it could not be moved out of the repository, so it is not "
+                f"committed or pushed and a pull may stop for it. Repair it (dev audit config shows what is wrong) "
+                f"or move it out of {tilde(root)}.")
+    skip = [p for p, _ in held] + [p for p, _ in stuck]
+    skip += sorted(work.writing(root) - set(skip))
     if skip:
         core.git(root, "add", "-A", "--", ".", *(f":(exclude,literal){p}" for p in skip))
         if held:
@@ -300,9 +312,9 @@ def _commit_handoff(root: Path, st: dict, quiet: bool) -> bool:
     if core.git(root, "diff", "--cached", "--quiet")[0] == 0:
         return False
     n = len(core.gitout(root, "diff", "--cached", "--name-only").splitlines())
-    m = identity.machine()  # the hostname a person knows, and the id presence and locks name the Mac by
-    core.git(root, *work.NO_AUTO_GC, "commit", "-q", "-m", f"sync: {n} file(s) from " +
-             (m.label if m.label == m.id else f"{m.label} ({m.id})"))
+    # the machine id, as presence and locks name the Mac: the handoff's history is shared, and a hostname often
+    # names the person
+    core.git(root, *work.NO_AUTO_GC, "commit", "-q", "-m", f"sync: {n} file(s) from {identity.machine().id}")
     return True
 
 
@@ -386,12 +398,24 @@ def _pushed(root: Path) -> None:
         _save_push_state(st)
 
 
+def _refused_again(failed: Path, refused) -> bool:
+    """Is this refused push (`refused`: work.refusal_pairs, None for any other failure) about the same files for the
+    same reasons as the failure already recorded in `failed`? Compared on the (file, reason) pairs, never on the saved
+    text, which is cut short: its record, its failed file and its notice are written once per file and reason."""
+    if not isinstance(refused, list):  # any other failure is said every time: nothing to compare it with
+        return False
+    last = core.read_json(failed, {})
+    return isinstance(last, dict) and isinstance(last.get("refused"), list) and last["refused"] == refused
+
+
 def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, reason: str = "") -> str:
     """Commit what changed in the handoff repository and push it, when the push is due: `urgent`, or no push from this
     Mac for sync.push_interval seconds. Otherwise the changes stay as they are and one detached flusher pushes them
     on time (`_defer`); nothing is recorded for a wait. A file over the size limit is never committed
-    (`_commit_handoff`). A rebase left stopped is aborted first, a pull settles every conflict in a private checkout
-    (work.rebase_fetched), and every failure is recorded in handoff-push-failed.json, which `dev status` shows until a
+    (`_commit_handoff`), and a team policy file no Mac could load is moved aside first, deferred or not
+    (work.hold_broken_policies), and named at every sync that is not quiet until the developer drops it. A rebase
+    left stopped is aborted first, a pull settles every conflict in a private checkout (work.rebase_fetched), and
+    every failure is recorded in handoff-push-failed.json, which `dev status` shows until a
     push succeeds. The commit, the fetch and the push hold work._repo_lock; the rebase holds the notes lock first, so
     it runs after that lock is released. `reason`: why it pushes (the audit record says it).
     -> "pushed" | "committed" (no remote, or push off) | "deferred" | "nothing" | "failed"."""
@@ -406,12 +430,16 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
                 ui.warn("handoff sync skipped: another devkit process is using the handoff repository")
             return "failed"
         work.recover_rebase("dev sync")
+        policies = work.hold_broken_policies(root)  # before a push that waits too: a pull meanwhile finds none
+        waiting = work.held_policy_line()
+        if waiting and not quiet:  # every sync says it until the developer drops the held copy
+            ui.warn(f"handoff repository: {waiting}")
         remote = bool(push) and bool(core.gitout(root, "remote"))
         st = _push_state(root)
         last = float(st.get("last_push") or 0)
         if remote and not urgent and push_interval() and 0 <= time.time() - last < push_interval():
             return _defer(root, st)
-        committed = _commit_handoff(root, st, quiet)
+        committed = _commit_handoff(root, st, quiet, policies)
         _save_push_state(st)
         if not remote:
             return "committed" if committed else "nothing"
@@ -421,18 +449,18 @@ def commit_push(push: bool = True, quiet: bool = False, urgent: bool = False, re
     result = "nothing" if ok else "failed"
     if ok and ahead not in ("", "0"):
         ok, err = work.push_handoff(timeout=120)
-        if not ok:  # someone pushed in between: rebase on it and try once more
+        if not ok and not err.startswith(work.POLICY_REFUSED):  # someone pushed in between: rebase, try once more
             ok, err = work.pull_rebase()
             ok, err = work.push_handoff(timeout=120) if ok else (False, err)
+        result = "pushed" if ok else "failed"
         if ok:
             audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)" + (f" · {reason}" if reason else ""))
             if failed.exists():
                 failed.unlink()
-            result = "pushed"
-        else:
-            result = "failed"
+        elif not _refused_again(failed, refused := work.refusal_pairs(root) if err.startswith(work.POLICY_REFUSED)
+                                else None):  # the same refusal again is only said (below)
             audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
-            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300], "refused": refused}))
             try:  # each live session hears of it once, with its next wake or hook
                 from . import watch
                 watch.notice_all("notice", f"push:{int(time.time())}",
@@ -2185,9 +2213,9 @@ def cmd_update(a):
     unknown = [e for e in errors if core.configschema.unknown_key(e)]
     if len(unknown) < len(errors):  # a wrong value of a key devkit reads stops the update
         ui.err("invalid configuration; run dev config validate or dev config edit: " +
-               "; ".join(core.configschema.describe(errors)))
+               "; ".join(core.say_config_errors(errors)))
         return 2
-    for line in core.configschema.describe(unknown):  # keys another version wrote: named, as dev install does
+    for line in core.say_config_errors(unknown):  # keys another version wrote: as dev install says them
         ui.err(line)
     try:
         profiles.resolve(cfg)
@@ -3963,7 +3991,8 @@ def cmd_jobs(a):
             for k, v in (("about", j.get("about")), ("command", "dev " + " ".join(j["cmd"])),
                          ("schedule", J.schedule_text(j)), ("enabled", "yes" if j.get("enabled") else "no"),
                          ("loaded", "yes" if J.loaded(a.name) else "no"), ("timeout", f"{j.get('timeout')} min"),
-                         ("notify", j.get("notify")), ("log", tilde(J.LOGS / (a.name + ".log")))):
+                         ("notify", j.get("notify")), ("log", tilde(J.LOGS / (a.name + ".log"))),
+                         ("audit", f"job.{J.said(a.name)}")):
                 print(ui.kv(k, v, 10))
             for r in J.journal(30, a.name)[-8:]:
                 ok = r.get("rc") == 0
@@ -4006,14 +4035,10 @@ def _from_presence(value, width: int = 0) -> str:
 
 
 def _presence_name(rec: dict, team: list = None) -> str:
-    """A machine as people read it: `ana@andress-mbp-2 (m-0a1b2c3d)`, the hostname from work.display (this Mac's own,
-    or the label another Mac's presence publishes when it is a plain hostname) and the machine id beside it. A record
-    from before the machine id, or one whose label is not a plain hostname, shows as presence names it, through
-    _from_presence."""
+    """A machine as people read it: `ana@m-0a1b2c3d`, its user and machine id (work.display), never a hostname, which
+    often names the person; a record from before the machine id keeps the host it named. Through _from_presence."""
     from . import work
-    who = f"{rec.get('user')}@{rec.get('host')}"
-    shown = work.display(who, team)
-    return _from_presence(f"{shown} ({rec.get('host')})" if shown != who else who)
+    return _from_presence(work.display(f"{rec.get('user')}@{rec.get('host')}", team))
 
 
 def cmd_team(a):
@@ -4214,7 +4239,8 @@ def cmd_config(a):
     if act == "show":
         effective, errors = core.config_snapshot()
         print(json.dumps({"config_file": str(core.CONFIG_FILE), "devkit": str(core.DEVKIT_HOME),
-                          "effective": effective, "errors": errors}, indent=2, ensure_ascii=False))
+                          "effective": effective, "errors": core.quiet_config_errors(errors)}, indent=2,
+                         ensure_ascii=False))
         return 1 if errors else 0
     if act == "validate":
         return _config_validate()
@@ -4227,7 +4253,7 @@ def cmd_config(a):
         except core.ConfigError as e:
             ui.err(str(e))
             return 2
-        print(f"{ui.OK} {a.key}: updated {type(new).__name__} value "
+        print(f"{ui.OK} {core.say_config_key(a.key)}: updated {type(new).__name__} value "
               f"in {tilde(core.CONFIG_FILE)} (audited)")
         return 0
     if act == "edit":
@@ -4525,7 +4551,11 @@ def config_report(drift: list, record: dict, hooks_conf: dict, check: bool = Fal
 
 def _config_validate() -> int:
     _, errors = core.config_snapshot()
-    errors = core.configschema.describe(errors)  # each unknown key with the command that removes it
+    try:
+        raw = core.read_config()
+    except core.ConfigError:
+        raw = None
+    errors = core.say_config_errors(errors, raw)  # an unknown key's removal command
     for rel in ("claude/settings.json", "claude/plugins.json", "codex/config.json", "codex/hooks.json",
                 "codex/plugins.json", "skills.json"):
         try:
@@ -4776,7 +4806,7 @@ class Parser(argparse.ArgumentParser):
         super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
 
 
-class _Refused(Exception):
+class _Refused(core.Refusal):
     """A command line that one command's parser refuses: the full parser reads it again and words the error."""
 
 
@@ -5437,6 +5467,59 @@ def _crashed(argv, exc: BaseException) -> int:
     return bugs.handle_crash(argv, exc)
 
 
+def _refused(cmd: str, exc: Exception) -> int:
+    """A command refused on purpose (core.Refusal): `dev <command>: <message>` and the fix on stderr, redacted, and
+    the refusal's exit status: 2, 75 (core.Busy) when running the command again can work, or the status a domain class
+    documents (`dev session`'s 3 and 4). A `code` that is no exit status (messaging's "invalid_text") gives the
+    class's default. No crash report: a refusal is devkit doing its job, not devkit's bug."""
+    code = getattr(exc, "code", None)
+    if not isinstance(code, int) or isinstance(code, bool) or not 1 <= code <= 125:
+        code = core.Busy.code if isinstance(exc, core.Busy) else core.Refusal.code
+    text = f"dev {cmd}: {exc}"
+    if getattr(exc, "fix", ""):
+        text += f"\n  fix: {exc.fix}"
+    print(_redacted_reason(cmd, text), file=sys.stderr)
+    return code
+
+
+def _redacted_reason(cmd: str, text: str) -> str:
+    """A refusal's text with its secrets redacted by the built-in rules and the extra patterns of this machine and the
+    team policy (audit.redact.extra). The built-in rules stand in alone only when the settings say there is no extra
+    pattern: a token shape only the team's patterns know is an ordinary word to them. When the redaction fails, the
+    text as it is only if there is no extra pattern and no built-in secret rule matches it. Otherwise, and whenever
+    the extra patterns cannot be read, a fixed line and how to get past it. A refusal never shows a secret and never
+    ends in a traceback. While the extra patterns cannot load (the team policy's or this Mac's), audit.redact would
+    print only the reason's length: the fixed line instead, with a fix that names the file to repair."""
+    from . import audit
+    try:
+        unloaded = audit.redaction_unavailable()
+    except Exception:
+        unloaded = ""
+    if unloaded:
+        return (f"dev {cmd}: refused; the reason is not shown because devkit could not redact it\n"
+                f"  fix: repair the file it names ({unloaded}); dev audit config lists its errors")
+    try:
+        return audit.redact(text)
+    except Exception:  # the extra patterns could not be read, or a rule failed on this text
+        pass
+    try:
+        alone = not audit.settings()["redact"]["extra"]  # the built-in rules are every rule there is
+    except Exception:
+        alone = False
+    if alone:
+        try:
+            return audit.redact(text, extra=[])
+        except Exception:
+            pass
+        try:
+            if not audit.SECRET.search(text):
+                return text
+        except Exception:
+            pass
+    return (f"dev {cmd}: refused; the reason is not shown because devkit could not redact it\n"
+            f"  fix: run dev audit config and correct the errors it lists; if it lists none, run dev bug report")
+
+
 def _closed_pipe() -> int:
     """The reader of dev's output went away before dev finished writing (`dev audit --json | head -c 100`): that is
     no devkit bug, so no crash record and no notice. What is left to write goes to /dev/null, so the flush at exit
@@ -5491,6 +5574,9 @@ def main(argv=None) -> int:
         return rc
     except BrokenPipeError:  # before Exception: a closed pipe is the reader's choice, not devkit's crash
         rc = _closed_pipe()
+        return rc
+    except core.Refusal as e:  # before Exception: devkit refused on purpose, with the reason and the fix
+        rc = _refused(a.cmd, e)
         return rc
     except Exception as e:  # devkit's own bug: a notice with its marker and exit 70, never a traceback
         rc = _crashed(argv, e)

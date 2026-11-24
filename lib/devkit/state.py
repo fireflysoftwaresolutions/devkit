@@ -60,6 +60,8 @@ import time
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
+from .refusal import Busy
+
 WAIT = 10.0  # seconds a `dev` command waits for a record's lock; it runs under the shell tool's timeout
 HOOK_WAIT = 2.0  # seconds a hook waits; hooks.run sets WAIT to it
 SAY_BUSY = True  # say on stderr that a `dev` command is waiting; hooks.run turns it off
@@ -71,9 +73,11 @@ _ids = itertools.count(1)
 _tight = set()  # record folders already made 0700 in this process
 
 
-class StateBusy(ValueError):
-    """The record's lock was not free in time, or the record does not parse. A ValueError, so every `dev` command
-    reports it as a plain error, as it does a refused step; hooks catch it and fail open."""
+class StateBusy(Busy, ValueError):
+    """The record's lock was not free in time: a refusal with exit 75, since running the command again can work. The
+    record that cannot be used as it is (unsafe, too large, or it does not parse) raises it with code 2, since a retry
+    meets the same bytes. Still a ValueError, so every `except ValueError` keeps catching it; hooks catch it and fail
+    open."""
 
 
 class StateHeld(StateBusy):
@@ -85,6 +89,8 @@ class StateHeld(StateBusy):
 class StateCorrupt(StateBusy):
     """load_bounded: the record's bytes are not a JSON object. Only this, not a busy lock, a record too large to
     read or an unsafe file, says that no reader can parse it."""
+
+    code = 2
 
 
 def _audit(action: str, target: str, detail: str, outcome: str):
@@ -143,7 +149,7 @@ def _acquire(lock: Path, wait: float, what: str) -> int:
                 if canonical:
                     info = os.fstat(fd)
                     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-                        raise StateBusy("unsafe state lock: not an owned single-link regular file")
+                        raise StateBusy("unsafe state lock: not an owned single-link regular file", code=2)
                     os.fchmod(fd, 0o600)
                 pause = 0.002
                 while True:
@@ -166,7 +172,7 @@ def _acquire(lock: Path, wait: float, what: str) -> int:
                 if canonical:
                     current = os.stat(lock.name, dir_fd=directory, follow_symlinks=False)
                     if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino) or current.st_nlink != 1:
-                        raise StateBusy("unsafe state lock: replaced during acquisition")
+                        raise StateBusy("unsafe state lock: replaced during acquisition", code=2)
                     return fd
                 if _names(lock, fd):
                     return fd
@@ -252,13 +258,13 @@ def load(path):
         if i < 2:
             time.sleep(0.02)
     _audit("state.unreadable", path.name, "the record does not parse; it is not written over", "dropped")
-    raise StateBusy(f"{path.name} does not parse; devkit does not write over it")
+    raise StateBusy(f"{path.name} does not parse; devkit does not write over it", code=2)
 
 
 def _absolute(path):
     path = Path(path).absolute()
     if ".." in path.parts:
-        raise StateBusy("unsafe state path: parent traversal")
+        raise StateBusy("unsafe state path: parent traversal", code=2)
     # Expand only known root-managed macOS aliases, then no-follow walk their targets too.
     if len(path.parts) > 1 and path.parts[1] in ("var", "tmp", "etc"):
         alias = Path("/") / path.parts[1]
@@ -306,7 +312,7 @@ def _open_base(path, pins, create):
     fd = os.open(str(real), os.O_RDONLY | os.O_DIRECTORY)
     if os.fstat(fd).st_uid not in (0, os.getuid()):
         os.close(fd)
-        raise StateBusy("unsafe state directory: owner mismatch")
+        raise StateBusy("unsafe state directory: owner mismatch", code=2)
     return root, fd
 
 
@@ -330,13 +336,13 @@ def _directory(path, *, create=False):
                 child = os.open(name, flags, dir_fd=fd)
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise StateBusy("unsafe state path: symbolic link or non-directory") from None
+                    raise StateBusy("unsafe state path: symbolic link or non-directory", code=2) from None
                 raise
             os.close(fd)
             fd = child
             info = os.fstat(fd)
             if info.st_uid not in (0, os.getuid()) or (active and info.st_uid != os.getuid()):
-                raise StateBusy("unsafe state directory: owner mismatch")
+                raise StateBusy("unsafe state directory: owner mismatch", code=2)
             if create and active:
                 os.fchmod(fd, 0o700)
         yield fd
@@ -350,7 +356,7 @@ def _record_info(directory, name):
     except FileNotFoundError:
         return
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-        raise StateBusy("unsafe state record: not an owned regular file")
+        raise StateBusy("unsafe state record: not an owned regular file", code=2)
 
 
 def _open_leaf(directory, name, flags):
@@ -358,7 +364,7 @@ def _open_leaf(directory, name, flags):
         return os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-            raise StateBusy("unsafe state path: symbolic link or non-directory") from None
+            raise StateBusy("unsafe state path: symbolic link or non-directory", code=2) from None
         raise
 
 
@@ -369,7 +375,7 @@ def secure_path(path):
         with _directory(path.parent) as directory:
             info = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
             if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
-                raise StateBusy("unsafe state path: symbolic link or owner mismatch")
+                raise StateBusy("unsafe state path: symbolic link or owner mismatch", code=2)
     except FileNotFoundError:
         pass
 
@@ -389,7 +395,7 @@ def touch(path, *, times=None):
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-                raise StateBusy("unsafe state marker: not an owned single-link regular file")
+                raise StateBusy("unsafe state marker: not an owned single-link regular file", code=2)
             os.fchmod(fd, 0o600)
             os.utime(fd, times)
         finally:
@@ -407,10 +413,10 @@ def load_bounded(path, maximum):
         info = os.fstat(stream.fileno())
         # Atomic replacement can unlink this already-open inode; its complete contents remain safe to read.
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink > 1:
-            raise StateBusy("unsafe state record")
+            raise StateBusy("unsafe state record", code=2)
         raw = stream.read() if maximum is None else stream.read(maximum + 1)
     if maximum is not None and len(raw) > maximum:
-        raise StateBusy("capacity: existing state exceeds the read limit; retained unchanged")
+        raise StateBusy("capacity: existing state exceeds the read limit; retained unchanged", code=2)
     try:
         doc = json.loads(raw)
         if not isinstance(doc, dict):
@@ -425,7 +431,7 @@ def _write(path: Path, doc: dict, indent, durable=False, max_bytes=None):
     text = json.dumps(doc, indent=indent, ensure_ascii=not durable,
                       separators=(",", ":") if durable and indent is None else None)
     if max_bytes is not None and len(text.encode("utf-8")) > max_bytes:
-        raise StateBusy("capacity: record exceeds the storage limit")
+        raise StateBusy("capacity: record exceeds the storage limit", code=2)
     if durable or "messaging-v2" in path.parts:
         with _directory(path.parent, create=True) as directory:
             _record_info(directory, path.name)

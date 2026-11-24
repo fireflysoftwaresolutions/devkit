@@ -67,8 +67,17 @@ audit/ana@m-s9jn9xnz/
   open day waits for the next run, so a record waits up to about 29 hours to be anchored: the rest of its UTC day,
   plus the time to the next 05:00 run.
 - **Days are UTC days,** taken from each record's time and kept within the local month file the record was written
-  to. A record whose clock went back stays in the day it follows, so the day files joined in order are the local
-  month file, byte for byte, and one chain.
+  to. A record whose clock went back stays in the day it follows, so the day files joined in order hold the local
+  month file, line for line, and one chain.
+- **Each line goes out as a reader sees it.** Before the job publishes a day, it cleans each line with the rules
+  `dev audit` reads with (see [Records written before 26.11.3](#records-written-before-26113)), so text that reading
+  hides in a line an older devkit wrote reaches neither the handoff repository nor its git history. A line already
+  clean, stored as devkit writes the record it holds, goes out byte for byte; a line with a duplicate key, which holds
+  more than any reader sees, goes out cleaned. A v2 record that cleaning changes keeps its `id`, `prev`, and `hash` and
+  is marked `"cleaned": true`. A v1 line that cleaning changes goes out in the v2 shape a reader sees, marked the same
+  way. A line no reader can read, such as one cut short, goes out as a stand-in that holds only its id. While the
+  redaction patterns cannot load, the job publishes nothing and records `audit.publish` as blocked with `critical`
+  severity; the first run after the repair publishes the days that waited.
 - **A one-file copy stays.** devkit 26.11.19 and earlier published `YYYY-MM.jsonl` whole, every day. Such a copy is
   never rewritten nor removed; the day files go on from its last byte.
 - **A day over 45 MiB is held.** Its records stay in this machine's local trail, where `dev audit verify` checks them.
@@ -108,7 +117,7 @@ information the people recorded need (GDPR article 13).
 
 devkit records only what the purpose needs (data minimization, article 5(1)(c)):
 
-- **Who acted:** the GitHub login, this Mac's machine id and its hostname at the time, the agent (`claude`, `codex`,
+- **Who acted:** the GitHub login, this Mac's machine id (never its hostname), the agent (`claude`, `codex`,
   `job`, or `human`), the session id, and, when a crew member acts, its member id, lane, and launch id.
 - **What happened:** the action, its target and details, the outcome, the project, branch, run and step, the reason
   given for an override (`why`), and evidence such as the command, the commit, or the exit code.
@@ -159,6 +168,13 @@ devkit keeps these out of every record it writes:
     and `escalate` always does.
   - The value of `status` and `priority` in `dev note set`, which is one of a fixed set, such as `status=blocked`.
     The value of any other key becomes its length.
+  - A configuration key in `dev config`, such as `progress.max_parallel`, only when devkit's configuration schema
+    declares each of its words. A key with a word you chose, such as a job's or a Codex profile's name
+    (`jobs.<name>.every`, `codex.profiles.<name>.model`), becomes its length.
+  - A scheduled job's name in `dev jobs` (`set`, `run`, `show`, `enable`, `disable`, `exec`, and `logs`), only when
+    it is a built-in job's name, or a short word in which no built-in secret rule finds anything. These two rules
+    read devkit's own schema and rules only, never your patterns or the team policy, so a command line is recorded
+    the same way on every machine.
   - Ids (`T-…`, `L-…`, `P-…`, `D<n>`, `M<n>`, `R<n>`) and numbers of up to six digits. A longer number, such as a
     phone number, becomes its length.
   - Shell operators, reserved words, and redirections. A redirection's file stays only when it names no file of
@@ -192,6 +208,28 @@ devkit keeps these out of every record it writes:
   record changes: the command runs as typed. A value that names
   something stays, so a name passed as one, such as a crew member, a step's name, or a path, can still reach a
   record.
+- **Scheduled jobs and configuration changes.** A job's run is recorded as `job.<name>` when the rule for job names in a
+  command line keeps the name, and otherwise as `job.<key of N characters>#<id>`, where the id is the first 8
+  hexadecimal digits of the name's SHA-256. The id is the same in every record and on every machine, so
+  `dev audit --grep '<id>'` finds all of the job's records, and `dev jobs show` prints it. `jobs.set` and `jobs.install`
+  name jobs the same way, and a `jobs.set` record keeps only the job's schedule (`every`, `at`, `weekly`, and
+  `enabled`): the job's command and description stay out. A job's id comes from devkit's built-in rules only, so records
+  that devkit 26.11.27 wrote can name a job another way than newer records do: a name one of that Mac's or the team's
+  redaction patterns found shows there as `<key of N characters>#<id>`, where newer records keep the name, and a dotted
+  name it hid in part shows an id of its own. `dev audit --grep` with the job's name or newer id does not find those
+  records: list them by action and day instead, such as `dev audit --action job. --since 2026-11-20`.
+  `dev.config.set` keeps each word of the key that devkit's configuration declares, such as `progress.max_parallel`. A
+  name the person chose in the key, such as a job's or a Codex profile's, stays only when it is a short word (letters
+  and underscores, at most 24 characters) in which neither the built-in secret rules nor this Mac's or the team's
+  redaction patterns find anything; any other name becomes its length, as in `jobs.<key of 24 characters>.every`. The
+  record keeps the value only as its type and length, such as `a string of 40 characters`, never a digest of it. Records
+  an older devkit wrote are read, exported, and published the same way: an older value digest becomes the value's type,
+  a value change devkit 26.11.3 to 26.11.18 recorded whole (`<old value> → <new value>`) becomes the new value's type
+  and length, and any other detail becomes `a value it does not quote`. devkit tries at most 8 arrows in one detail,
+  so an old value whose text itself holds 8 or more of them also becomes `a value it does not quote`.
+- **Bytes that are not UTF-8.** A text the record keeps, such as a detail, a reason, or a folder, keeps each byte that
+  is not UTF-8 as its escape, such as `caf\udce9`: the command is recorded, the record stays readable, and its hash
+  verifies. Records an older devkit wrote with such bytes are read, exported, and published with the same escapes.
 - **Delegated work and handoff commits.** `crew.delegate` keeps who delegated to whom and the step, and what the
   member should do only as its length. A commit to the handoff repository (`handoff.*`) keeps the item's id and the
   operation, such as `T-…: done`, and the rest of its message, which holds the title and the reason, only as its
@@ -216,7 +254,8 @@ Secrets are redacted, as far as the redactor knows their shape. Tokens, keys, pa
 passwords in URLs, and the secrets that common commands take (`curl -u`, `mysql -p`, `sshpass -p`, `docker login -p`,
 `gh secret set --body`, and a value echoed into `--password-stdin` or `--with-token`) are redacted in every text field before a record is written: the target, the details, the
 reason, the run and step names, and the branch. The redactor matches known shapes, so a secret in a shape it does
-not know can still reach a record. Add a pattern for it with `audit.redact.extra`.
+not know can still reach a record. Add a pattern for it with `audit.redact.extra`. While the team policy's patterns
+cannot load, those fields keep their length only (see [Export and forwarding](#export-and-forwarding)).
 
 ### Records written before 26.11.3
 
@@ -234,11 +273,12 @@ Message retry keys (`--request-id`) and page cursors (`--cursor`) are free text:
 length. Message file inputs record the cleaned path, never the file contents. Acknowledgments retain the supplied
 digest and delivery generation so the recorded operation can be traced without recording its message body.
 
-The stored lines still hold the text, in three places:
+The stored lines on this machine, in `~/.local/state/devkit/audit/`, still hold the text until a planned re-seal,
+not built yet, rewrites them with the current rules and records the migration. The daily job cleans each line before
+it publishes it (see [The handoff copy](#the-handoff-copy)), so a day it publishes from devkit 26.11.28 on holds none
+of that text. The days published before still hold it:
 
-- On this machine, in `~/.local/state/devkit/audit/`, until a planned re-seal, not built yet, rewrites them with
-  the current rules and records the migration.
-- In the handoff repository's working copy, until the first publish after that re-seal.
+- In the handoff repository's working copy, until `audit.retention.team_months` prunes them.
 - In the handoff repository's git history, until the purge described in [What git keeps](#what-git-keeps).
 
 ### The rights of the people recorded
@@ -280,7 +320,7 @@ dev audit show 01M6SFPEZ2
   "id": "01M6SFPEZ26QJ416WAYP5S80YH",
   "ts": 1794004171.746,
   "time": "2026-11-06T22:29:31.746Z",
-  "actor": {"user": "ana", "host": "m-0a1b2c3d", "label": "ana-mbp", "agent": "claude", "session": "3f2a91c0-7b1"},
+  "actor": {"user": "ana", "host": "m-0a1b2c3d", "agent": "claude", "session": "3f2a91c0-7b1"},
   "action": "audit.verify",
   "category": "security",
   "severity": "info",
@@ -301,7 +341,7 @@ dev audit show 01M6SFPEZ2
 | `v` | yes | The schema version, `2` |
 | `id` | yes | A ULID: 26 characters of Crockford base 32 that sort by time. `dev audit show` takes any unique start of it |
 | `ts` · `time` | yes | When, as Unix seconds with milliseconds, and as ISO 8601 in UTC |
-| `actor` | yes | Who acted: `user` (the GitHub login), `host` (this Mac's machine id, the same whatever its hostname; a record from before 26.11.16 holds the short hostname), `label` (the hostname at the time, for display), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
+| `actor` | yes | Who acted: `user` (the GitHub login), `host` (this Mac's machine id, the same whatever its hostname; a record from before 26.11.16 holds the short hostname), `label` (only in records from before this release: the hostname at the time; records are published to the shared handoff repository, so devkit no longer writes it), `agent` (`claude`, `codex`, `job`, or `human`), and `session` (the first 12 characters of the session id). A `dev` command a Codex thread runs is recorded under `codex` and that thread's session, even though Codex passes no devkit variable to its commands; only your own terminal is `human` |
 | `crew` | when a crew member acts, or devkit cannot tell who did | `member` (its id), `role`, `lane` (the subagent's id), `parent` (the lane that launched it, or `main`), and `tool_use_id` (its launch). A record made during a run whose caller devkit cannot tie to a lane (a background job a command started, or a command that open calls of the tech lead and a member both hold) holds `{"member": "unknown"}` and no `step`; `dev audit --member unknown` lists them |
 | `project` · `branch` · `run` · `step` | when known | The repository, its branch, the goal of the session's `dev progress` run, and the step running in the caller's lane: a crew member's own step, the main session's for the tech lead |
 | `action` | yes | What happened, as a dotted name such as `dev.commit`, `crew.gate`, `crew.decided`, or `audit.verify` |
@@ -310,7 +350,7 @@ dev audit show 01M6SFPEZ2
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
 | `why` | for an override | The reason given with `--why`, redacted. At most 300 characters |
 | `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, `transcript_uuid`, and, for a question tool answer, `match` and `asked` |
-| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for [caller identity records](#caller-identity-records), `agent`, `ancestors`, `lane_var`, and `thread`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
+| `ref` | when there is some | `withheld` when the record keeps lengths instead of text because the team policy's redaction patterns did not load (it names the file); links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for messages, claims, and escalations between agent sessions, `kind`, `recipients`, and `resource`; for [caller identity records](#caller-identity-records), `agent`, `ancestors`, `lane_var`, and `thread`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`policy-auto`, `E1`, `E2`, `step`, or `preapproval`), `repo` (the `owner/repo` acted on), `origin_repo` (the session's own project, when automatic policy allowed an operation in another project of your workspace), and, for a program the guard cannot classify, `kind` (`unclassified:unread`, `unclassified:built`, `unclassified:unsure`, or `unclassified:opaque`); for the developer's approval lines (`crew.evidence`), `kind` `typed-midturn` when devkit read the line from the session's transcript because you typed it while the session worked, and `since` (the running turn's start) for a line the prompt hook received while the session worked: `dev audit verify` accepts the transcript's record of it when it is stamped between `since` and the record's time; automatic authorization also retains `operation`, `mode_source`, `policy_digest`, `origin_repo`, `account`, and `principal_kind`; for a guard refusal, `refusal_id` (the stable id of the place that refused, or `hooks:<rule>` for a refusal the hook makes itself; see [The bug registry](bug-registry.md)) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
 The `flag` and `match` evidence, the `irreversible` reference, and the fields of the irreversible-action gate appear
@@ -456,6 +496,25 @@ Some checks cannot run on every record. When a `crew.decision` record kept its o
 check it cannot run is no evidence of a change. A held day's records are checked only on the machine that wrote them:
 elsewhere, verify prints a note for that day and follows the chain on from where its record says the chain stands.
 
+A day the job cleaned before it published it (see [The handoff copy](#the-handoff-copy)) is checked as far as its copy
+allows. On the machine that wrote it, the anchor matches each cleaned line to its local line: a cleaned record must keep
+the local record's `id`, `prev`, and `hash`, which the local chain checks, and a stand-in must hold the local line's id;
+a stand-in for a line no reader can read holds nothing else. Both must also keep what cleaning never changes: `v`, `ts`,
+`time`, `actor`, `category`, `severity`, `outcome`, and the set of keys. A record whose outcome, time, or keys were
+changed in the handoff repository differs from the local file even when it is marked `cleaned`. Text is compared as both
+lines read today, but a cleaned line's text was cleaned with the rules of the day it was published: when a redaction
+pattern was removed or narrowed since, or a newer devkit cleans other wording, the two can read differently.
+`dev audit verify` then prints a note for that line, which also covers a text changed in the handoff repository, and
+publishing goes on. While the redaction patterns cannot load, verify compares no text and prints one note that names the
+file to repair. A redaction pattern added since the day was published changes nothing. Elsewhere, a cleaned record no
+longer matches its `hash`, and a stand-in hides the bytes that the next record's link seals: verify prints a note for
+each and still exits `0`, and it still checks each record's link to the record before it where it can. On another
+machine, verify therefore cannot tell a stand-in that publish wrote from one that a teammate wrote in the handoff
+repository in place of a record they removed: only the anchor, on the machine that wrote the day, finds that the record is missing,
+and a published line after the last local line differs. Run `dev audit verify` on that machine when a record must be
+proven present. A machine on devkit 26.11.27 or earlier reports a cleaned record as changed and reads a stand-in as a
+record: update that machine.
+
 Records not published yet are counted as _not yet published, so not yet anchored_, and so are the records of a held
 day. Every run is itself recorded as `audit.verify`, with `critical` severity when it fails. The daily job never
 publishes over a file this machine's month file no longer extends; it records `audit.publish` as blocked and
@@ -507,8 +566,8 @@ the window. Narrow it with a filter from the first two rows, such as `--days 1` 
 | --- | --- |
 | `jsonl` (default) | One record per line, as stored. A record cleaned on read carries `"cleaned": true` and no longer matches its `hash`; `dev audit verify` checks the stored line |
 | `csv` | A header row, then one row per record: `id`, `time`, `user`, `host`, `agent`, `session`, `member`, `role`, `lane`, `project`, `branch`, `run`, `step`, `action`, `category`, `severity`, `outcome`, `target`, `detail`, `why`, `evidence`, `ref`, and `hash`. A cell that starts with `=`, `+`, `-`, or `@` gets a leading `'`, so a spreadsheet never runs it as a formula |
-| `ocsf` | One OCSF 1.3.0 Base Event per line (class 0, activity Other), with the severity and status mapped and devkit's own fields under `unmapped`. `device.hostname` is the hostname at the time and `device.uid` the machine id |
-| `cef` | One CEF line per record: `CEF:0\|Firefly Software Solutions\|devkit\|<version>\|<action>\|<target>\|<severity>`, then the time, user, host, action, category, outcome, and detail, with the id, project, member, step, why, and hash as custom strings. `shost` and the syslog header carry the hostname at the time, and `deviceExternalId` the machine id |
+| `ocsf` | One OCSF 1.3.0 Base Event per line (class 0, activity Other), with the severity and status mapped and devkit's own fields under `unmapped`. `device.hostname` is the hostname this Mac carried at the record's time, which only this Mac's own export knows (another Mac's records show their machine id), and `device.uid` the machine id |
+| `cef` | One CEF line per record: `CEF:0\|Firefly Software Solutions\|devkit\|<version>\|<action>\|<target>\|<severity>`, then the time, user, host, action, category, outcome, and detail, with the id, project, member, step, why, and hash as custom strings. `shost` and the syslog header carry the hostname as `device.hostname` does, and `deviceExternalId` the machine id |
 
 ```bash
 dev audit export --format cef --days 1
@@ -528,7 +587,90 @@ To send every new record to another system as it is written, set `audit.forward`
 | `syslog://host:port` | A syslog server over UDP, as a CEF line |
 
 `audit.redact.extra` adds your own regular expressions to the redactor, for secrets that only your team uses. A team
-policy can add patterns, never remove them.
+policy can add patterns, never remove them. Every place devkit screens text for secrets uses the same patterns, the
+built-in rules plus `audit.redact.extra` of this Mac and of the team: the redactor, bug reports before they leave this
+Mac, the lesson screen before recall, the hook payloads that `DEVKIT_HOOK_CAPTURE=1` keeps, and the check on messages
+that agents type.
+
+When those patterns cannot load, devkit withholds text instead of redacting it with fewer patterns: the built-in rules
+cannot tell that a token only your patterns know is a secret. This happens when `policy/audit.json` exists but cannot
+be read, is not valid JSON, or is not a JSON object, or when its `redact` section was rejected (an `extra` that is not
+a list, a pattern that is not a regular expression, or an unknown key), or when it has a key devkit does not know, at
+the top or inside `retention` or `redact`, such as a misspelled `redcat`, a capitalized `Redact`, the dotted
+`audit.redact.extra` written as one key, an `extra` under `retention`, or the whole policy wrapped in `audit`
+(`policy/audit.json` holds the audit section itself, so the patterns go under `redact.extra`). The `audit` section of
+this Mac's `~/.config/devkit/config.json` fails the same way: a section that is not a JSON object, an `extra` written
+as one string instead of a list, a pattern that does not compile, or an unknown key. Until you repair the file:
+
+- Every text devkit would redact becomes `[text not recorded: N characters]`: hook and CI notices, checkpoints, the
+  crew messages it shows, and the text fields of new audit records. Queries and exports show older records the same
+  way.
+- A new audit record keeps the fields that hold no free text: its time, actor, action, category, severity, outcome,
+  crew, run id, step number, exit code, and other numbers. `ref.withheld` names the file and what is wrong with it.
+  It names an unknown key only when the key is a word of at most 24 letters, underscores and dots that no built-in
+  rule and no pattern that loaded finds a secret in, such as `redcat`; any other key, such as a token pasted as a
+  key, is named by its length and where it is (`an unknown key of 40 characters in audit.retention`). The refusals,
+  `dev sync` and `dev audit config` say it the same way, and `dev audit config` quotes a wrong value only when it is
+  a number, `true`, `false`, `null` or a short word. `dev config validate` names a key of `config.json` that devkit
+  does not read, or a map key it refuses, by the same rule.
+- A text field of a record keeps its value only when the whole value is one of devkit's own ids or words: a decision,
+  message or reply id (`D3`, `M12`, `R4`); a work item, lesson or plan id at the length devkit writes it (`T-`,
+  `B-`, `F-`, `S-`, `L-` or `P-` and 12 characters, or 11 for an id an older devkit wrote); a session message
+  or escalation id (`S-` or `E-` and 8 characters); a session (`claude:<uuid>`, `codex:<uuid>`); a crew member's
+  exact id, name or alias from the roster, or `devkit:<id>`; a project id from this Mac's projects map; or a state
+  or outcome word (`pending`, `decided`, `withdrawn`, `blocked`, `failed`, …). Such a value is still withheld when a
+  built-in rule or a pattern that did load (this Mac's, and the team's when its file is valid JSON) finds a secret
+  in it. `dev audit show --project` and `--member` still find the record, and a decision record keeps its decision
+  id and session. Every other value is its length, even one that starts with an id or ends with a member's name: a
+  reason (`why`), a detail, a decision's options, labels and answers (a bare `A` too).
+- A refused command does not show its reason, and its `fix:` line names the file to repair.
+- Text that an agent types for devkit to store is refused, because devkit cannot tell whether it holds a secret:
+  crew and session messages, `dev crew decide` answers (a bare `A` too), and the short fields of a session message.
+  The refusal names the file to repair. devkit's own notices (a delegated task, a declined or withdrawn launch, hook
+  and CI results) are still delivered and stored, with their text withheld.
+- A bug report is held for you instead of sent, and a captured hook payload keeps each text as its length.
+- The lesson screen holds every lesson out of recall. It still runs the built-in rules, the patterns that did load,
+  and its other screens on every field: a lesson they find something in is held for that reason, which is written
+  into the lesson. Any other lesson's reason says that it cannot be checked for secrets, and nothing is written into
+  it, so it is recalled again once the patterns load. `dev lesson release` is refused until then, with the file to
+  repair: the screen could not ask the team's patterns, so a lesson it holds for a URL may also hold a token only
+  those patterns know.
+- `dev audit config` lists the file's errors and says that text is withheld.
+
+Audit records go on being written, with lengths instead of text. Fix the file the `fix:` line or `dev audit config`
+names, and redaction with every pattern starts again at the next command.
+
+`dev sync` never publishes a team policy file (`policy/<name>.json`) that no Mac could load, and never stops for one.
+When this Mac's copy cannot be loaded, the sync moves its text out of the handoff repository to a private file under
+devkit's state (`policy-held/`, named with the time, a `.why` file beside it with the reason), and the repository keeps
+the version it last pulled, so the pull and the push go on. devkit records the hold as a critical, blocked
+`handoff.push`, tells the live sessions, and says it at every `dev sync` and every session start until you delete the
+held copy. To keep the change, repair it (`dev audit config` shows what is wrong), put it back into the handoff
+repository, and delete the held copy; to drop the change, delete the held copy.
+
+- **A good version you staged stays staged.** When you staged a version that loads (`git add`) before the file
+  broke, the file goes back to that version and the sync commits it. A staged version that no Mac could load either
+  is held as well. When you staged the file's deletion (`git rm --cached`), the deletion stays staged and the sync
+  commits it.
+- **A file devkit cannot move stays on this Mac.** When the held copy cannot be written (the state folder is not
+  writable, or the disk is full), or git cannot put the repository's version back (another git process holds
+  `index.lock`), the file stays in the handoff repository as it was and is left out of every commit and push. The
+  hold is recorded once per file and reason, and said at each `dev sync`. A pull may stop until you repair the file
+  or move it out.
+- **A commit that leaves a broken policy is never pushed.** `dev sync` checks each team policy file that this Mac's
+  commits not pushed yet change, whatever made them (a raw `git commit`, `dev handoff-import`, an older devkit
+  whose push failed). While one of them leaves a file no Mac could load, the push is refused: devkit records it once
+  per file and reason as a critical, blocked `handoff.push`, says the file, the reason and the repair at every
+  `dev sync`, and `dev status` shows the failed push.
+- **Remove the broken version from the history, not only from the file.** The broken text may hold a secret you
+  pasted, and a repair committed on top still pushes the broken commit with it. Undo the commits not pushed yet with
+  `git reset --soft @{u}`, which keeps their changes staged, or amend the commit with `git commit --amend` when it is
+  the last one. The next `dev sync` commits the changes again; while the file is still broken, it holds the file
+  aside the same way, and the push carries only the versions every Mac can load.
+
+Because a key devkit does not know withholds text, add a top-level key that a newer devkit introduces to
+`policy/audit.json` only after every Mac on the team runs that version (`dev update`): a Mac on an older version
+reads the key as unknown and withholds text until it updates.
 
 See also [Teams and machines](teams.md), [Configuration › Jobs and audit](configuration.md#jobs-and-audit), and
 [Scheduled jobs and the audit trail](jobs-and-audit.md).

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,7 +28,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, cli, core, ext, hooks, setup, ui  # noqa: E402
+from devkit import audit, cli, core, ext, hooks, setup, state, ui  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 
 SHA_A = "414603bf14c7a344edb466bb1f85690c77ce8b7d"
@@ -744,6 +745,41 @@ class DriftWiringTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIsNone(ext.accepted_line())
         self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "ok")
+
+    def test_an_acceptance_list_that_does_not_parse_refuses_without_saying_to_run_it_again(self):
+        # another writer cut the list off after dev ext ack read it: running the command again meets the same bytes
+        self.install(developer=True)
+        update = state.update
+
+        def cut_off_then_update(path, fn, **kw):
+            Path(path).write_text('{"pending": [')
+            return update(path, fn, **kw)
+        with mock.patch.object(state, "update", cut_off_then_update), mock.patch.object(state.time, "sleep",
+                                                                                       lambda s: None):
+            rc, out = self.ack(developer=True)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ext-accepted.json does not parse", out)
+        self.assertNotIn("again", out)
+
+    def test_a_busy_acceptance_list_exits_75_and_says_to_run_it_again(self):
+        # another devkit process writes the list: running dev ext ack again in a moment can work
+        self.install(developer=True)
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with state.hold(ext.accepted_file()):
+                held.set()
+                release.wait(10)
+        t = threading.Thread(target=holder)
+        t.start()
+        self.addCleanup(t.join)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+        with mock.patch.object(state, "WAIT", 0.1):
+            rc, out = self.ack(developer=True)
+        self.assertEqual(rc, 75, out)
+        self.assertIn("Run dev ext ack again", out)
+        self.assertIn("superpowers", ext.accepted_line() or "")
 
     def test_the_accepted_line_drops_bidirectional_and_zero_width_characters(self):
         # L2: U+202E and its kin reorder what the developer reads, U+200B splits a name invisibly, and tag characters

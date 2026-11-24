@@ -35,6 +35,23 @@ tail -50 ~/.local/state/devkit/logs/sync.log
 dev sync                                                  # run a sync in the foreground
 ```
 
+## Exit codes
+
+A `dev` command's exit code tells a refusal from devkit's own bug, so a script or an agent knows whether to change
+the command, run it again, or work around a bug.
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `0` | The command did its work | Nothing |
+| `1` | The command ran and found problems, or could not finish a step and says why: `dev stubs` found unfinished work, `dev docs check` found errors, `dev test` had failing tests | Read the output: it names each problem. Fix them, or wait as it says, and run the command again |
+| `2` | devkit refused on purpose. stderr says `dev <command>: <the reason>`, and a `fix:` line says what to run instead | Do what the reason or the `fix:` line says. No bug report is filed |
+| `75` | Busy: another devkit process held the record the command needs, and the message names it | Run the command again |
+| `70` | devkit's own bug. stderr shows `devkit bug <fingerprint>`, the known detour when there is one, and the `devkit-bug:` marker | Follow the detour, or get the same result another way. The traceback stays in `~/.local/state/devkit/crashes/`, and the safe report is delivered automatically (see [the bug registry](bug-registry.md)) |
+| `130` | You stopped the command with `Ctrl-C` | Run it again when you want |
+| `141` | The program reading the output closed it first, as `head` does in `dev audit --json \| head` | Nothing: devkit did not fail |
+
+`dev session` also exits `3` when another session holds the claim and `4` when no live session matches the target.
+
 ## Installing and updating
 
 ### The installer stopped at a step
@@ -485,8 +502,12 @@ disk, and stops when the new text would lose lines that the command does not cha
    dev task edit <id> --title "<that heading>" --why "the heading was edited by hand"
    ```
 
-3. If it still refuses, devkit misread the file. Leave the file as it is, and report the bug with the file and the
-   message.
+3. If it still refuses, devkit misread the file. Leave the file as it is, and report the bug, as the message's
+   `fix:` line says:
+
+   ```bash
+   dev bug report --title "a write of a work item or plan would drop lines it does not edit"
+   ```
 
 The sync's lock jobs, which renew your locks and release expired ones, skip an item they can't write for the same
 reason and leave it as it is. They say so in `~/.local/state/devkit/logs/sync.log` (`dev jobs logs sync` for the

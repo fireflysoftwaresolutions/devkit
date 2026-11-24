@@ -361,7 +361,7 @@ At session start (or at the first prompt) the agent receives:
 - each initiative the project belongs to: status, progress, members, this project's workstream, the Now tasks, and the
   README's path;
 - your claimed tasks, the tasks claimed by others ("do NOT work on these"), and who else works on this project now,
-  named only in plain words: `user@hostname`, an agent's name, and a branch name, each without spaces, quotes, or
+  named only in plain words: `user@<machine id>`, an agent's name, and a branch name, each without spaces, quotes, or
   control characters, or else a neutral word (someone on another Mac, an agent, a branch), because another
   machine's presence file is that person's text;
 - pointers to `dev progress`, the `communicating` skill and the `using-devkit` skill;

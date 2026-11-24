@@ -810,12 +810,13 @@ def _old_refusal_id(value) -> str:
 
 
 def _secret_like(value) -> bool:
-    """True when `value` holds something shaped like a secret: what the audit's redactor removes (token prefixes,
-    keys with their values, passwords in URLs, private keys), a hex run of 16 or more characters, or a run of 24 or
-    more token characters that mixes letters and digits. Over-matching only holds an item for the developer."""
+    """True when `value` holds something shaped like a secret: what the audit's secret screen finds (audit.find_secret:
+    token prefixes, keys with their values, passwords in URLs, private keys, and the patterns of audit.redact.extra,
+    this Mac's and the team's; any text while those cannot load), a hex run of 16 or more characters, or a run of 24
+    or more token characters that mixes letters and digits. Over-matching only holds an item for the developer."""
     from . import audit
     s = value if isinstance(value, str) else ""
-    if audit.SECRET.search(s) or _HEX_RUN.search(s):
+    if audit.find_secret(s) or _HEX_RUN.search(s):
         return True
     return any(re.search(r"\d", m.group(0)) and re.search(r"[A-Za-z]", m.group(0)) for m in _TOKEN_RUN.finditer(s))
 

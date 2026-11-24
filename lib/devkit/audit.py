@@ -140,7 +140,51 @@ SECRET = re.compile("|".join("(?:" + _plain(p) + ")" for p, _ in _RULES))
 _EXTRA_CACHE: dict = {}
 
 
+class Unloaded(list):
+    """audit.redact.extra while the team policy's patterns could not load (settings()): the patterns that did load,
+    and `reason`, which names the policy file and what is wrong with it. It is never false, so a caller asking whether
+    any extra pattern exists hears yes, and _extra_rules turns it into the one rule that withholds the whole text. No
+    caller can redact with fewer patterns than the team asked for: it withholds instead."""
+
+    def __init__(self, patterns, reason: str):
+        super().__init__(patterns)
+        self.reason = reason
+
+    def __bool__(self) -> bool:
+        return True
+
+
+# a text already withheld, or one of the length markers the trail writes: withholding it again keeps it, so redact
+# stays idempotent while the team patterns cannot load. Only those markers: any other "[<words>: N characters]" is a
+# person's text, and a hash a person typed beside one may be a secret
+_LENGTH_MARK = re.compile(r"\[(?:message text|text|approval line|question) not recorded: \d+\+? characters\]|"
+                          r"\[free text: \d+\+? characters\]")
+# the markers an answer becomes (_option): [free text: N characters], or [text not recorded: N characters] while the
+# team's patterns cannot load
+_ANSWER_MARK = re.compile(r"\[(?:free text|text not recorded): \d+ characters\]")
+
+
+class _Withhold:
+    """The rule that stands in for the team's patterns while they cannot load: any text, replaced as a whole by
+    TEXT_MARK with its length. It answers search as a rule that finds a secret in any text that is not empty."""
+    pattern = "(?s).+"
+    _ANY = re.compile(pattern)
+
+    def search(self, s, *args):
+        return self._ANY.search(s, *args)
+
+    def sub(self, _rep, s, count=0):
+        return s if not s or _LENGTH_MARK.fullmatch(s) else TEXT_MARK.format(n=len(s))
+
+
+WITHHOLD = _Withhold()
+
+
 def _extra_rules(patterns) -> list:
+    """audit.redact.extra compiled. While it is Unloaded: WITHHOLD first, which every screen and redact obey, then the
+    patterns that did load, which _clean asks before it keeps one of devkit's own values."""
+    if isinstance(patterns, Unloaded):
+        return [WITHHOLD, *_extra_rules(list(patterns))]
     key = tuple(patterns or ())
     if key not in _EXTRA_CACHE:
         rules = []
@@ -153,13 +197,54 @@ def _extra_rules(patterns) -> list:
     return _EXTRA_CACHE[key]
 
 
+def extra_rules(cfg: dict = None) -> list:
+    """audit.redact.extra compiled: this Mac's patterns and the team policy's, or [WITHHOLD] while they cannot load."""
+    return _extra_rules((cfg or settings())["redact"]["extra"])
+
+
+def screen_rules(cfg: dict = None) -> list:
+    """Every pattern a secret screen asks: the built-in rules (SECRET), then extra_rules(). A caller that screens many
+    texts at once gets them here once and hands them to find_secret and hide_secrets."""
+    return [SECRET, *extra_rules(cfg)]
+
+
+def find_secret(text, rules=None):
+    """The one secret screen: the first secret in `text` that the built-in rules or audit.redact.extra (this Mac's
+    and the team's) find, as a match, else None. While those patterns cannot load, any text that is not empty
+    matches as a whole: a screen that cannot ask every pattern holds the text instead of passing it. Bug reports, the
+    lesson screen and hook payload captures ask it; redact uses the same rules to replace what it finds."""
+    s = text if isinstance(text, str) else ""
+    for rx in screen_rules() if rules is None else rules:
+        m = rx.search(s)
+        if m:
+            return m
+    return None
+
+
+def hide_secrets(text, mark: str, rules=None) -> str:
+    """`text` with each secret find_secret finds replaced as a whole by `mark`; the whole text as its length
+    (TEXT_MARK) while the patterns cannot load."""
+    s = text if isinstance(text, str) else ""
+    rules = screen_rules() if rules is None else rules
+    if any(rx is WITHHOLD for rx in rules):
+        return WITHHOLD.sub(mark, s)
+    for rx in rules:
+        s = rx.sub(lambda m: mark, s)
+    return s
+
+
 def redact(text, extra=None) -> str:
     """Secrets in `text` replaced by …[redacted]: the _RULES above, then audit.redact.extra (this machine's and the
-    team policy's). `extra`: compiled patterns, when the caller already has them."""
+    team policy's). `extra`: compiled patterns, when the caller already has them. While the team policy's patterns
+    cannot load (redaction_unavailable), the whole text becomes TEXT_MARK with its length: it fails closed, and it
+    never raises for it, so a hook, a message or a record goes on without the text."""
     s = text if isinstance(text, str) else (str(text) if text else "")
+    rules = extra if extra is not None else _extra_rules(settings()["redact"]["extra"])
+    if any(rx is WITHHOLD for rx in rules):
+        return WITHHOLD.sub(MARK, s)  # the length of the text as given
     for rx, rep in _COMPILED:
         s = rx.sub(rep if rep is not None else (lambda m: m.group(0)[:4] + MARK), s)
-    for rx in (extra if extra is not None else _extra_rules(settings()["redact"]["extra"])):
+    for rx in rules:
         s = rx.sub(MARK, s)
     return s
 
@@ -195,7 +280,6 @@ _ANSWERS = ("answer", "overrides")
 # what replaces a text: a record read again keeps it as it is, so cleaning on read never counts a marker's length
 _UNTEXT = re.compile(r"\[message text not recorded: \d+\+? characters\]")
 _UNASKED = re.compile(r"\[question not recorded: \d+\+? characters\]")
-_FREE = re.compile(r"\[free text: \d+\+? characters\]")
 # 6677b15 also wrote the line's SHA-256: such a marker reads back with its length only
 _UNLINE = re.compile(r"\[approval line not recorded: (\d+) characters(?:, sha256 [0-9a-f]{64})?\]")
 # the question tool adds this to the recommended option's label (progress._RECOMMENDED)
@@ -210,7 +294,56 @@ def _home(s: str) -> str:
     return _HOMES.sub("~", s) if "/" in s else s
 
 
+# devkit's own values that a record keeps while the team's patterns cannot load: the whole value is a decision,
+# message or reply id (D3, M12, R4), a work item, lesson or plan id at the length work.new_id writes it (T-, F-, B-,
+# S-, L-, P- and 12 characters, or 11 with a time part from 0 to h, written before TIME_BASE), a session message or
+# escalation id at the length peers writes it (S- or E- and 8 characters), a session (claude:<uuid>, codex:<uuid>), or
+# one of devkit's state and outcome words. A crew member from the roster and a project id from this Mac's registry
+# stay too (_own). Anything else, anything around one of them, and any of them that a built-in rule or a pattern that
+# did load names (_clean), is withheld
+_OWN_SHAPE = re.compile(r"[TFBSPL]-(?:[0-9a-h][0-9a-z]{10}|[i-z][0-9a-z]{11})|[SE]-[0-9a-z]{8}|[DMR]\d{1,6}|"
+                        r"(?:claude|codex):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_OWN_WORDS = frozenset((
+    "ok", "blocked", "failed", "recorded", "allow", "allowed", "passed", "success", "done", "deny", "denied",
+    "refused", "block", "fail", "error", "timeout", "timed out", "dropped", "cancelled", "launch-failed",
+    "pending", "decided", "answered", "withdrawn", "auto", "moot", "open", "closed", "running", "started", "stopped",
+    "skipped", "lost", "ended", "working", "stale", "orphaned", "queued", "waiting", "todo", "doing", "main",
+    "devkit"))
+
+
+def _roster_name(s: str) -> bool:
+    """Is `s` exactly a crew member's id, name or alias from the roster, or devkit:<id>? Not crew.member, which reads
+    any case and drops any "<word>:" in front, so "<token>:neo" would name Neo."""
+    try:
+        from . import crew
+        for m in crew.members():
+            mid = m.get("id")
+            if s in {mid, m.get("name"), *crew.aliases(m)} or (isinstance(mid, str) and s == "devkit:" + mid):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _own(s) -> bool:
+    """Is `s`, whole, one of devkit's own ids or words (_OWN_SHAPE, _OWN_WORDS), a crew member's id, name or alias
+    from the roster (_roster_name), or a project id from this Mac's registry? Nothing a person typed around it."""
+    if not isinstance(s, str) or not s or len(s) > 120 or s != s.strip():
+        return False
+    if s in _OWN_WORDS or _OWN_SHAPE.fullmatch(s) or _roster_name(s):
+        return True
+    reg = core.read_registry({}) or {}
+    projects = reg.get("projects") if isinstance(reg, dict) else None
+    return any(isinstance(p, dict) and p.get("id") == s for p in projects or [] if isinstance(projects, list))
+
+
 def _clean(text, rx) -> str:
+    """A text as a record keeps it: redacted, home folders as ~. While the team's patterns cannot load, devkit's own
+    ids and words (_own) stay as they are, so a query still finds a record by its project or decision, unless a
+    built-in rule or a pattern that did load (this Mac's, and the team's when its file parsed) finds a secret in one."""
+    if rx and any(r is WITHHOLD for r in rx) and _own(text) and not SECRET.search(text) \
+            and not any(r.search(text) for r in rx if r is not WITHHOLD):
+        return text
     return _home(redact(text, rx))
 
 
@@ -230,9 +363,11 @@ def _norm(text) -> str:
 def _option(answer, options) -> str:
     """An answer as a record may keep it: the decision's option it names, read as progress.option_of reads it (the
     label in any case or spacing, with the question tool's "(Recommended)", or its letter: "B" for "B: reject"),
-    else its length only. A length marker stays as it is."""
+    else its length only. The two markers an answer becomes stay as they are (_ANSWER_MARK): [free text: …], and the
+    [text not recorded: …] an answer becomes while the team's patterns cannot load, which keeps the answer's length
+    rather than the marker's. Any other text shaped like a marker is the person's answer, and keeps its length."""
     s = str(answer)
-    if _FREE.fullmatch(s):
+    if _ANSWER_MARK.fullmatch(s):
         return s
     said = _norm(_RECOMMENDED.sub("", s))
     for o in options if isinstance(options, (list, tuple)) else []:
@@ -289,8 +424,11 @@ TEXT_MARK = "[text not recorded: {n} characters]"
 # a number; pair is key=value (dev note set), whose key stays and whose value only when the key takes one of a fixed
 # set (PAIR_VALUES); roster is a crew member's or a kind of work's id from devkit's roster, and free text otherwise;
 # target is what `dev session` acts on (a session target, a message or escalation id, a claimed resource, or a
-# transcript), which stays only in one of those shapes (PEER_TARGET): a message typed where the target goes is masked
-ARG_CLASSES = ("text", "name", "select", "pair", "roster", "target")
+# transcript), which stays only in one of those shapes (PEER_TARGET): a message typed where the target goes is masked;
+# key is a configuration key (dev config set), which stays only when the schema declares each of its words
+# (_declared_key): a job's or a profile's name is the person's, and may be a pasted token; job is a scheduled job's
+# name, which stays only as a built-in job's or a short word (_job_name)
+ARG_CLASSES = ("text", "name", "select", "pair", "roster", "target", "key", "job")
 PEER_TARGET = re.compile(r"@[0-9a-z-]{1,40}|all|repo|project|(?:project|initiative):[\w.-]+(?:/[\w.-]+)*|"
                          r"[SE]-[0-9a-z]{1,24}|(?:release|handoff|push|branch|item):[\w.-]+(?:/[\w.-]+)*(?:@[\w./-]+)?|"
                          r"custom:[a-z0-9-]{1,40}|[\w./~-]+\.jsonl")
@@ -318,7 +456,7 @@ COMMAND_ARGS = {
     "bug ls": "", "bug pending": "", "bug report": "fingerprint:select?", "bug search": "words:text+",
     "bug send": "id:select", "bug share": "setting:name", "bug show": "bug:select", "bug sync": "", "bug top": "",
     "completion": "shell:name",
-    "config": "config_cmd:name? key:name? value:select?",
+    "config": "config_cmd:name? key:key? value:select?",
     "cp": "paths:name+",
     "crew": "", "crew answer": "id:select text:text*", "crew ask": "text:text*",
     "crew read": "id:select", "crew ack": "id:select",
@@ -358,9 +496,9 @@ COMMAND_ARGS = {
     "initiative rm": "slug:name project:name", "initiative show": "slug:name",
     "install": "",
     "issue": "", "issue create": "", "issue ls": "", "issue view": "number:name",
-    "jobs": "", "jobs disable": "name:name", "jobs enable": "name:name", "jobs exec": "name:name",
-    "jobs install": "", "jobs journal": "", "jobs logs": "name:name", "jobs ls": "", "jobs run": "name:name",
-    "jobs set": "name:name", "jobs show": "name:name",
+    "jobs": "", "jobs disable": "name:job", "jobs enable": "name:job", "jobs exec": "name:job",
+    "jobs install": "", "jobs journal": "", "jobs logs": "name:job", "jobs ls": "", "jobs run": "name:job",
+    "jobs set": "name:job", "jobs show": "name:job",
     "lesson": "", "lesson add": "title:text+", "lesson anchor": "selector:select+", "lesson ls": "",
     "lesson prevent": "selector:select+", "lesson recur": "selector:select+", "lesson restore": "selector:select+",
     "lesson retire": "selector:select+", "lesson review": "", "lesson scan": "", "lesson show": "selector:select+",
@@ -1000,13 +1138,132 @@ def _pos_act(w, cls: str, form: str, mark: str, group):
     """A positional by its class: None when it stays, else how it is masked."""
     v = w[3]
     if w[0] == "mark" or (cls == "name" and _keeps(v, form)) or (cls in ("select", "pair") and _SAFE.fullmatch(v)) \
-            or (cls == "roster" and v.lower() in _roster_ids()) or (cls == "target" and PEER_TARGET.fullmatch(v)):
+            or (cls == "roster" and v.lower() in _roster_ids()) or (cls == "target" and PEER_TARGET.fullmatch(v)) \
+            or (cls == "key" and _declared_key(v)) or (cls == "job" and _job_name(v)):
         return None
     m = _PAIR.match(v) if cls == "pair" else None
     if m:  # a value stays only from its key's fixed set
         val = v[m.end():]
         return None if val in PAIR_VALUES.get(m.group()[:-1], ()) or _kept(val) else ("tail", m.group(), mark)
     return ("mask", group, mark)
+
+
+def _declared_key(v: str) -> bool:
+    """Is `v` a configuration key whose every word the schema declares (progress.max_parallel, codex.profiles)? A map
+    key the person chose (jobs.<name>, codex.profiles.<name>) or a key devkit does not read is not. It reads only
+    devkit's schema, so a record masks the same way on every machine."""
+    from . import configschema
+    rule = configschema.ROOT
+    for part in v.split("."):
+        if rule is None or rule.values is not None or part not in (rule.children or {}):
+            return False
+        rule = rule.children[part]
+    return True
+
+
+def _job_name(v: str) -> bool:
+    """May a scheduled job's name stay in a command line's record: a built-in job's, or a short word no built-in
+    secret rule finds anything in? Any other name may be a pasted token. Built-in rules only, so a record masks the
+    same way on every machine; jobs.said names the job in its own records."""
+    from . import jobs
+    return v in jobs.DEFAULT_JOBS or core.short_key(v) and not SECRET.search(v)
+
+
+_SAID_JOB = re.compile(r"<key of \d+ characters?>#[0-9a-f]{8}")  # a job's name as jobs.said gives it by its length
+
+
+def _said_job(name: str) -> str:
+    """A job's name in a record as jobs.said says it today; an id it already gave stays. An older devkit recorded
+    the name whole, which may be a pasted token."""
+    from . import jobs
+    return name if _SAID_JOB.fullmatch(name) else jobs.said(name)
+
+
+def said_action(action: str) -> str:
+    """A record's action as a reader says it: a job run's (job.<name>) with the job's name as jobs.said says it, so
+    an older record shows no token and one id finds a job's old and new records; any other action as it is."""
+    head, dot, name = str(action).partition(".")
+    return f"job.{_said_job(name)}" if head == "job" and dot and name else str(action)
+
+
+_JOB_SCHEDULE = ("every", "at", "weekly", "enabled")  # what a jobs.set record keeps of the job (jobs.set_schedule)
+# an older dev.config.set detail's value_type -> the value as core.say_value says it, without its length
+_OLD_VALUE_TYPE = {"bool": "a boolean", "NoneType": "null", "int": "a number", "float": "a number",
+                   "str": "a string", "list": "a list", "dict": "an object"}
+
+
+# A record nests three levels (record, group, value); a policy file four. Any teammate can write the handoff
+# repository's audit copies and policy, so every one of them is parsed by core.load_json, which reads no value nested
+# deeper than this.
+MAX_DEPTH = core.JSON_MAX_DEPTH
+_json = core.load_json  # -> the value, or ValueError when no reader can read the text
+
+
+def parse_line(text):
+    """A stored audit line's value (core.load_json), or None when no reader can read it. Every reader of audit lines,
+    here and in other modules, parses them with this."""
+    try:
+        return core.load_json(text)
+    except ValueError:
+        return None
+
+
+def _old_json(s: str):
+    d = parse_line(s)
+    return d if isinstance(d, dict) else None
+
+
+def _job_schedule(s: str) -> str:
+    """A jobs.set detail as a new record keeps it: the schedule only. An older devkit recorded the whole job, whose
+    command and about are the person's text."""
+    d = _old_json(s)
+    return json.dumps({k: d[k] for k in _JOB_SCHEDULE if k in d}) if d is not None else s
+
+
+_CONFIG_NOTES = frozenset({"", "validated editor candidate", "validated extension overlay update"})  # devkit's own
+# a value as core.say_value says it, or as a reader says an older record's value type (_OLD_VALUE_TYPE)
+_SAID_VALUE = re.compile(r"a boolean|null|a number|a value it does not quote|a string(?: of \d+ characters?)?"
+                         r"|a list(?: of \d+ items?)?|an object(?: of \d+ keys?)?")
+_CHANGE = " → "  # devkit 26.11.3 to 26.11.18: "<old JSON> → <new JSON>"
+
+
+def _config_value(s: str) -> str:
+    """A dev.config.set detail as a new record says the value (core.say_value). It fails closed: a detail stays only
+    when it is devkit's own note or already a value as say_value says it. An older devkit recorded the value's type and
+    a sha256 of it, which confirms a guessed value (the type stays, the digest goes), or, from 26.11.3 to 26.11.18,
+    the old and the new value whole (the new one says its type and length); anything else is a value it does not
+    quote."""
+    if s in _CONFIG_NOTES or _SAID_VALUE.fullmatch(s):
+        return s
+    d = _old_json(s)
+    if d is not None and "value_digest" in d:
+        return _OLD_VALUE_TYPE.get(str(d.get("value_type")), "a value it does not quote")
+    at = s.find(_CHANGE)
+    for _ in range(_ARROW_TRIES):  # an arrow inside a JSON string leaves the text before it no JSON value
+        if at < 0:
+            break
+        try:
+            _json(s[:at])
+            return core.say_value(_json(s[at + len(_CHANGE):]))
+        except ValueError:
+            at = s.find(_CHANGE, at + 1)
+    return "a value it does not quote"
+
+
+# Each try parses the whole detail, and any teammate can write a line with thousands of arrows into a handoff copy:
+# a few tries keep one detail's cost linear; an old value with more arrows in it fails closed
+_ARROW_TRIES = 8
+
+
+def _job_list(s: str, sep: str, status: bool) -> str:
+    """jobs.install's target (names, sep ",") or detail (status:name, sep "; ") with each name as jobs.said says it."""
+    if not s:
+        return s
+    parts = []
+    for part in s.split(sep):
+        st, colon, name = part.partition(":") if status else ("", "", part)
+        parts.append(f"{st}:{_said_job(name)}" if colon else _said_job(part))
+    return sep.join(parts)
 
 
 def _dev_acts(words: list, i: int, acts: list, form: str) -> None:
@@ -1627,6 +1884,13 @@ def _field(action: str, name: str, text, rx, about=None) -> str:
         return _fit(_clean(mask_command(list(text), *form), rx), _CUT[name])
     s = " ".join(map(str, text)) if isinstance(text, (list, tuple)) else text if isinstance(text, str) else \
         str(text if text is not None else "")
+    # an older devkit recorded a typed configuration key, a job's name, a job's whole settings and a value's digest
+    if action == "dev.config.set":
+        return _clean(core.say_config_key(s) if name == "target" else _config_value(s), rx)
+    if action == "jobs.set":
+        return _clean(_said_job(s) if name == "target" else _job_schedule(s), rx)
+    if action == "jobs.install":
+        return _clean(_job_list(s, "," if name == "target" else "; ", name == "detail"), rx)
     if name == "detail" and action in MESSAGE_ACTIONS:
         if _UNTEXT.fullmatch(s):
             return s
@@ -1668,13 +1932,166 @@ def policy_file() -> Path:
     return core.HANDOFF / "policy" / "audit.json"
 
 
+def _team_policy(path: Path):
+    """The team policy file -> (its JSON, or None when there is no file; what is wrong with a file that is there and
+    cannot be read or parsed, else "")."""
+    try:
+        if not path.exists():
+            return None, ""
+        body = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, "cannot be read"
+    try:
+        return _json(body), ""
+    except ValueError:
+        return None, "is not valid JSON"
+
+
+# a value an error may quote: a number, true, false, null, or a short quoted word
+_SAFE_VALUE = re.compile(r'-?\d{1,6}(?:\.\d{1,6})?|true|false|null|"[A-Za-z_ ]{0,24}"')
+
+
+def _nameable(key, rules) -> bool:
+    """May a reason name this policy key? Only a short word (core.short_key) that neither a built-in rule
+    (SECRET) nor a pattern that loaded (`rules`, compiled) finds a secret in: the reason goes into every record
+    (ref.withheld), every refusal and dev sync's handoff.push record, and a team may paste a token as a key."""
+    k = str(key)
+    return core.short_key(k) and not SECRET.search(k) and not any(r.search(k) for r in rules or ())
+
+
+def nameable_key(key, own=None) -> bool:
+    """_nameable with the patterns that load now: this Mac's audit section (`own`, the raw section a caller checks;
+    else the loaded configuration's) and the team policy's. For text outside an audit record that names a key a
+    person typed: every reader of the configuration (core.quiet_config_errors)."""
+    mine = core.audit_config(own if own is not None else core.CFG.get("audit") or {})[0]
+    raw, _ = _team_policy(policy_file())
+    team = core.audit_config(raw, fill=False)[0] if raw is not None else {}
+    return _nameable(key, _loaded_rules(mine, team))
+
+
+def _unknown_key(path, rules) -> str:
+    """An unknown key of an audit section, as a reason says it: "an unknown key audit.redcat", or, when the key may
+    not be named (_nameable), its length and where it is: "an unknown key of 40 characters in audit.retention"."""
+    *parents, key = [str(k) for k in path]
+    where = "audit" + "".join(f".{k}" for k in parents)  # a parent is a group AUDIT_RULES knows
+    if not _nameable(key, rules):
+        return f"an unknown key of {len(key)} characters in {where}"
+    return "an unknown key " + where + (f".{key}" if re.fullmatch(r"\w+", key) else f"[{json.dumps(key)}]")
+
+
+def _quiet_errors(errors, rules, raw=None) -> list:
+    """core.audit_config's errors as `dev audit config` shows them: an unknown key named only when _nameable, and a
+    wrong value quoted only when it is a number, true, false, null or a short word (_SAFE_VALUE); any other key is
+    its length and where it is, audit or the group it is in (`raw`, the section the errors are about, tells a key
+    inside retention from a top-level key "retention.<…>"), and any other value is not quoted. A pattern that does
+    not compile stays, so the person who wrote it can find it."""
+    out = []
+    for e in errors:
+        m = re.fullmatch(r"unknown key audit\.(.+)", e, re.S)
+        if m and not _nameable(m.group(1), rules):
+            group, _, key = m.group(1).partition(".")
+            nested = key and isinstance(raw, dict) and isinstance(raw.get(group), dict) and key in raw[group]
+            where, key = ("audit." + group, key) if nested else ("audit", m.group(1))
+            e = f"unknown key of {len(key)} characters in {where}"
+        m = re.fullmatch(r"(.+ must be .+) \(got (.*)\)", e, re.S)
+        if m and not (_SAFE_VALUE.fullmatch(m.group(2)) and not SECRET.search(m.group(2))
+                      and not any(r.search(m.group(2)) for r in rules or ())):
+            e = f"{m.group(1)} (got a value it does not quote)"  # the value is cut at 40: no length either
+        out.append(e)
+    return out
+
+
+def _rejected(raw, errors, rules=()) -> str:
+    """What makes an audit section's redaction patterns unusable, or "": a section that is not an object, a rejected
+    audit.redact section (from core.audit_config's errors: an extra that is not a list, a pattern that does not
+    compile, an unknown key in it), or an unknown key, decided from the section's own keys: any key outside the ones
+    AUDIT_RULES knows, and any unknown key inside a known group. A misspelled, misplaced, dotted or nested key
+    ({"Redact": …}, {"audit.redact.extra": …}, {"retention": {"extra": …}}) may hold the team's patterns. A key is
+    named only when _nameable by the built-in rules and `rules` (the patterns that loaded); else its length."""
+    if raw is None:
+        return ""
+    if not isinstance(raw, dict):
+        return "has an audit section that is not an object"
+    if any(e.startswith(("audit.redact", "unknown key audit.redact")) for e in errors):
+        return "has an audit.redact section that was rejected"
+    known: dict = {}
+    for path in core.AUDIT_RULES:
+        known.setdefault(path[0], set()).update(path[1:])
+    unknown = []
+    for key, val in raw.items():
+        if key not in known:
+            unknown.append([key])
+        elif known[key] and isinstance(val, dict):
+            unknown += [[key, k] for k in val if k not in known[key]]
+    return "has " + ", ".join(_unknown_key(u, rules) for u in unknown) if unknown else ""
+
+
+def _loaded_rules(*sections) -> list:
+    """The redaction patterns of these audit sections (as core.audit_config checked them) that compile: what a reason
+    asks before it names a key."""
+    patterns = []
+    for sec in sections:
+        extra = ((sec or {}).get("redact") or {}).get("extra") if isinstance(sec, dict) else None
+        patterns += [p for p in (extra if isinstance(extra, list) else []) if isinstance(p, str)]
+    return _extra_rules(list(dict.fromkeys(patterns)))
+
+
+def publishable_policy(path) -> str:
+    """Why a team policy file (policy/<name>.json in the handoff repository) must not be committed and pushed, or "":
+    one that cannot be read, is not valid JSON or is not a JSON object, and for policy/audit.json any reason settings()
+    would give for not loading the team's redaction patterns (_rejected). Pushed, such a file would make every Mac on
+    the team withhold all audit text, refuse crew messages and hold every lesson, so dev sync leaves it out and origin
+    keeps its last good version. A file that is gone is a deletion, which publishes nothing broken."""
+    path = Path(path)
+    raw, broken = _team_policy(path)
+    return _unpublishable(path.name, raw, broken)
+
+
+def publishable_text(name: str, data: bytes) -> str:
+    """publishable_policy for a version git holds rather than a file (a staged or committed blob): `name` the file's
+    name (audit.json is checked as the audit section), `data` its bytes. -> why it must not be published, or ""."""
+    try:
+        raw, broken = _json(data.decode("utf-8")), ""
+    except UnicodeDecodeError:
+        raw, broken = None, "cannot be read"
+    except ValueError:
+        raw, broken = None, "is not valid JSON"
+    return _unpublishable(name, raw, broken)
+
+
+def _unpublishable(name: str, raw, broken: str) -> str:
+    if broken or raw is None:
+        return broken
+    if not isinstance(raw, dict):
+        return "is not a JSON object"
+    if name != "audit.json":
+        return ""
+    team, errors = core.audit_config(raw, fill=False)
+    return _rejected(raw, errors, _loaded_rules(settings(), team))
+
+
 def settings() -> dict:
     """The effective audit settings: this machine's config over the defaults, raised by the team policy's floor.
-    Every field of the policy only records more or keeps longer: a policy asking for less changes nothing."""
-    own, errors = core.audit_config(core.CFG.get("audit") or {})
-    raw = core.read_json(policy_file(), None) if policy_file().exists() else None
+    Every field of the policy only records more or keeps longer: a policy asking for less changes nothing.
+    A policy file that is there but cannot be read or parsed, that is not an object, whose audit.redact section was
+    rejected, or that has an unknown key (_rejected: at the top or inside a known group, dotted or not), is an error,
+    and redact.extra is then Unloaded: redaction withholds whole texts until the file is repaired, because the patterns
+    it lost may be the only ones that know the team's secrets. This Mac's own audit section fails the same way, and
+    when it is not an object."""
+    mine_raw = core.CFG.get("audit") or {}
+    own, errors = core.audit_config(mine_raw)
+    where = core.tilde(policy_file())
+    raw, broken = _team_policy(policy_file())
     team, terrs = core.audit_config(raw, fill=False) if raw is not None else ({}, [])
-    errors += [f"{core.tilde(policy_file())}: {e}" for e in terrs]
+    rules = _loaded_rules(own, team)
+    mine = _rejected(mine_raw, errors, rules)
+    errors = _quiet_errors(errors, rules, mine_raw) + [f"{where}: {e}" for e in _quiet_errors(terrs, rules, raw)]
+    if broken:
+        errors.append(f"{where}: {broken}")
+    elif raw is not None and not isinstance(raw, dict):
+        broken = "is not a JSON object"
+    else:
+        broken = _rejected(raw, terrs, rules)
     r, tr = own["retention"], team.get("retention") or {}
     floor = max(r["floor_months"], tr.get("floor_months", 0))
     r.update(floor_months=floor, local_months=max(r["local_months"], tr.get("local_months", 0), floor),
@@ -1685,10 +2102,23 @@ def settings() -> dict:
     own["publish"] = own["publish"] or team.get("publish") is True
     own["forward"] = own["forward"] or team.get("forward") or ""
     extra = list(own["redact"]["extra"])
-    own["redact"] = {"extra": extra + [p for p in (team.get("redact") or {}).get("extra") or [] if p not in extra]}
+    extra += [p for p in (team.get("redact") or {}).get("extra") or [] if p not in extra]
+    why = ([f"this Mac's redaction patterns did not load: {core.tilde(core.CONFIG_FILE)} {mine}"] if mine else []) + \
+        ([f"the team's redaction patterns did not load: {where} {broken}"] if broken else [])
+    own["redact"] = {"extra": Unloaded(extra, "; ".join(why)) if why else extra}
     own["errors"] = errors
-    own["policy"] = str(policy_file()) if raw is not None else ""
+    own["policy"] = str(policy_file()) if raw is not None or broken else ""
     return own
+
+
+def redaction_unavailable(cfg: dict = None) -> str:
+    """Why redaction withholds whole texts, naming the team policy file to repair; "" while the patterns load. A
+    caller that shows text to a person asks it to say what to repair instead of showing a length marker."""
+    try:
+        extra = (cfg or settings())["redact"]["extra"]
+    except Exception:  # settings that cannot be read at all: nothing names a file, and redact fails on its own
+        return ""
+    return extra.reason if isinstance(extra, Unloaded) else ""
 
 
 # --------------------------------------------------------------------------- the schema and the registry
@@ -1941,8 +2371,9 @@ def _codex_identity():
 def actor() -> dict:
     """The hook's explicit identity, the native Codex command's metadata, or the existing shell/process identity.
     This label does not change the caller identity used by command restriction checks. `host` is this Mac's machine
-    id (identity.machine), the same whatever the hostname, so this Mac's records stay in one team folder; `label` is
-    the hostname of the moment, which the SIEM exports name as the host (_hostname)."""
+    id (identity.machine), the same whatever the hostname, so this Mac's records stay in one team folder. No hostname:
+    the records are published to the handoff, which the team shares and keeps, and a hostname often names the person;
+    the SIEM exports find it from the machine id (_hostname)."""
     from . import identity
     m = identity.machine()
     sess = os.environ.get("DEVKIT_SESSION", "")
@@ -1953,7 +2384,7 @@ def actor() -> dict:
     elif not sess:
         agent, sess = _found_session() or (agent, "")
     return {"user": core.CFG.get("github_user") or os.environ.get("USER", "?"),
-            "host": m.id, "label": m.label, "agent": agent or "human",
+            "host": m.id, "agent": agent or "human",
             "session": sess.split(":", 1)[-1][:12] if sess else ""}
 
 
@@ -2145,7 +2576,7 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     out, code, raw = outcome_of(outcome)
     cat, sev = kind(action)
     about = {"tool": extra.get("tool"), "irreversible": extra.get("irreversible"), "rule": extra.get("rule")}
-    rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": str(action)[:80],
+    rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": said_action(action)[:80],
            "category": cat, "severity": sev, "target": _field(str(action), "target", target or "", rx, about)[:300],
            "detail": _field(str(action), "detail", detail or "", rx, about)[:600], "outcome": out}
     for k, v in extra.items():
@@ -2159,6 +2590,8 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
         rec.setdefault("evidence", {}).setdefault("exit", code)
     if raw:
         rec.setdefault("ref", {}).setdefault("result", raw)
+    if isinstance(cfg["redact"]["extra"], Unloaded):  # why its texts are lengths only: devkit's own words, kept
+        rec.setdefault("ref", {})["withheld"] = _home(cfg["redact"]["extra"].reason)[:VALUE_CUT]
     where = _context(str((rec.get("crew") or {}).get("lane") or ""), native=True)
     for k in ("project", "branch", "run", "step"):  # the run by its id, the step by its number: never their names
         if where.get(k) and not rec.get(k):
@@ -2180,10 +2613,38 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     floor = RAISE.get(str(raw or "").lower()) or ("warning" if out in ("failed", "blocked") else "info")
     if SEVERITIES.index(rec["severity"]) < SEVERITIES.index(floor):
         rec["severity"] = floor
+    seen = _escaped(rec, rx)
+    if seen is not rec:  # the record holds what a reader sees of it: nothing a reader cleans again
+        rec = {k: v for k, v in seen.items() if k != "cleaned"}
     for k, n in _CUT.items():
         if isinstance(rec.get(k), str):
             rec[k] = rec[k][:n]
     return rec
+
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _utf8(x):
+    """`x` with each lone surrogate written as its escape (\\udce9). An argument's bytes that are not UTF-8 reach
+    Python as lone surrogates, which strict UTF-8 cannot write: the record stays UTF-8, which the hash and every writer
+    need, so such an argument never keeps a command out of the audit trail, and its bytes stay readable."""
+    if isinstance(x, str):
+        return x.encode("utf-8", "backslashreplace").decode("utf-8") if _SURROGATE.search(x) else x
+    if isinstance(x, dict):
+        return {_utf8(k): _utf8(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_utf8(v) for v in x]
+    return x
+
+
+def _escaped(view: dict, rx) -> dict:
+    """`view`, a record as a reader sees it, with each lone surrogate as its escape (_utf8), cleaned again and marked
+    `cleaned` when that changed it; `view` itself otherwise. An escape is six characters for one byte, so a value can
+    outgrow its cut, and it can read as more than its byte (\\udcda then "pi_key=" reads as api_key=); the first
+    cleaning ran on the byte, so a token right after it was found where its word starts."""
+    e = _utf8(view)
+    return view if e == view else {**_reclean(e, rx), "cleaned": True}
 
 
 def kept(rec: dict, level: str) -> bool:
@@ -2206,8 +2667,11 @@ class Note(str):
 
 
 def canonical(rec: dict) -> bytes:
+    """The bytes a record's hash covers. A lone surrogate has no UTF-8 form, and build writes each as its escape, so
+    no record devkit seals holds one: surrogatepass gives such a record (a line edited by hand) bytes whose hash
+    cannot match, and every other record the same bytes as strict UTF-8."""
     return json.dumps({k: v for k, v in rec.items() if k != "hash"}, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False).encode("utf-8")
+                      ensure_ascii=False).encode("utf-8", "surrogatepass")
 
 
 def digest(rec: dict) -> str:
@@ -2222,10 +2686,7 @@ def seal(last_hash: str, tail: bytes) -> str:
 def _v2(line: bytes):
     if b'"v":2' not in line and b'"v": 2' not in line:
         return None
-    try:
-        r = json.loads(line)
-    except ValueError:
-        return None
+    r = parse_line(line)
     return r if isinstance(r, dict) and r.get("v") == V and isinstance(r.get("hash"), str) else None
 
 
@@ -2463,6 +2924,8 @@ def _reclean(r: dict, rx) -> dict:
     did not get (crew message text and home folders before 26.11.3, secrets the redactor learned since). The stored
     line and its hash stay as they are, so `verify` still checks them; a view that differs is marked `cleaned`."""
     action, out = str(r.get("action") or ""), dict(r)
+    if said_action(action) != action:
+        out["action"] = said_action(action)  # a job's name an older devkit recorded whole
     evidence, ref = (r.get(k) if isinstance(r.get(k), dict) else {} for k in ("evidence", "ref"))
     about = {"tool": evidence.get("tool"), "irreversible": ref.get("irreversible"), "rule": evidence.get("rule")}
     for k in ("target", "detail"):
@@ -2485,6 +2948,13 @@ def _reclean(r: dict, rx) -> dict:
     return out
 
 
+def _stand_in(r) -> bool:
+    """Is this a line publish wrote in place of a v1 line or of a line no reader can read (_published_line): the
+    view a reader has of it, marked `cleaned`, with the id of the line it stands for."""
+    return isinstance(r, dict) and r.get("v") == 1 and r.get("cleaned") is True and \
+        str(r.get("id") or "").startswith("V1")
+
+
 def _v1_id(r: dict, line: bytes = b"") -> str:
     """The id a v1 record reads with: it stored none, so its line's hash."""
     return "V1" + hashlib.sha256(line or json.dumps(r, sort_keys=True).encode()).hexdigest()[:24].upper()
@@ -2494,17 +2964,19 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     """A record as schema v2 reads it, cleaned as a record is when it is written today: no secret, message text,
     approval line or home folder, so no query or export shows them. v2 records keep their fields (`cleaned` when
     that changed one: their hash covers the stored line); v1 records are mapped (v stays 1, no chain).
+    A lone surrogate an older devkit kept (an argument's bytes that were not UTF-8) reads as its escape, as build
+    stores it today, so every view and export can write it as UTF-8.
     `extra`: the compiled audit.redact.extra patterns (default: the built-in rules only)."""
     rx = extra if extra is not None else []
-    if r.get("v") == V:
-        return _reclean(r, rx)
+    if r.get("v") == V or _stand_in(r):
+        return _escaped(_reclean(r, rx), rx)
     ts = float(r.get("ts") or 0)
     out, code, raw = outcome_of(r.get("outcome"))
     cat, sev = kind(r.get("action"))
     action = str(r.get("action") or "")
     rec = {"v": 1, "id": _v1_id(r, line),
            "ts": ts, "time": iso(ts), "actor": {k: str(r.get(k) or "") for k in ("user", "host", "agent", "session")},
-           "action": action, "category": cat, "severity": sev,
+           "action": said_action(action), "category": cat, "severity": sev,
            "target": _field(action, "target", r.get("target") or "", rx, r),
            "detail": _field(action, "detail", r.get("detail") or "", rx, r), "outcome": out}
     for k, v in r.items():
@@ -2520,7 +2992,7 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
         rec["crew"]["member"] = _member(rec["crew"]["member"])[0]
     if out in ("failed", "blocked") and SEVERITIES.index(sev) < SEVERITIES.index("warning"):
         rec["severity"] = "warning"
-    return rec
+    return _escaped(rec, rx)
 
 
 def team_dir() -> Path:
@@ -2540,10 +3012,10 @@ def _stored_ts(r: dict) -> float:
 
 def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
     """Every stored record once, not lifted, as (record, line): the first copy of an id read decides, as a published
-    day repeats this Mac's lines. `lo`, `hi` (epoch) and `action` (a prefix) are checked on the stored time and
-    action, which lift does not change (a v1 record's as lift maps them); `keep`, on a v2 record only, checks the
-    fields lift leaves as they are (see _checks). Cleaning is most of a query's time, so a reader lifts only what
-    passes."""
+    day repeats this Mac's lines. `lo`, `hi` (epoch) and `action` (a prefix) are checked on the stored time and on the
+    action as lift says it (said_action: a job's id finds the records an older devkit wrote with the job's name);
+    `keep`, on a v2 record only, checks the fields lift leaves as they are (see _checks). Cleaning is most of a
+    query's time, so a reader lifts only what passes."""
     seen = set()
     for f in _files(team):
         try:
@@ -2551,14 +3023,11 @@ def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
         except OSError:
             continue
         for ln in data.splitlines():
-            try:
-                r = json.loads(ln)
-            except ValueError:
-                continue
-            if not isinstance(r, dict):
+            r = parse_line(ln)
+            if not isinstance(r, dict) or _stand_in(r) and r.get("unreadable") is True:
                 continue
             v2 = r.get("v") == V
-            key = r["id"] if v2 else _v1_id(r, ln)
+            key = r["id"] if v2 or _stand_in(r) else _v1_id(r, ln)
             if key in seen:
                 continue
             seen.add(key)
@@ -2566,7 +3035,7 @@ def _stored(team: bool = False, lo=None, hi=None, action=None, keep=None):
                 ts = _stored_ts(r)
                 if (lo and ts < lo) or (hi and ts > hi):
                     continue
-            if action and not (r["action"] if v2 else str(r.get("action") or "")).startswith(action):
+            if action and not said_action(r["action"] if v2 else str(r.get("action") or "")).startswith(action):
                 continue
             if keep and v2 and not keep(r):
                 continue
@@ -2700,12 +3169,16 @@ def stats(recs: list) -> dict:
 
 # --------------------------------------------------------------------------- verify
 
-def verify_file(path: Path, chain: dict = None) -> dict:
+def verify_file(path: Path, chain: dict = None, published: bool = False) -> dict:
     """The chain of one month file: its first broken link, and what the CHECKS find in the intact records: their
     problems (`checks`) and their notes (`notes`, no problem). `chain` carries the chain in from the file before it,
     for a month published as daily files (_verify_parts), and is updated to this file's end: `last` (the hash of the
     last v2 record), `tail` (the lines after it), `link` (the `prev` a held day leaves when lines outside the chain
-    ended it), `carry` (a line the file before ended in the middle of) and `more` (another file follows)."""
+    ended it), `carry` (a line the file before ended in the middle of), `blind` (a stand-in is in the tail) and
+    `more` (another file follows). `published`: a copy in the handoff repository, where publish wrote some lines
+    cleaned (_published_line): a record marked `cleaned` no longer matches its hash, and a stand-in for a line outside
+    the chain hides the bytes the next record's link seals, so verify notes what it cannot check there; the anchor
+    checks them against the local file on the machine that wrote them. A local file gets no such allowance."""
     res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
     c = chain if chain is not None else {}
     try:
@@ -2713,34 +3186,41 @@ def verify_file(path: Path, chain: dict = None) -> dict:
     except OSError as e:
         res["first"] = {"path": str(path), "line": 0, "id": "", "kind": "unreadable", "problem": str(e)}
         return res
-    last, tail, link = c.get("last", ""), c.get("tail", b""), c.get("link")
+    last, tail, link, blind = c.get("last", ""), c.get("tail", b""), c.get("link"), c.get("blind", False)
     lines = data.splitlines(keepends=True)
     carry = lines.pop() if c.get("more") and lines and not lines[-1].endswith((b"\n", b"\r")) else b""
     for n, raw in enumerate(lines, 1):
         body = raw.rstrip(b"\r\n")
-        try:
-            r = json.loads(body) if body.strip() else None
-        except ValueError:
-            r = None
+        r = parse_line(body) if body.strip() else None
         if isinstance(r, dict) and r.get("v") == V:
             res["records"] += 1
             # the link it must have; None when a held day left a link and lines outside the chain follow it here
             want = seal(last, tail) if link is None else (None if tail else link)
-            last, tail, link = str(r.get("hash") or ""), b"", None  # the chain goes on from this record, intact or not
+            unlinked = blind and want is not None  # a stand-in hides bytes this link seals
+            want = None if unlinked else want
+            last, tail, link, blind = str(r.get("hash") or ""), b"", None, False  # the chain goes on, intact or not
             if res["first"]:
                 continue
             where = {"path": str(path), "line": n, "id": str(r.get("id") or "")}
-            if r.get("hash") != digest(r):
+            cleaned = published and r.get("cleaned") is True and r.get("hash") != digest(r)
+            if cleaned:
+                res["notes"].append({**where, "kind": "note", "note": "cleaned before it was published: its hash "
+                                     "covers the line its own machine keeps, where verify checks it"})
+            if unlinked:
+                res["notes"].append({**where, "kind": "note", "note": "its link cannot be checked here: a line "
+                                     "before it was cleaned before it was published"})
+            if r.get("hash") != digest(r) and not cleaned:
                 res["first"] = {**where, "kind": "edited", "problem": "the record does not match its hash: it was "
                                 "changed after it was written"}
             elif want is not None and r.get("prev") != want:
                 res["first"] = {**where, "kind": "unlinked", "problem": "the record does not link to the one before "
                                 "it: a record was removed, inserted or changed before it"}
             else:
-                if want is None:
+                if want is None and not unlinked:
                     res["notes"].append({**where, "kind": "note", "note": "its link to the held day before it cannot "
                                          "be checked here: lines outside the chain come between them"})
-                for chk in list(CHECKS):
+                # the checks read the record as it was sealed, which a cleaned copy no longer holds
+                for chk in [] if cleaned else list(CHECKS):
                     try:
                         problem = chk(r, path, n)
                     except Exception as e:
@@ -2752,9 +3232,14 @@ def verify_file(path: Path, chain: dict = None) -> dict:
             continue
         if isinstance(r, dict):
             res["v1"] += 1
+        elif body.strip():  # named by the id publish gives its stand-in (_published_line)
+            res["notes"].append({"path": str(path), "line": n, "id": _v1_id({}, body), "kind": "note",
+                                 "note": "this line cannot be read (cut short, not a JSON object, or nested deeper "
+                                         f"than {MAX_DEPTH} levels): no reader shows it and verify cannot check it"})
+        blind = blind or published and _stand_in(r)
         tail += raw
     if chain is not None:
-        chain.update(last=last, tail=tail, link=link, carry=carry)
+        chain.update(last=last, tail=tail, link=link, carry=carry, blind=blind)
     return res
 
 
@@ -2782,7 +3267,7 @@ def _parts(where: Path, month: str) -> list:
 def _held_info(path: Path):
     """A held day's record (what _held_day wrote), or None when it cannot be read."""
     try:
-        info = json.loads(Path(path).read_text())
+        info = _json(Path(path).read_text())
     except (OSError, ValueError):
         return None
     ok = isinstance(info, dict) and isinstance(info.get("bytes"), int) and isinstance(info.get("sha256"), str)
@@ -2797,7 +3282,7 @@ def _verify_parts(parts: list) -> list:
     for i, (kind, path) in enumerate(parts):
         if kind == "file":
             chain["more"] = i + 1 < len(parts) and parts[i + 1][0] == "file"
-            out.append(verify_file(path, chain))
+            out.append(verify_file(path, chain, published=True))
             continue
         res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
         info = _held_info(path)
@@ -2831,7 +3316,7 @@ def _verify_team(root: Path) -> list:
     out = []
     for key in sorted(units):
         u = units[key]
-        out += _verify_parts(_parts(u.parent, u.name)) if u.is_dir() else [verify_file(u)]
+        out += _verify_parts(_parts(u.parent, u.name)) if u.is_dir() else [verify_file(u, published=True)]
     return out
 
 
@@ -2839,10 +3324,163 @@ def _v2_count(data: bytes) -> int:
     return sum(1 for ln in data.splitlines() if _v2(ln))
 
 
-def _anchor(f: Path, data: bytes, parts: list):
+def _dump(r) -> bytes:
+    """A record as devkit writes it: compact UTF-8 JSON. A lone surrogate, which an older devkit's json.dumps wrote as
+    an escape for an argument's bytes that were not UTF-8, has no UTF-8 form: such a record keeps JSON's escapes,
+    which read as the same text."""
+    try:
+        return json.dumps(r, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(r, separators=(",", ":")).encode("ascii")
+
+
+def _atoms(x):
+    """Every value a stored record holds, its keys too, each with its type: text as it is, a number, a boolean or null
+    as JSON says it (an integral float as the integer, as a v1 time reads), so a number a reader says as text or
+    drops is missing from its view."""
+    if isinstance(x, str):
+        yield "s", x
+    elif isinstance(x, dict):
+        for k, v in x.items():
+            yield "s", str(k)
+            yield from _atoms(v)
+    elif isinstance(x, (list, tuple)):
+        for v in x:
+            yield from _atoms(v)
+    else:
+        n = int(x) if isinstance(x, float) and x.is_integer() else x
+        yield "j", json.dumps(n)
+
+
+def _as_written(ln: bytes, r) -> bool:
+    """Do stored bytes `ln` hold exactly record `r`, as devkit writes a record (v2: _dump; v1: json.dumps)? A line
+    with a duplicate key holds more than its parsed record: json.loads keeps the last value."""
+    written = {_dump(r), json.dumps(r).encode("utf-8")}
+    try:
+        written.add(json.dumps(r, ensure_ascii=False).encode("utf-8"))
+    except UnicodeEncodeError:  # a lone surrogate: only the escaped forms hold it
+        pass
+    return ln in written
+
+
+def _published_line(ln: bytes, rx) -> bytes:
+    """One line of a local month file (without its line end) as publish writes it to the handoff repository, whose
+    git history keeps it for good: what a reader sees of it. A line already clean, written as devkit writes the record
+    it holds, goes out as it is stored. A v2 record that cleaning changes, or whose bytes hold more than the record
+    (a duplicate key), goes out cleaned (_reclean), with its id, prev and hash, marked `cleaned`; a v1 line that
+    cleaning changes, as the record a reader sees (lift), marked `cleaned`; a line no reader can read (cut short, not
+    an object), as a stand-in that only names it. `rx`: the compiled redaction patterns readers use."""
+    if not ln.strip():
+        return ln
+    r = parse_line(ln)
+    if not isinstance(r, dict):
+        return _dump({"v": 1, "id": _v1_id({}, ln), "cleaned": True, "unreadable": True})
+    if r.get("v") == V or _stand_in(r):
+        c = _escaped(_reclean(r, rx), rx)
+        return ln if c == r and _as_written(ln, r) else _dump({**c, "cleaned": True})
+    view = lift(r, ln, rx)
+    shown = set(_atoms(view))
+    clean = all(a in shown for a in _atoms(r) if a != ("s", "")) and _as_written(ln, r)
+    return ln if clean else _dump({**view, "cleaned": True})
+
+
+def _publishable(data: bytes, rx) -> bytes:
+    """Lines of a local month file as publish writes them (_published_line), each with its own line end."""
+    out = []
+    for ln in data.splitlines(keepends=True):
+        body = ln.rstrip(b"\r\n")
+        out.append(_published_line(body, rx) + ln[len(body):])
+    return b"".join(out)
+
+
+def _reader_view(r: dict, ln: bytes, rx) -> dict:
+    return {k: v for k, v in lift(r, ln, rx).items() if k != "cleaned"}
+
+
+# what cleaning never changes in a record (_reclean, lift): it rewrites text, never these, nor which keys it holds
+_KEPT = ("v", "ts", "time", "actor", "category", "severity", "outcome")
+_STAND_IN_KEYS = frozenset({"v", "id", "cleaned", "unreadable"})  # all a stand-in for an unreadable line holds
+
+
+def _stands_for(p: bytes, ln: bytes, rx):
+    """Is published line `p` (without its line end) one publish wrote for local line `ln`? -> None when it is not;
+    else "same" when it reads as the local line reads today, "text" when only its text reads differently, "unchecked"
+    when the redaction patterns cannot load (`rx` withholds), so no text is compared. A cleaned record must carry the
+    local one's v, id, prev and hash (the local chain checks the hash), a stand-in the id of the local line, and a
+    stand-in for an unreadable line nothing else; and the fields cleaning never changes (_KEPT) and the set of keys
+    must be the local line's as a reader lifts it, so a record changed there in the handoff repository and marked
+    `cleaned` to pass still differs. Its text is cleaned with the rules of the day it was published, which a
+    redaction pattern removed or narrowed since, a team policy that no longer loads, or a devkit that cleans other
+    wording changes: a text difference is noted, never a divergence."""
+    pr = parse_line(p)
+    if not isinstance(pr, dict) or pr.get("cleaned") is not True:
+        return None
+    lr = parse_line(ln)
+    if not isinstance(lr, dict):
+        same = set(pr) == _STAND_IN_KEYS and _stand_in(pr) and pr.get("unreadable") is True and \
+            pr.get("id") == _v1_id({}, ln)
+        return "same" if same else None
+    if pr.get("unreadable"):
+        return None
+    if lr.get("v") == V or _stand_in(lr):
+        if any(pr.get(k) != lr.get(k) for k in ("v", "id", "prev", "hash")):
+            return None
+    elif not _stand_in(pr) or pr.get("id") != _v1_id(lr, ln):
+        return None
+    kept = _reader_view(lr, ln, [])  # with no pattern: what cleaning never changes reads the same with any
+    if set(pr) - {"cleaned"} != set(kept) or any(pr.get(k) != kept.get(k) for k in _KEPT):
+        return None
+    if any(x is WITHHOLD for x in rx):
+        return "unchecked"
+    return "same" if _reader_view(pr, p, rx) == _reader_view(lr, ln, rx) else "text"
+
+
+_EOL = re.compile(rb"\r\n|\r|\n")  # where bytes.splitlines ends a line
+
+
+def _local_lines(data: bytes, pos: int):
+    """The lines of `data` from `pos`, each with its line end, as bytes.splitlines(keepends=True) gives them."""
+    for m in _EOL.finditer(data, pos):
+        yield data[pos:m.end()]
+        pos = m.end()
+    if pos < len(data):
+        yield data[pos:]
+
+
+def _extends(data: bytes, off: int, p: bytes, rx, read=None):
+    """Does the local month file `data` go on from `off` with what published copy `p` holds -> (where in `data` the
+    copy ends, 0) or (None, the copy's first line that differs, 1-based). A line matches when it is the same, or a
+    line publish cleaned for it (_stands_for); the copy's last line may be cut where the month then ended, and no
+    line past the local file's end matches. `read`: a list that gets (copy line, _stands_for's answer) for each
+    cleaned line that does not read the same today."""
+    if data.startswith(p, off):
+        return off + len(p), 0
+    local, pos = _local_lines(data, off), off
+    plines = p.splitlines(keepends=True)
+    for i, pl in enumerate(plines, 1):
+        ll = next(local, None)
+        if ll is None:  # published lines left over: the local file holds nothing they could stand for
+            return None, i
+        pb, lb = pl.rstrip(b"\r\n"), ll.rstrip(b"\r\n")
+        how = None if pl == ll or pl[len(pb):] != ll[len(lb):] else _stands_for(pb, lb, rx)
+        if pl == ll or how:
+            pos += len(ll)
+            if how in ("text", "unchecked") and read is not None:
+                read.append((i, how))
+        elif i == len(plines) and ll.startswith(pl):
+            return pos + len(pl), 0
+        else:
+            return None, i
+    return pos, 0
+
+
+def _anchor(f: Path, data: bytes, parts: list, rx=None, read=None):
     """How far a local month file is anchored by what this machine published of it -> (offset, records of held
-    days, problem or None). The parts must match the local bytes in order; the last one may be a copy published
-    while the month was shorter."""
+    days, problem or None). The parts must match the local bytes in order, a line publish cleaned standing for its
+    local line (_extends); the last one may be a copy published while the month was shorter. `rx`: the compiled
+    redaction patterns (default: those readers use). `read`: a list that gets (copy, line, how) for each cleaned
+    line that does not read the same today (_stands_for's "text" or "unchecked")."""
+    rx = _redact_rules() if rx is None else rx
     off, held_n = 0, 0
     for kind, path in parts:
         if kind == "held":
@@ -2860,22 +3498,34 @@ def _anchor(f: Path, data: bytes, parts: list):
             p = path.read_bytes()
         except OSError as e:
             return off, held_n, {"path": str(path), "line": 0, "id": "", "kind": "unreadable", "problem": str(e)}
-        if not data.startswith(p, off):
-            line = data.count(b"\n", 0, off) + _diverges(data[off:], p)
+        lines = []
+        end, bad = _extends(data, off, p, rx, lines)
+        if read is not None:
+            read += [(path, i, how) for i, how in lines]
+        if end is None:
+            line = data.count(b"\n", 0, off) + bad
             return off, held_n, {"path": str(f), "line": line, "id": "", "kind": "diverged",
                                  "problem": f"the local file differs from the published copy {core.tilde(path)} from "
                                             f"line {line}: records were changed or removed after they were published"}
-        off += len(p)
+        off = end
     return off, held_n, None
 
 
-def _diverges(local: bytes, published: bytes):
-    """None when the local file extends the published copy, else the first local line that differs (1-based)."""
-    if local.startswith(published):
-        return None
-    a, b = local.splitlines(), published.splitlines()
-    n = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
-    return n + 1
+def _read_notes(read: list) -> list:
+    """verify's notes for the cleaned published lines that do not read as their local lines today (_anchor's
+    `read`): one per line whose text differs, one for all the lines it could not compare."""
+    notes = [{"path": str(path), "line": i, "id": "", "kind": "note",
+              "note": "this cleaned line reads differently from its local line today: a redaction pattern was "
+                      "removed or narrowed, or devkit cleans other wording, since the day was published, or its text "
+                      "was changed in the handoff repository; its id, link and the fields cleaning never changes "
+                      "still match"} for path, i, how in read if how == "text"]
+    skipped = [path for path, _, how in read if how == "unchecked"]
+    if skipped:
+        notes.append({"path": str(skipped[0]), "line": 0, "id": "", "kind": "note",
+                      "note": f"the text of {len(skipped)} cleaned published line(s) was not compared with the local "
+                              f"file: {redaction_unavailable() or 'the redaction patterns did not load'}; their ids, "
+                              "links and the fields cleaning never changes still match"})
+    return notes
 
 
 def verify(team: bool = True) -> dict:
@@ -2893,18 +3543,19 @@ def verify(team: bool = True) -> dict:
         out["files"].append(r)
         out["records"] += r["records"]
         problems += ([r["first"]] if r["first"] else []) + r["checks"]
+    read = []
     if team:
         mine = team_dir()
         for f in local:
             data = f.read_bytes()
-            off, held_n, problem = _anchor(f, data, _parts(mine, f.stem))
+            off, held_n, problem = _anchor(f, data, _parts(mine, f.stem), read=read)
             if problem:
                 problems.append(problem)
             else:  # a held day's records are anchored nowhere, so they count as not yet published
                 out["unpublished"] += held_n + _v2_count(data[off:])
     out["first"] = problems[0] if problems else None
     out["problems"] = problems
-    out["notes"] = [n for f in out["files"] for n in f.get("notes") or []]
+    out["notes"] = [n for f in out["files"] for n in f.get("notes") or []] + _read_notes(read)
     out["ok"] = not problems
     return out
 
@@ -2953,10 +3604,7 @@ def _day_of(line: bytes):
     """(the UTC day of a line's record, or None when it has no time; 1 when it is a v2 record, else 0)."""
     if not line.startswith(b"{"):
         return None, 0
-    try:
-        r = json.loads(line)
-    except ValueError:
-        return None, 0
+    r = parse_line(line)
     if not isinstance(r, dict):
         return None, 0
     v2 = 1 if r.get("v") == V and isinstance(r.get("hash"), str) else 0
@@ -3040,16 +3688,17 @@ def _held_days(f: Path, size: int) -> list:
         if info:
             out.append(_held_entry(f, str(info.get("day") or path.name[:10]), info["bytes"],
                                    int(info.get("records") or 0)))
-    done = _published_bytes(parts)
+    done = _published_bytes(parts)  # a day publish cleaned is not as long as its local bytes: about where they end
     if size - done <= PUBLISH_LIMIT:
         return out
     try:
-        with open(f, "rb") as fh:
-            fh.seek(done)
-            rest = fh.read()
+        data = f.read_bytes()
     except OSError:
         return out
-    return out + [_held_entry(f, day, end - begin, n) for day, begin, end, n in _days(rest, f.stem)
+    done, _, problem = _anchor(f, data, parts)  # where they end exactly
+    if problem:
+        return out
+    return out + [_held_entry(f, day, end - begin, n) for day, begin, end, n in _days(data[done:], f.stem)
                   if end - begin > PUBLISH_LIMIT]
 
 
@@ -3083,15 +3732,16 @@ def publish_checks() -> list:
                      + (f"; {', '.join(daily)} published as one file per UTC day" if daily else ""), "")]
 
 
-def _publish_days(f: Path, dest: Path) -> list:
+def _publish_days(f: Path, dest: Path, rx) -> list:
     """Publish a month file as one file per UTC day in <dest>/YYYY-MM/, after the one-file copy an earlier devkit
     published (which stays as it is). Only closed days go out: a day is closed once a record of a later day follows
-    it, or once the month has ended here. Each is written once; a day over PUBLISH_LIMIT is held, and its .held.json
-    keeps the chain going for the days after it. A local file that no longer extends what was published is never
-    published over it. -> files changed."""
+    it, or once the month has ended here. Each is written once, its lines as a reader sees them (_publishable, with
+    the compiled redaction patterns `rx`); a day over PUBLISH_LIMIT is held, and its .held.json keeps the chain going
+    for the days after it. A local file that no longer extends what was published is never published over it.
+    -> files changed."""
     parts = _parts(dest, f.stem)
     data = f.read_bytes()
-    _, _, problem = _anchor(f, data, parts)
+    done, _, problem = _anchor(f, data, parts, rx)
     if problem:
         record("audit.publish", core.tilde(f), f"not published: {problem['problem']}; run dev audit verify",
                "blocked", severity="critical")
@@ -3104,6 +3754,8 @@ def _publish_days(f: Path, dest: Path) -> list:
         runs.pop()  # the open day: a record may still join it
     changed = []
     for day, begin, end, n in runs:
+        if end <= done:
+            continue  # published, and the local file still extends it
         seg, stub = folder / f"{day}.jsonl", folder / f"{day}.held.json"
         if end - begin > PUBLISH_LIMIT:
             info = _held_day(data, day, begin, end, n)
@@ -3114,20 +3766,28 @@ def _publish_days(f: Path, dest: Path) -> list:
             changed.append(stub)
             record("audit.publish", core.tilde(f), _held_text(f.stem, day, end - begin), "blocked",
                    severity="warning")
-        elif not (seg.is_file() and seg.stat().st_size == end - begin):  # the anchor matched what is there
-            _write(seg, data[begin:end])
-            changed.append(seg)
+        else:
+            body = _publishable(data[begin:end], rx)
+            if not (seg.is_file() and seg.read_bytes() == body):
+                _write(seg, body)
+                changed.append(seg)
     return changed
 
 
 def publish() -> list:
     """Publish this machine's last three month files into the handoff repository (audit/<user>@<host>/), one file
     per UTC day (_publish_days). -> files changed."""
-    if not settings()["publish"] or not AUDIT.exists():
+    cfg = settings()
+    if not cfg["publish"] or not AUDIT.exists():
         return []
-    dest, changed = team_dir(), []
+    if redaction_unavailable(cfg):  # cleaned with no patterns, every line would go out withheld whole, for good
+        record("audit.publish", core.tilde(AUDIT), "not published: the redaction patterns did not load; dev audit "
+               "config names the file to repair, and the next run publishes once they load", "blocked",
+               severity="critical")
+        return []
+    dest, changed, rx = team_dir(), [], _extra_rules(cfg["redact"]["extra"])
     for f in _to_publish():
-        changed += _publish_days(f, dest)
+        changed += _publish_days(f, dest, rx)
     return changed
 
 
@@ -3172,7 +3832,7 @@ def _this_macs_copy(f: Path) -> bool:
     from . import identity
     try:
         lines = [ln for ln in f.read_bytes().splitlines() if ln.strip()]
-        last = json.loads(lines[-1]) if lines else {}
+        last = _json(lines[-1]) if lines else {}
     except (OSError, ValueError):
         return False
     a = last.get("actor") if isinstance(last, dict) else None
@@ -3257,6 +3917,7 @@ def config_report(now: float = None) -> dict:
         pass
     return {"settings": {k: v for k, v in cfg.items() if k not in ("errors", "policy")},
             "errors": cfg["errors"], "policy": cfg["policy"] or f"{policy_file()} (none)",
+            "withheld": redaction_unavailable(cfg),
             "local": {"path": str(AUDIT), "files": len(local), "bytes": _size(local)},
             "team": {"path": str(mine), "files": len(team), "bytes": _size(team), "history": GIT_HISTORY},
             "next_prune": {"at": at, "held": cfg["hold"], "keeps_from": plan["keeps_from"],
@@ -3296,10 +3957,21 @@ def to_csv(recs: list) -> str:
     return buf.getvalue()
 
 
-def _hostname(a: dict) -> str:
-    """The host a SIEM shows for a record's actor: its hostname of the time (`label`), or `host` for a record from
-    before the machine id, which named the Mac by its hostname."""
-    return str(a.get("label") or a.get("host") or "")
+def _hostname(a: dict, ts=None) -> str:
+    """The host a SIEM shows for a record's actor: for this Mac's machine id, the hostname it carried at `ts` (the
+    record's time; identity.machine's aliases), which only this Mac's own export knows, since records no longer carry
+    it; `label` for a record that still names one; `host` otherwise: another Mac's id, or the hostname a record from
+    before the machine id named the Mac by."""
+    from . import identity
+    host = str(a.get("host") or "")
+    if a.get("label"):
+        return str(a["label"])
+    if identity.MACHINE_ID.fullmatch(host):
+        m = identity.machine()
+        if host == m.id:
+            names = [n for n in sorted(m.aliases) if identity.was_this_mac(n, ts, m)]
+            return names[0] if len(names) == 1 else m.label
+    return host
 
 
 def _device_id(a: dict) -> str:
@@ -3315,7 +3987,7 @@ def to_ocsf(r: dict) -> dict:
     sid, sname = _OCSF_STATUS.get(r.get("outcome"), (0, "Unknown"))
     a = r.get("actor") or {}
     sev = r.get("severity", "info")
-    device = {"hostname": _hostname(a), "type_id": 0}
+    device = {"hostname": _hostname(a, r.get("ts")), "type_id": 0}
     if _device_id(a):
         device["uid"] = _device_id(a)
     return {"activity_id": 99, "activity_name": r.get("action"), "category_uid": 0, "category_name": "Uncategorized",
@@ -3344,7 +4016,7 @@ def _cef_ext(s) -> str:
 
 def to_cef(r: dict) -> str:
     a, c = r.get("actor") or {}, r.get("crew") or {}
-    ext = [("rt", int(round((r.get("ts") or 0) * 1000))), ("suser", a.get("user")), ("shost", _hostname(a)),
+    ext = [("rt", int(round((r.get("ts") or 0) * 1000))), ("suser", a.get("user")), ("shost", _hostname(a, r.get("ts"))),
            ("deviceExternalId", _device_id(a)),
            ("act", r.get("action")), ("cat", r.get("category")), ("outcome", r.get("outcome")),
            ("msg", r.get("detail")), ("cs1Label", "id"), ("cs1", r.get("id")), ("cs2Label", "project"),
@@ -3360,7 +4032,7 @@ def to_cef(r: dict) -> str:
 def _syslog_line(r: dict) -> bytes:
     pri = 13 * 8 + _SYSLOG_SEVERITY.get(r.get("severity"), 6)  # facility 13: log audit
     stamp = time.strftime("%b %d %H:%M:%S", time.localtime(r.get("ts") or time.time()))
-    return f"<{pri}>{stamp} {_hostname(r.get('actor') or {}) or 'localhost'} devkit: {to_cef(r)}".encode("utf-8")
+    return f"<{pri}>{stamp} {_hostname(r.get('actor') or {}, r.get('ts')) or 'localhost'} devkit: {to_cef(r)}".encode("utf-8")
 
 
 def export(fmt: str = "jsonl", **filters) -> str:
@@ -3576,7 +4248,8 @@ def _cmd_config(a, ui) -> int:
     print(ui.kv("hold", "on: nothing is pruned" if s["hold"] else "off", 16))
     print(ui.kv("publish", "daily, to the handoff repository" if s["publish"] else "off", 16))
     print(ui.kv("forward", s["forward"] or "off", 16))
-    print(ui.kv("redact.extra", f"{len(s['redact']['extra'])} pattern(s)", 16))
+    print(ui.kv("redact.extra", f"{len(s['redact']['extra'])} pattern(s)"
+                + (" · every text is withheld (its length only)" if c["withheld"] else ""), 16))
     print(ui.kv("team policy", core.tilde(c["policy"]), 16))
     print(ui.kv("records", f"{core.tilde(c['local']['path'])} · {c['local']['files']} file(s) · "
                            f"{core.human_kb(c['local']['bytes'] / 1024)}", 16))
@@ -3590,6 +4263,9 @@ def _cmd_config(a, ui) -> int:
                 + (f"; removes {', '.join(n['would_remove'])}" if n["would_remove"] else ""), 16))
     for e in c["errors"]:
         print(f"  {ui.FAIL} {e} (the default is used)")
+    if c["withheld"]:
+        print(f"  {ui.FAIL} {core.tilde(c['withheld'])}: every text devkit would redact is withheld, and a record "
+              f"keeps its length only, until you repair that file")
     print(ui.dim("\n  Change audit.* with dev config set or dev config edit. The team policy "
                  "(policy/audit.json in the handoff repository) can only record more or keep longer."))
     return 0

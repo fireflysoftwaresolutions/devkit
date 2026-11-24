@@ -1258,11 +1258,14 @@ class MachineIdentityTests(unittest.TestCase):
         work.write_presence([], a=work.actor("human", user="ana"))
         self.assertEqual(after["host"], before["host"])
         self.assertRegex(after["host"], r"^m-[0-9a-z]{8}$")
-        self.assertEqual((before["label"], after["label"]), ("mac-158", "andress-mbp-2"))
+        # the actor names the Mac by its id alone: what reads it (locks, presence, records) never gets a hostname
+        self.assertNotIn("mac-158", json.dumps(before).lower())
+        self.assertNotIn("andress-mbp-2", json.dumps(after))
         files = sorted(f.name for f in self.handoff.root.glob("presence/*.json"))
         self.assertEqual(files, [f"ana@{after['host']}.json"])
         data = json.loads((self.handoff.root / "presence" / files[0]).read_text())
-        self.assertEqual((data["host"], data["label"]), (after["host"], "andress-mbp-2"))
+        self.assertEqual(data["host"], after["host"])
+        self.assertNotIn("label", data)  # the handoff is shared and kept: presence never names the hostname
 
     def test_an_older_session_still_writing_this_macs_old_presence_file_is_hidden_and_never_flaps(self):
         # an older devkit session on this Mac rewrites ana@mac-158.json; deleting it on every write made each sync
@@ -1301,26 +1304,27 @@ class MachineIdentityTests(unittest.TestCase):
             self.assertEqual(len(list((self.handoff.root / "lessons" / "usage").glob("*.json"))), 1)
             self.assertEqual(lessons.usage()["L-1"]["shown"], 2)
 
-    def test_a_person_is_shown_by_the_hostname_label_of_their_machine(self):
+    def test_a_person_is_shown_by_the_machine_id_never_a_hostname(self):
+        # What devkit shows lands in the note, screenshots and shared logs: an id became this Mac's hostname, or the
+        # label an older presence file of another Mac still publishes. Every reader keeps the machine id.
         a = self.me()
         work.PRESENCE.mkdir(parents=True, exist_ok=True)
-        for user, host, label in (("bob", "m-0000beef", "mini"), ("eve", "m-0000dead", "<b>x</b>")):
-            (work.PRESENCE / f"{user}@{host}.json").write_text(json.dumps({"user": user, "host": host, "label": label,
-                                                                          "updated": work.now_iso()}))
-        self.assertEqual(work.display(f"ana@{a['host']}"), "ana@mac-158")  # this Mac: its hostname now
-        self.assertEqual(work.display(f"ana@{a['host']} (codex:s1)"), "ana@mac-158 (codex:s1)")  # a lock holder
-        self.assertEqual(work.display("bob@m-0000beef"), "bob@mini")  # another Mac: the label its presence publishes
+        (work.PRESENCE / "bob@m-0000beef.json").write_text(json.dumps({"user": "bob", "host": "m-0000beef",
+                                                                      "label": "mini", "updated": work.now_iso()}))
+        self.assertEqual(work.display(f"ana@{a['host']}"), f"ana@{a['host']}")
+        self.assertEqual(work.display(f"ana@{a['host']} (codex:s1)"), f"ana@{a['host']} (codex:s1)")
+        self.assertEqual(work.display("bob@m-0000beef"), "bob@m-0000beef")
         self.assertEqual(work.display("bob@m-0000beef", team=[{"user": "bob", "host": "m-0000beef",
-                                                               "label": "studio"}]), "bob@studio")
-        self.assertEqual(work.display("eve@m-0000dead"), "eve@m-0000dead")  # a label that is no hostname: the id
-        self.assertEqual(work.display("cy@m-00000000"), "cy@m-00000000")  # no presence: the id
+                                                               "label": "studio"}]), "bob@m-0000beef")
         self.assertEqual(work.display("ana@mac-55"), "ana@mac-55")  # a record from before the id names its host
         self.assertEqual(work.display(""), "")
 
-    def test_the_notes_task_list_shows_a_lock_by_the_holders_hostname(self):
+    def test_the_notes_task_list_shows_a_lock_by_the_holders_machine_id(self):
         from devkit import registry
         work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
-        self.assertIn("🔒 ana@mac-158", registry.render_tasks_block("acme/api"))
+        block = registry.render_tasks_block("acme/api")
+        self.assertIn(f"🔒 ana@{self.me()['host']}", block)
+        self.assertNotIn("mac-158", block)
 
     def test_presence_lists_this_macs_locks_across_a_rename(self):
         it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())

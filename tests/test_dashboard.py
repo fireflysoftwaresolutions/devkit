@@ -751,8 +751,9 @@ class TeamWorkTests(unittest.TestCase):
         self.assertEqual(ppl["bob@studio"]["claimed"], ["T-a2"])               # expired but still held
         self.assertTrue(all(r["who"] == "bob@studio" for r in ppl["bob@studio"]["recent"]))
 
-    def test_people_and_collisions_name_a_machine_by_its_hostname_label(self):
-        # presence names a Mac by its machine id; people and texts show its hostname (this Mac's current one)
+    def test_people_and_collisions_name_a_machine_by_its_id_never_its_hostname(self):
+        # presence names a Mac by its machine id, and so do people and texts: the label an older devkit publishes is a
+        # hostname, which often names the person, and the page lands in screenshots
         ses = lambda agent: [{"project": "p", "branch": "b", "agent": agent, "last_seen": NOW}]  # noqa: E731
         team = [{"user": "me", "host": "m-thismac1", "label": "old-name", "updated": iso(NOW), "sessions": ses("claude")},
                 {"user": "bob", "host": "m-0000beef", "label": "mini", "updated": iso(NOW), "sessions": ses("codex")},
@@ -762,13 +763,14 @@ class TeamWorkTests(unittest.TestCase):
         slog = [{"who": "bob@m-0000beef", "ts": NOW, "text": "done"}]
         ppl = {p["who"]: p for p in dashboard.people(team, [lock], slog, NOW, me=ME)}
         self.assertEqual({w: p["label"] for w, p in ppl.items()},
-                         {ME: "mac-158", "bob@m-0000beef": "mini", "cy@studio": "studio"})
-        self.assertEqual([r["label"] for r in ppl["bob@m-0000beef"]["recent"]], ["mini"])
+                         {ME: "m-thismac1", "bob@m-0000beef": "m-0000beef", "cy@studio": "studio"})
+        self.assertEqual([r["label"] for r in ppl["bob@m-0000beef"]["recent"]], ["m-0000beef"])
         texts = " ".join(c["text"] for c in dashboard.collisions(team, [lock], NOW))
-        self.assertIn("bob@mini (codex)", texts)
-        self.assertIn("me@mac-158 (claude)", texts)
-        self.assertIn("still claimed by bob@mini", texts)
-        self.assertNotIn("m-0000beef", texts)
+        self.assertIn("bob@m-0000beef (codex)", texts)
+        self.assertIn("me@m-thismac1 (claude)", texts)
+        self.assertIn("still claimed by bob@m-0000beef", texts)
+        for hostname in ("mini", "old-name", "mac-158"):
+            self.assertNotIn(hostname, texts)
 
     def test_actions_for_locks_and_collisions(self):
         reg = registry()

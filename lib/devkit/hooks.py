@@ -207,21 +207,22 @@ def _clone_node_modules(wt: Path, main: Path):
 
 
 _SEEN = {}  # cwd -> what context_for inspected there last ("top", "repo"): the welcome reuses that one inspection
-# the shapes a field of another Mac's presence must have to reach the model as written: a user name and a hostname
-# (or machine id), an agent's name, a git branch name. None holds a space, a quote or a control character.
+# the shapes a field of another Mac's presence must have to reach the model as written: a user name and a machine id
+# (or the hostname a presence from before the machine id was written under), an agent's name, a git branch name.
+# None holds a space, a quote or a control character.
 _PLAIN_WHO = re.compile(r"[A-Za-z0-9._-]{1,40}@[A-Za-z0-9._-]{1,80}")
 _PLAIN_AGENT = re.compile(r"[a-z][a-z0-9-]{0,19}")
 _PLAIN_BRANCH = re.compile(r"[A-Za-z0-9._/+-]{1,100}")
 
 
 def _presence_words(t: dict, s_: dict, team: list) -> str:
-    """Another Mac's presence as the session-start context names it, `user@hostname (agent, branch)`. Presence is
-    another person's text and the model reads this context, so each field shows only in its plain shape (its label
-    only when it looks like a hostname, work.display's rule, else its host), else a neutral word: no sentence or
-    escape code from a presence file reaches the model."""
+    """Another Mac's presence as the session-start context names it, `user@<machine id> (agent, branch)`, as
+    work.display names it: never by the hostname an older devkit still publishes as `label`, which often names the
+    person and would land in the transcript. Presence is another person's text and the model reads this context, so
+    each field shows only in its plain shape, else a neutral word: no sentence or escape code from a presence file
+    reaches the model."""
     from . import work
-    label, host = str(t.get("label") or ""), str(t.get("host") or "")
-    who = work.display(f"{t.get('user')}@{label if work._LABEL.fullmatch(label) else host}", team)
+    who = work.display(f"{t.get('user')}@{t.get('host') or ''}", team)
     agent, branch = str(s_.get("agent") or ""), str(s_.get("branch") or "")
     return (f"{who if _PLAIN_WHO.fullmatch(who) else 'someone on another Mac'} "
             f"({agent if _PLAIN_AGENT.fullmatch(agent) else 'an agent'}, "
@@ -585,8 +586,9 @@ def session_start(agent: str):
     told = [older] if older else []  # the notices the model reads, before the workspace context: a cut keeps them
     said = set()  # the notices this start has: the welcome turns them into need lines
     try:  # devkit notices from files only, no network; the daily update line is the welcome's
-        from . import ext
-        notices = (("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
+        from . import ext, work
+        notices = (("policy_held", lambda: work.held_policy_line(), True),  # a policy text held here
+                   ("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
                    ("ext_accepted", lambda: ext.accepted_line(), True),  # accepted since the developer's last ack
                    # that last ack with its terminal, at every session start for a day after it (ext.ACK_SHOWN_FOR)
                    ("ext_ack", lambda: ext.last_ack_line(), True))
@@ -642,6 +644,7 @@ def _welcome(agent: str, data: dict, cwd: str, seen: dict, older: bool, said: se
         return True, welcome.text(agent, str(data.get("source") or "startup"), cwd, data=data,
                                   repo=seen.get("repo"), top=seen["top"], older=older,
                                   ext_changed="ext_changed" in said, ext_ack="ext_ack" in said,
+                                  policy_held="policy_held" in said,
                                   mode=welcome.mode_for(surface(agent, data)))
     except Exception:
         _log(f"session-start welcome {agent}: {traceback.format_exc()[-300:]}")
@@ -4661,19 +4664,22 @@ def capture_enabled() -> bool:
     return os.environ.get("DEVKIT_HOOK_CAPTURE", "").strip() == "1"
 
 
-def _scrub(value, cut: bool, key: str = ""):
-    """A payload value with tokens removed; strings under a secret-looking key dropped whole; strings under the
-    CAPTURE_CUT_KEYS cut to CAPTURE_CUT characters."""
+def _scrub(value, cut: bool, key: str = "", rules=None):
+    """A payload value with tokens removed (audit.hide_secrets: the built-in rules and audit.redact.extra, this Mac's
+    and the team's; each string as its length while those cannot load); strings under a secret-looking key dropped
+    whole; strings under the CAPTURE_CUT_KEYS cut to CAPTURE_CUT characters. `rules`: audit.screen_rules(), read once
+    per payload."""
+    from . import audit
+    rules = audit.screen_rules() if rules is None else rules
     if isinstance(value, str):
         if _CAPTURE_SECRET_KEY.search(key):
             return "[redacted]"
-        from .audit import SECRET
-        s = _CAPTURE_TOKEN.sub("[redacted]", SECRET.sub("[redacted]", value))
+        s = _CAPTURE_TOKEN.sub("[redacted]", audit.hide_secrets(value, "[redacted]", rules))
         return s[:CAPTURE_CUT] + "…" if cut and len(s) > CAPTURE_CUT else s
     if isinstance(value, dict):
-        return {k: _scrub(v, cut or k in CAPTURE_CUT_KEYS, str(k)) for k, v in value.items()}
+        return {k: _scrub(v, cut or k in CAPTURE_CUT_KEYS, str(k), rules) for k, v in value.items()}
     if isinstance(value, list):
-        return [_scrub(v, cut, key) for v in value]
+        return [_scrub(v, cut, key, rules) for v in value]
     return value
 
 

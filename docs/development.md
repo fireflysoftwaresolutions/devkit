@@ -14,6 +14,7 @@ lib/devkit/
   cli.py                argument parsing and command implementations
   core.py               paths, validated configuration I/O, shell and git helpers, remote parsing, project ids
   configschema.py       pure configuration schema, defaults, strict JSON, key and value validation
+  refusal.py            Refusal and Busy: what a command refuses on purpose (exit 2 or 75); core re-exports both
   ui.py                 terminal colors, the wordmark banner and tagline, headings, tables, status pills, status block
   tui.py                the terminal UI of the setup wizard: select, multiselect, confirm, text, spinner
   registry.py           project discovery and inspection, PROJECTS.md, TASKS.md, ACTIVITY.md, registry.json, notes
@@ -178,7 +179,10 @@ commit when you must, and records the reason in the audit trail.
 
 ## Adding a command
 
-1. Write `cmd_<name>(a)` in `lib/devkit/cli.py`; return an exit code.
+1. Write `cmd_<name>(a)` in `lib/devkit/cli.py`; return an exit code. To refuse, raise `core.Refusal("why",
+   fix="what to run instead")`, or a domain error that inherits it (`class XError(core.Refusal, ValueError)`;
+   `core.Busy` when running the command again can work): `cli.main` prints it and exits 2 or 75. Anything else that
+   escapes the command is reported as devkit's bug (exit 70), so never raise a refusal for a defect.
 2. Register it in `build_parser()` with its options. A command that another module adds keeps that module's import
    inside `if wanted(<its commands>):`, and a module that adds more than one through its own `register(add)` lists them in
    `_COMMANDS_OF`, so `dev` imports the module only for its own commands. `tests/test_startup.py` builds each command

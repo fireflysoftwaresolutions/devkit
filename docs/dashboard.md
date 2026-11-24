@@ -451,9 +451,9 @@ where links to `#/actions?kind=…` go), and the command palette list the items 
   initiative is off track when blocked or past its due date, and at risk when paused, due within a week, or holding
   blocked tasks. _Done_ is grey.
 - **People** are `user@host`, where the host is the Mac's [machine id](teams.md#machine-identity). The page shows
-  each one as `user@hostname`, with the id beside it in a quieter type when the two differ, on the Team cards, the
+  each one as `user@<machine id>`, never by a hostname, which often names the person, on the Team cards, the
   person drawer, Who is on it, avatars, activity rows, the Claimed by filter, search, and the Now team line; a run
-  on another Mac says `on <hostname>`. Links, locks, and filters keep the id. The Now team line lists other Macs
+  on another Mac says `on <machine id>`. Links, locks, and filters keep the id. The Now team line lists other Macs
   only, never another user of this Mac. This Mac's own sessions come from the local registry, which is fresher
   than its presence file. Presence older than 24 hours is ignored.
 - **Locks** appear wherever tasks appear, as a lock icon with who holds it and the time left (_bob, 3 h left_); in

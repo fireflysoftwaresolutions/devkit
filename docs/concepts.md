@@ -181,7 +181,7 @@ that you, Claude Code and Codex share across sessions, machines, and developers.
 | `items/<scope>/<ID>.md` | Work items, one versioned file each | `dev task` only |
 | `plans/<scope>/` | Plans and specs, versioned, kept out of the code repositories | `dev plan`, agents |
 | `sessions/<scope>/YYYY-MM.md` | Append-only session log | the hooks, `dev handoff --log` |
-| `presence/<user>@<machine id>.json` | What each machine is doing now: live sessions, progress, held locks. Each Mac has a stable machine id; its hostname is a display label (see [Teams and machines › Machine identity](teams.md#machine-identity)) | `dev sync` on that machine |
+| `presence/<user>@<machine id>.json` | What each machine is doing now: live sessions, progress, held locks. Each Mac has a stable machine id, and the file never names its hostname (see [Teams and machines › Machine identity](teams.md#machine-identity)) | `dev sync` on that machine |
 | `policies/<scope>.json` | The delivery policy of a project (or the release train of an initiative), versioned with its history | `dev delivery apply` only |
 | `crew/crew.json` · `crew/README.md` | The team's changes to the crew's roster and RACI, versioned with who and why, and their summary for people | `dev crew set`, `dev crew raci --set` |
 | `lessons/<scope>/L-….md` | Lessons from mistakes, versioned; `lessons/archive/` holds forgotten ones, `lessons/usage/<user>@<machine id>.json` each machine's usage counts | `dev lesson`, `dev sleep` |

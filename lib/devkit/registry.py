@@ -1101,7 +1101,7 @@ def split_local(projects) -> tuple:
 ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 
 
-class AliasError(ValueError):
+class AliasError(core.Refusal, ValueError):
     """An alias that cannot be set or removed; the message says why and what to do."""
 
 
@@ -1157,7 +1157,7 @@ def _aliases_lock():
     with core.file_lock(aliases_file(), ALIASES_WAIT) as got:
         if not got:
             raise AliasError(f"another devkit process kept {tilde(aliases_file())} locked for {ALIASES_WAIT:.0f} s; "
-                             "nothing changed, run the command again.")
+                             "nothing changed, run the command again.", code=core.Busy.code)
         yield
 
 
@@ -1374,7 +1374,7 @@ def render_auto(p: dict, me=None) -> str:
     me = me or identity.machine()
     co = p["main"]
     lines = [AUTO_PART.format(me.id),
-             f"_Auto-refreshed by `dev sync` on {me.label} · {fmt_ts(time.time())}. Edit outside this block._", ""]
+             f"_Auto-refreshed by `dev sync` on {me.id} · {fmt_ts(time.time())}. Edit outside this block._", ""]
     lines.append(f"- **Path:** `{tilde(p['path'])}`" + ("" if p["canonical_ok"] else f" (canonical: `{tilde(p['canonical'])}`)"))
     if p.get("remote"):
         lines.append(f"- **Remote:** {p['remote']} · default branch `{p.get('default_branch')}`")
