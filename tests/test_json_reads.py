@@ -33,7 +33,7 @@ import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extensi
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import (audit, branches, bugs, canary, ciwatch, codexlaunch, continuity, core, gates, gc,  # noqa: E402
-                    hooks, language, lessonlint, lessons, mcp, policy, scope, shellparse, skillguard, state)
+                    hooks, language, lessonlint, lessons, mcp, policy, progress, scope, shellparse, skillguard, state)
 from devkit.visual import compare as vcompare, map as vmap, report as vreport, store as vstore, walk as vwalk  # noqa: E402,E501
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
@@ -539,6 +539,64 @@ class CodexLaunchReaderTests(TempFolder):
                 self.assertEqual(why, ["parent rollout is incomplete, unreadable, or malformed"])
 
 
+class ProgressReaderTests(TempFolder):
+    """What the progress hooks read from a Claude Code transcript or a Codex rollout, which a model's output fills (the
+    typed requests, the last reply, the rollout's session_meta), and this Mac's timing records."""
+
+    SID = "019a0000-0000-7000-8000-000000000001"
+
+    def test_timing_records_skip_a_deep_line(self):
+        good = {"ts": 2_000_000_000, "kind": "turn", "secs": 60}
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                self.write("timing/2026-11.jsonl", lines(good, '{"ts": 2000000000, "kind": "turn", "x": ' + deep(d)
+                                                         + "}", deep(d)))
+                with mock.patch.object(progress, "TIMING", self.root / "timing"):
+                    self.assertEqual(progress.records(), [good])
+
+    def test_last_reply_time_skips_a_deep_reply(self):
+        said = dict(assistant_text("the reply"), timestamp="2026-11-23T10:00:00Z")
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                later = json.dumps(dict(assistant_text("a later reply"), timestamp="2026-11-23T10:05:00Z"))
+                t = self.write("t.jsonl", lines(said, later[:-1] + ', "x": ' + deep(d) + "}"))
+                self.assertEqual(progress._last_assistant_text_ts(str(t)), 1_795_428_000.0)
+
+    def test_typed_requests_skip_a_deep_queued_command(self):
+        def queued(text, ts, extra=""):
+            return ('{"type": "attachment", "timestamp": "' + ts + '", "attachment": {"type": "queued_command", '
+                    '"commandMode": "prompt", "origin": {"kind": "human"}, "prompt": "' + text + '"}' + extra + "}")
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                t = self.write("t.jsonl", lines(queued("stop the push", "2026-11-23T10:00:00Z"),
+                                                queued("also deploy", "2026-11-23T10:01:00Z", ', "x": ' + deep(d))))
+                got, offset = progress.midturn_requests(str(t), 0)
+                self.assertEqual(got, [{"text": "stop the push", "ts": 1_795_428_000.0}])
+                self.assertEqual(offset, t.stat().st_size)
+
+    def test_codex_typed_requests_skip_a_deep_user_message(self):
+        def typed(text, ts, extra=""):
+            return ('{"timestamp": "' + ts + '", "type": "event_msg", "payload": {"type": "item_completed", '
+                    '"thread_id": "' + self.SID + '", "item": {"type": "UserMessage", "content": [{"type": "text", '
+                    '"text": "' + text + '"}]' + extra + "}}}")
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                t = self.write("r.jsonl", lines(typed("stop the push", "2026-11-23T10:00:00Z"),
+                                                typed("also deploy", "2026-11-23T10:01:00Z", ', "x": ' + deep(d))))
+                got, cursor = progress._codex_midturn_requests(str(t), self.SID, {}, 0)
+                self.assertEqual(got, [{"text": "stop the push", "ts": 1_795_428_000.0}])
+                self.assertEqual(cursor["offset"], t.stat().st_size)
+
+    def test_a_deep_session_meta_is_no_session_meta(self):
+        meta = '{"type": "session_meta", "payload": {"id": "' + self.SID + '", "cwd": "/x"'
+        t = self.write("r.jsonl", meta + "}}\n")
+        self.assertEqual(progress._codex_meta(t, self.SID), {"id": self.SID, "cwd": "/x"})
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                t = self.write("r.jsonl", meta + ', "x": ' + deep(d) + "}}\n")
+                self.assertIsNone(progress._codex_meta(t, self.SID))
+
+
 class HookInputTests(acceptance.Sandbox):
     """bin/dev hook end to end, as Claude Code starts it (-I -S, the payload on stdin): a hook input nested too deep
     reads as a malformed one (the hook fails open, its output the same, no error logged), and the ConfigChange hook
@@ -615,7 +673,6 @@ COMMAND = ("a file or value the developer names to an interactive command (the p
            "cursor): a deep one fails that command only, never a hook")
 CONFIG = "the developer's own devkit configuration, which dev config validates on every write"
 # Exposed readers outside the files this guard came with; each leaves the list when it is routed through load_json.
-HELD = "OPEN: routed through core.load_json by the change that owns progress.py"
 AUDIT = "OPEN: the team's published audit files; audit.py's readers move to core.load_json with the audit depth guard"
 
 # (module below lib/devkit, enclosing function) -> (raw parses there, why). core.load_json is the one parse of JSON
@@ -712,11 +769,6 @@ REVIEWED = {
     ("pipelines", "facts"): (1, COMMAND),
     ("plans", "_unquote"): (1, STRING),
     ("profiles", "catalog"): (1, SHIPPED),
-    ("progress", "_codex_meta"): (1, HELD),
-    ("progress", "_codex_midturn_requests"): (1, HELD),
-    ("progress", "_last_assistant_text_ts"): (1, HELD),
-    ("progress", "midturn_requests"): (1, HELD),
-    ("progress", "records"): (1, HELD),
     ("providers", "_claude_status"): (1, TOOL),
     ("providers", "_run_claude"): (1, TOOL),
     ("providers", "cached"): (1, OWN),

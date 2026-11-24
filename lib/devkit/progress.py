@@ -1149,7 +1149,7 @@ def records(days: int = 30, kind: str | None = None, project: str | None = None)
     for f in sorted(TIMING.glob("*.jsonl")) if TIMING.exists() else []:
         for ln in f.read_text().splitlines():
             try:
-                r = json.loads(ln)
+                r = core.load_json(ln)
             except ValueError:
                 continue
             if r.get("ts", 0) >= since and (not kind or r.get("kind") == kind) and \
@@ -4502,8 +4502,8 @@ def _codex_meta(path, sid: str):
     `source.subagent`, parent thread or copied history); None otherwise or when it cannot be read."""
     try:
         with open(path, "rb") as fh:
-            first = json.loads(fh.readline(CODEX_META_MAX) or b"null")
-    except (OSError, ValueError, RecursionError):
+            first = core.load_json(fh.readline(CODEX_META_MAX) or b"null")
+    except (OSError, ValueError):
         return None
     p = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" else None
     if not isinstance(p, dict) or p.get("id") != sid:
@@ -5830,7 +5830,7 @@ def _last_assistant_text_ts(transcript: str):
         if '"assistant"' not in ln or '"text"' not in ln:
             continue
         try:
-            d = json.loads(ln)
+            d = core.load_json(ln)
         except ValueError:
             continue
         content = (d.get("message") or {}).get("content") or []
@@ -6457,7 +6457,7 @@ def midturn_requests(transcript, offset=None, since=None) -> tuple:
         if b"queued_command" not in raw:
             continue
         try:
-            rec = json.loads(raw)
+            rec = core.load_json(raw)
         except ValueError:
             continue
         a = rec.get("attachment") if isinstance(rec, dict) else None
@@ -6530,10 +6530,10 @@ def _codex_midturn_requests(transcript, sid: str, cursor: dict, since: float, ta
         if b'"UserMessage"' not in raw:
             continue
         try:
-            rec = json.loads(raw)
+            rec = core.load_json(raw)
             text = _codex_prompt(rec, sid)
             ts = dt.datetime.fromisoformat(str(rec.get("timestamp")).replace("Z", "+00:00")).timestamp()
-        except (ValueError, TypeError, AttributeError, OverflowError, RecursionError):
+        except (ValueError, TypeError, AttributeError, OverflowError):
             continue
         if not text or not text.strip() or text.lstrip().startswith(_WAKE_PROMPTS) or ts < watermark:
             continue
