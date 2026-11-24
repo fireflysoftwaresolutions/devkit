@@ -235,7 +235,8 @@ never touched):
      test support it reaches (its own module rebuilt, a rebuilt module or a changed test helper file that it
      imports, or a changed data fixture that the run's record shows it read) proves your change when it fails there
      on an assertion: unittest's FAIL (not ERROR), pytest's `assert`, `AssertionError` or `Failed` (`pytest.raises`
-     or `pytest.warns` that saw nothing, `pytest.fail`, but not pytest-timeout's `Failed: Timeout >1.0s`), a
+     or `pytest.warns` that saw nothing, `pytest.fail`, but never a `Failed` that says `Timeout`, as pytest-timeout
+     writes it: `Failed: Timeout (>1.0s) from pytest-timeout.` since 2.2, `Failed: Timeout >1.0s` before), a
      `node:assert` error, or a jest, vitest, or Playwright `expect` (jest's `expect.assertions(n)` and
      `expect.hasAssertions()` too; Playwright 1.64 names a failure by its type, such as `expect.toBe`, and 1.55 writes
      the error into the failure's text, which devkit reads instead). A data fixture that a test reads without
@@ -243,10 +244,16 @@ never touched):
      read the fixture's base version proves your change, as a test that detects a helper edit does. When it fails on
      any other error, such as `NameError`, `AttributeError`, `TypeError`, `KeyError`, or `ReferenceError`, devkit runs
      it once more in a fresh copy, with that support as it is now and only your production change undone, so nothing
-     the first runs left behind (a folder that the test stopped before it removed) decides the result. A failure there
-     proves your production change, such as a function the change adds. A pass is "cannot be proven: without the
-     change it fails on TypeError, not on an assertion": the test reached a name or member that only the support's
-     edit gives, which says nothing about what it asserts.
+     the first runs left in the copy (a folder that the test stopped before it removed, a read-only one too) decides
+     the result. Only an assertion failure there proves your production change, as in the run without it. An error
+     there or a pass is "cannot be proven: without the change it fails on TypeError, not on an assertion": the test
+     reached a name or member that only the support's edit gives, which says nothing about what it asserts, and an
+     error there may come from what an earlier run left outside the copy. This means that a test that fails with an
+     `AttributeError` on a function only your change adds, in a module whose helpers you also changed, cannot be
+     proven. Each run has a temp folder of its own (`TMPDIR`, `TEMP`, and `TMP`), which is empty when the run starts
+     and is removed with it, so nothing reaches the next run there. The home folder is not reset: a test that fails
+     there on what an earlier run left fails on an error, and cannot be proven. When the copy cannot be removed (a
+     file locked beyond its owner's permissions), there is no rerun, and the test cannot be proven either.
    - **Any other change keeps the module as it is now.** When your change adds, removes, or edits anything else
      outside the tests (a comment, a docstring, a coding declaration, a helper, a helper's decorators or parameters,
      an import, a class, a statement, a `describe`), the run without your change restores only the other files. A
@@ -256,9 +263,16 @@ never touched):
      because the module's own change was never undone. The module keeps its change, named by the cause, also when
      devkit cannot be sure where its helpers' bodies end: when either side holds a line break that devkit's readers
      do not see (a carriage return without a new line, which ends a line for Python, and in JavaScript also a line
-     separator U+2028 or a paragraph separator U+2029, which end a `//` comment), or when a JavaScript helper's body
-     holds a line of code indented no deeper than the helper's first line, the sign of a regular expression read as
-     a division, or a division read as a regular expression.
+     separator U+2028 or a paragraph separator U+2029, which end a `//` comment), or when Node does not read each
+     helper's body and each test that devkit cut from a JavaScript or TypeScript module as one whole function body.
+     Node reads them all in one run before devkit rebuilds the module: a boundary that devkit's reader misplaced (a
+     regular expression read as a division, for example) leaves a brace or a token open in Node's view, so the
+     module keeps its change, named by that body's line and Node's reason, such as `a helper's body that Node does
+     not read as one function body (line 5): Unexpected identifier 'globalThis'`. Node strips TypeScript's types
+     first, which takes Node 22.13 or later. A `.jsx` or `.tsx` body that holds a `<` may hold JSX, which Node does
+     not read, and a machine without `node` on its `PATH` cannot check the bodies: both keep the module's change. In
+     a `.cjs` module, `<!--` and a `-->` at the start of a line open a comment, as in any script; a `.js` module may
+     be a script or a module, where they are code, so Node reads its bodies both ways.
 
    unittest runs only the test methods of a `TestCase`: in a module it runs, a module-level function named `test…`
    is a helper, never a test that `prove` names.
@@ -344,7 +358,8 @@ the change, `1` when one does not, and `2` when none could be proven because eac
 - **Node tests.** Tests that `node --test` runs are proven with Node: a `node:test` case by its title, and a plain test
   script (one that exits non-zero when a check fails) as one test. In a `test` folder, a script that another file of
   that folder imports or names in quotes is a helper (a harness, a fake), so it counts as part of the change. Name it
-  to prove it as a test: `dev test prove test/protocol.mjs`.
+  to prove it as a test: `dev test prove test/protocol.mjs`. A plain script fails by its exit code, never on an
+  assertion, so one that imports a changed helper cannot be proven.
 - **What cannot run here is listed, not fatal.** A changed test that no runner here can run (no runner for its
   language, `node` missing, or left out by `--runner`) and a named file that is no test are listed under "not proven"
   with the reason; the other tests are proven. When nothing is left to prove, the command exits with `2` and lists
