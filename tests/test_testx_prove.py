@@ -247,17 +247,16 @@ def rebuilt(f, before, after):
 
 
 class RebuildRuleTests(unittest.TestCase):
-    # a test module rebuilds only when its code outside its tests differs from the base only inside the bodies of
-    # helpers both sides hold in the same places, and the rebuilt module is then the base module with the tests now:
-    # a helper fix and a hook fix in a describe come back as their base text. A docstring, like a comment, is no code
-    # a test runs: an edited one stays
+    # a test module rebuilds only when its text outside its tests differs from the base only inside the bodies of
+    # helpers both sides hold in the same places, and the rebuilt module is then the base text with the tests now
+    # spliced in: a helper fix and a hook fix in a describe come back as their base text, and so does every blank line
+    # between statements. A test brings the comment and blank lines right above it
     def test_a_fix_inside_helper_bodies_rebuilds_the_base_module_with_the_tests_now(self):
         before = '"""Tests of h."""\n' + PY_H + PY_TEST
-        new_test = "\n    def test_b(self):\n        self.assertEqual(h(), 2)\n"
-        after = before.replace("Tests of h.", "Tests of h and its limit.").replace(
-            "    return 1\n", "    n = 2\n    return n\n") + new_test
-        self.assertEqual({"text": before.replace("Tests of h.", "Tests of h and its limit.") + new_test, "first": ""},
-                         rebuilt("tests/test_a.py", before, after))
+        new_test = "\n    # the limit, which the helper now reads\n    def test_b(self):\n        self.assertEqual(h(), 2)\n"
+        after = before.replace("    return 1\n", "    n = 2\n    return n\n").replace(
+            "\n\n\nclass T", "\n\n\n\nclass T") + new_test
+        self.assertEqual({"text": before + new_test, "first": ""}, rebuilt("tests/test_a.py", before, after))
         before = ("const state = {};\n\n" + JS_H + "describe('d', () => {\n  beforeEach(() => {\n    state.n = 1;\n"
                   "  });\n  test('a', () => { expect(h()).toBe(state.n); });\n});\n")
         new_test = "  test('b', () => { expect(h()).toBe(2); });\n"
@@ -284,18 +283,23 @@ class RebuildRuleTests(unittest.TestCase):
         self.assertEqual({"text": before.replace('"number"));\n', '"number"));\n' + new_test), "first": ""},
                          rebuilt("test/util.test.mjs", before, after))
 
-    # nothing outside the tests changed (a test added before helpers it is named like, a comment or a docstring
-    # edited): the module runs as it is, with nothing to rebuild
+    # nothing outside the tests changed but blank lines between statements (a test added before helpers it is named
+    # like, with a comment of its own): the module runs as it is, with nothing to rebuild. A comment or a docstring
+    # inside a helper's body is part of that body: an edited one comes back as its base text
     def test_a_module_whose_code_outside_its_tests_reads_as_the_base_needs_no_rebuild(self):
-        before = '"""Tests of h."""\n' + PY_H.replace("return 1", '"""One."""\n    return 1') + PY_TEST
-        self.assertIsNone(rebuilt("tests/test_a.py", before, before.replace("Tests of h.", "Tests of h, and more.")
-                                  .replace("One.", "The one.")))
         before = JS_H + "function g() {\n  return 1;\n}\n\n" + JS_TEST
-        self.assertIsNone(rebuilt("tests/a.test.js", before, "test('h', () => { expect(h()).toBe(1); });\n\n" + before))
+        self.assertIsNone(rebuilt("tests/a.test.js", before,
+                                  "// h, first\ntest('h', () => { expect(h()).toBe(1); });\n\n" + before))
+        before = PY_H + PY_TEST
+        self.assertIsNone(rebuilt("tests/test_a.py", before, before.replace("def h", "\n\ndef h") +
+                                  "\n    # a second one\n    def test_b(self):\n        self.assertEqual(h(), 1)\n"))
         before = JS_H.replace("return 1;", "return 1; // one") + JS_TEST
-        self.assertIsNone(rebuilt("tests/a.test.js", before, before.replace("// one", "// the only one")))
-        before = PY_H.replace("return 1", "return 1  # one") + PY_TEST
-        self.assertIsNone(rebuilt("tests/test_a.py", before, before.replace("# one", "# the only one")))
+        self.assertEqual({"text": before, "first": ""},
+                         rebuilt("tests/a.test.js", before, before.replace("// one", "// the only one")))
+        before = PY_H.replace("return 1", '"""One."""\n    return 1  # one') + PY_TEST
+        self.assertEqual({"text": before, "first": ""},
+                         rebuilt("tests/test_a.py", before, before.replace("# one", "# the only one")
+                                 .replace("One.", "The one.")))
 
     # any other change to the code outside the tests keeps the module as changed, and the result names the first
     # difference: an added, removed or edited helper, import, class or statement, a helper's decorators or parameters,
@@ -380,6 +384,59 @@ class RebuildRuleTests(unittest.TestCase):
         for name, (f, before, after, first) in cases.items():
             with self.subTest(name):
                 self.assertEqual({"text": None, "first": first}, rebuilt(f, before, after))
+
+
+ROOT_JS = "function isRoot(p) {\n  return /^\\/*$/.test(p);\n}\n\n"
+
+
+class RebuildByteTests(unittest.TestCase):
+    # a rebuild compares the base and the module now byte for byte outside the tests and the helpers' bodies, blank
+    # lines between statements aside: a docstring, a coding declaration, a comment, or a blank line inside a template
+    # literal keeps the module as it is now, even beside a helper fix, and names the first difference
+    def test_any_other_byte_outside_the_tests_and_the_helper_bodies_keeps_the_module(self):
+        fix = ("    return 1\n", "    return 2 - 1\n")
+        box = PY_H + "class Box:\n    '''one'''\n\n    def tag(self):\n        return 'one'\n\n\n" + PY_TEST
+        template = "const EXPECTED = `a\n\nb`;\n\n" + JS_H + JS_TEST
+        cases = {  # name: (file, before, after, the first difference)
+            "a module docstring edited": ("tests/test_a.py", '"""one"""\n' + PY_H + PY_TEST,
+                                          '"""two"""\n' + PY_H.replace(*fix) + PY_TEST,
+                                          'an edited docstring `"""two"""` (line 1)'),
+            "a class docstring edited": ("tests/test_a.py", box, box.replace("one", "two"),
+                                         "an edited docstring `'''two'''` (line 9)"),
+            "a coding declaration added": ("tests/test_a.py", PY_H + PY_TEST,
+                                           "# -*- coding: latin-1 -*-\n" + PY_H.replace(*fix) + PY_TEST,
+                                           "an added comment `# -*- coding: latin-1 -*-` (line 1)"),
+            "a coding declaration right above the first test": (
+                "tests/test_a.py", "def test_a():\n    assert h() == 1\n\n\ndef h():\n    return 1\n",
+                "# -*- coding: latin-1 -*-\ndef test_a():\n    assert h() == 1\n\n\ndef h():\n    return 2 - 1\n",
+                "an added comment `# -*- coding: latin-1 -*-` (line 1)"),
+            "a comment edited between helpers": ("tests/test_a.py", PY_H.replace("def h", "# one\ndef h") + PY_TEST,
+                                                 PY_H.replace("def h", "# two\ndef h").replace(*fix) + PY_TEST,
+                                                 "an edited comment `# two` (line 4)"),
+            "a blank line inside a template literal": (
+                "tests/a.test.js", template, template.replace("`a\n\nb`", "`a\nb`").replace("return 1;", "return 2;"),
+                "a removed blank line (line 2 at the base)"),
+            "trailing blanks inside a template literal": (
+                "tests/a.test.js", template.replace("`a\n\nb`", "`a  \nb`"),
+                template.replace("`a\n\nb`", "`a\nb`").replace("return 1;", "return 2;"),
+                "an edited statement `const EXPECTED = `a` (line 1)"),
+            "a global renamed after a regular expression that follows return": (
+                "tests/a.test.js", ROOT_JS + "globalThis.MAX = 5; /* the limit */\n\n" +
+                JS_H.replace("return 1;", "return globalThis.MAX;") + JS_TEST,
+                ROOT_JS + "globalThis.LIMIT = 5; /* the limit */\n\n" +
+                JS_H.replace("return 1;", "return globalThis.LIMIT;") + JS_TEST,
+                "an edited statement `globalThis.LIMIT = 5;` (line 5)"),
+        }
+        for name, (f, before, after, first) in cases.items():
+            with self.subTest(name):
+                self.assertEqual({"text": None, "first": first}, rebuilt(f, before, after))
+
+    # a regular expression after a keyword that ends no expression (return, typeof, …) is read as one, so the comment
+    # its `/*` seems to open hides no code after it
+    def test_a_regular_expression_after_return_hides_no_code(self):
+        masked = testx._js_mask(ROOT_JS + "globalThis.LIMIT = 5; /* the limit */\nconst k = typeof /a*/;\n")
+        self.assertIn("globalThis.LIMIT = 5;", masked)
+        self.assertIn("const k = typeof /  /;", masked)
 
 
 class FailureKindTests(unittest.TestCase):
@@ -599,6 +656,7 @@ class JsReaderCostTests(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("the JS readers took more than 30 s on 5,000 nested declarations, hooks, tests or classes")
         self.assertEqual("read", p.stdout.strip(), p.stderr)
+
 
 
 PY_SHARED = """

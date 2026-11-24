@@ -41,6 +41,7 @@ import fnmatch
 import functools
 import glob
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -51,6 +52,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize
 import urllib.parse
 import warnings
 import xml.etree.ElementTree as ET
@@ -3596,27 +3598,35 @@ _JS_HOOK = re.compile(r"^[ \t]*(?:beforeEach|afterEach|beforeAll|afterAll)\s*\("
 _JS_DECL = re.compile(r"^[ \t]*(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function(?:\s*\*)?\s*([A-Za-z_$][\w$]*)"
                       r"|class\s+([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=)", re.M)
 _JS_REGEX_BEFORE = set("(,=:[!&|?{};+-*%<>~^") | {""}
+# keywords after which a slash opens a regular expression, as after an operator: `return /a*/.test(x)`
+_JS_REGEX_AFTER = {"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else",
+                   "yield", "await"}
 
 
-def _js_mask(text: str, strings: bool = True) -> str:
-    """`text` with the insides of its strings, template literals, regular expressions and comments blanked (new lines
-    kept): brackets and keywords found in the result are code. With `strings` false only the comments are blanked, so
-    the result reads as the code does."""
-    out, i, n, last = list(text), 0, len(text), ""
+def _js_word_before(text: str, i: int) -> str:
+    """The word that ends right before index `i` of `text`, blanks aside, or '' when a member access (`x.return`)."""
+    k = i
+    while k > 0 and text[k - 1].isspace():
+        k -= 1
+    j = k
+    while j > 0 and (text[j - 1].isalnum() or text[j - 1] in "_$"):
+        j -= 1
+    return "" if text[j - 1:j] == "." else text[j:k]
 
-    def blank(a, b, always=False):
-        if not (strings or always):
-            return
-        for k in range(a, min(b, n)):
-            if out[k] != "\n":
-                out[k] = " "
+
+@functools.lru_cache(maxsize=16)
+def _js_scan(text: str) -> tuple:
+    """Where the comments and the literals of JS/TS `text` lie, in one pass -> (comments, literals): comments, [(start,
+    end)] of each comment; literals, [(start, end, kind)] of the inside of each string ("string"), template literal
+    ("template") and regular expression ("regex")."""
+    comments, literals, i, n, last = [], [], 0, len(text), ""
     while i < n:
         c = text[i]
         if c in "'\"":
             j = i + 1
             while j < n and text[j] != c and text[j] != "\n":
                 j += 2 if text[j] == "\\" else 1
-            blank(i + 1, j)
+            literals.append((i + 1, min(j, n), "string"))
             i, last = j + 1, c
         elif c == "`":
             j, depth = i + 1, 0
@@ -3630,19 +3640,19 @@ def _js_mask(text: str, strings: bool = True) -> str:
                 if text[j] == "}" and depth:
                     depth -= 1
                 j += 1
-            blank(i + 1, j)
+            literals.append((i + 1, min(j, n), "template"))
             i, last = j + 1, c
         elif text.startswith("//", i):
             j = text.find("\n", i)
             j = n if j < 0 else j
-            blank(i, j, always=True)
+            comments.append((i, j))
             i = j
         elif text.startswith("/*", i):
             j = text.find("*/", i + 2)
             j = n if j < 0 else j + 2
-            blank(i, j, always=True)
+            comments.append((i, j))
             i = j
-        elif c == "/" and last in _JS_REGEX_BEFORE:
+        elif c == "/" and (last in _JS_REGEX_BEFORE or last == "a" and _js_word_before(text, i) in _JS_REGEX_AFTER):
             j, cls = i + 1, False
             while j < n and text[j] != "\n" and (text[j] != "/" or cls):
                 if text[j] == "\\":
@@ -3652,12 +3662,25 @@ def _js_mask(text: str, strings: bool = True) -> str:
                 elif text[j] == "]":
                     cls = False
                 j += 1
-            blank(i + 1, j)
+            literals.append((i + 1, min(j, n), "regex"))
             i, last = j + 1, "/"
         else:
             if not c.isspace():
                 last = c if not (c.isalnum() or c in "_$") else "a"
             i += 1
+    return tuple(comments), tuple(literals)
+
+
+def _js_mask(text: str, strings: bool = True) -> str:
+    """`text` with the insides of its strings, template literals, regular expressions and comments blanked (new lines
+    kept): brackets and keywords found in the result are code. With `strings` false only the comments are blanked, so
+    the result reads as the code does."""
+    comments, literals = _js_scan(text)
+    out = list(text)
+    for a, b in list(comments) + ([(a, b) for a, b, _ in literals] if strings else []):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
     return "".join(out)
 
 
@@ -4032,14 +4055,14 @@ def _js_entries(text) -> list:
     return out
 
 
-# The rebuild of a changed test module for the run without the change. A test module rebuilds only when its code
-# outside its tests (helpers, hooks, fixtures, imports, module and class-body statements, the describes around the
-# tests) differs from the base only inside the bodies of helpers both sides hold in the same places. Its outline
-# (_py_parts, _js_parts) shows that: the code outside the tests item by item, where a helper reads as its decorators
-# and parameters without its body, so two outlines are equal exactly when that holds. The rebuilt module is then the
-# base module with the tests now, and is checked to be: it never mixes code of the base with code of the change.
-# Comments, layout and docstrings are no code a test runs, and count for neither. Any other change keeps the module
-# as it is now.
+# The rebuild of a changed test module for the run without the change. A test module rebuilds only when its text
+# outside its tests differs from the base only inside the bodies of helpers both sides hold in the same places
+# (_rebuild_helpers): the rebuilt module is then the base text with the tests now spliced in, so outside the tests it
+# is the base module byte for byte, whatever a reader takes for a comment, a docstring or layout. The comparison
+# reads each side's tests (with the comment and blank lines right above each), its helpers' bodies and its blank lines
+# outside every string (_py_layout, _js_layout); any other byte that differs keeps the module as it is now: a comment,
+# a docstring, a coding declaration, an import, a statement, a helper's signature. The outline (_py_parts, _js_parts)
+# only names the first difference.
 
 def _short(code: str) -> str:
     """A line of code as a label names it: at most 60 characters."""
@@ -4047,23 +4070,190 @@ def _short(code: str) -> str:
     return code if len(code) <= 60 else code[:59] + "…"
 
 
-def _py_parts(text):
-    """Python test module `text` read for a rebuild: (its code outside its tests, its tests, its outline), or None when
-    it does not parse. The code outside its tests is its syntax tree without them, its comments, layout and docstrings
-    left out: a docstring is no code a test runs; its tests, theirs in order. A test is a module-level function named
-    test…, or a method so named of a class a runner collects (_py_test_class). The outline: [(form, name, label, line,
-    span)] for each statement outside the tests, a module-level class as its head, its members one by one and its
-    end. form: what the statement is, a helper (a function or method) by its decorators and parameters only; name:
-    (kind, qualified name) for a helper or a class, None for any other; span: the lines a rebuild takes from the base
-    for a helper, None for any other."""
+_BODY = "\0"  # a helper's body in the text a rebuild compares (_significant)
+
+
+def _line_starts(text: str) -> list:
+    """The index where each line of `text` starts (lines split at new lines only, as Python and JavaScript count)."""
+    return [0] + [i + 1 for i in _newlines(text)]
+
+
+def _py_layout(text, functions=True):
+    """Python test module `text` read for a rebuild -> (tests, bodies, blank, problem), or None when it does not
+    parse. tests: [(start, end)] indexes of each test's whole lines with the comment and blank lines right above it,
+    a test being a method named test… of a class a runner collects (_py_test_class), or a module-level function so
+    named when `functions` (pytest's; unittest runs none); bodies: those of each helper's body (a module-level
+    function or a method of a module-level class, outside the tests) whose first statement starts a line after its
+    signature; blank: the numbers of the blank lines no string holds; problem: '' (no line holds a test and other
+    code in Python)."""
+    data = text.encode("utf-8", "surrogateescape")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            tree = ast.parse(text)
+            tree = ast.parse(data)
     except (SyntaxError, ValueError):
         return None
-    lines, fn, plain = text.splitlines(), (ast.FunctionDef, ast.AsyncFunctionDef), set()
-    tests, outline = [], []
+    lines, starts = text.split("\n"), _line_starts(text)
+    fn, tests, bodies, plain = (ast.FunctionDef, ast.AsyncFunctionDef), [], [], set()
+
+    def at(ln):
+        return starts[ln - 1] if ln <= len(starts) else len(text)
+
+    def after(ln):
+        return starts[ln] if ln < len(starts) else len(text)
+
+    def first(n):
+        return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])])
+
+    def walk(body, floor, testing, nested):
+        for i, n in enumerate(body):
+            prev = body[i - 1].end_lineno if i else floor
+            if isinstance(n, fn) and n.name.startswith("test") and testing:
+                s = first(n)  # a comment on the first two lines may declare the file's encoding: it stays outside
+                while s - 1 > prev and (not lines[s - 2].strip() or s > 3 and lines[s - 2].lstrip().startswith("#")):
+                    s -= 1
+                tests.append((at(s), after(n.end_lineno)))
+            elif isinstance(n, fn):
+                b = n.body[0]
+                s = first(b)
+                col = min([b.col_offset] + [d.col_offset - 1 for d in getattr(b, "decorator_list", [])])
+                if s > n.lineno and not lines[s - 1][:col].strip():
+                    bodies.append((at(s), after(n.end_lineno)))
+            elif isinstance(n, ast.ClassDef) and not nested:
+                tested = _py_test_class(n, plain) and any(isinstance(x, fn) and x.name.startswith("test")
+                                                           for x in n.body)
+                walk(n.body, n.lineno, tested, True)
+
+    walk(tree.body, 0, functions, False)
+    code = set()  # the lines a token other than a comment or a new line holds: a string's lines are code
+    try:
+        for tok in tokenize.tokenize(io.BytesIO(data).readline):
+            if tok.type not in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT,
+                                tokenize.ENCODING, tokenize.ENDMARKER):
+                code.update(range(tok.start[0], tok.end[0] + 1))
+    except (tokenize.TokenError, SyntaxError, ValueError):
+        code = set(range(1, len(lines) + 1))
+    blank = {k for k in range(1, len(lines) + 1) if not lines[k - 1].strip() and k not in code}
+    return sorted(tests), sorted(bodies), blank, ""
+
+
+def _js_layout(text):
+    """JS/TS test module `text` read for a rebuild (see _py_layout) -> (tests, bodies, blank, problem). tests: each
+    test's whole lines (the outermost test of nested ones) with the comment and blank lines right above it; bodies:
+    the inside of the braces of each helper's body (a function, a const, let or var that holds one, a hook, a class
+    method: the entries _js_entries reads); blank: the blank lines no string or template literal holds; problem: the
+    first test that shares a line with other code, which no rebuild can splice, or ''."""
+    masked, (_, literals) = _js_mask(text), _js_scan(text)
+    lines, starts, nl = text.split("\n"), _line_starts(text), _newlines(text)
+    inside = set()  # lines that start inside a string or a template literal
+    for a, b, kind in literals:
+        if kind != "regex":
+            k = bisect.bisect_left(nl, a)
+            while k < len(nl) and nl[k] < b:
+                inside.add(k + 2)
+                k += 1
+    blank = {k for k in range(1, len(lines) + 1) if not lines[k - 1].strip() and k not in inside}
+
+    def comment(k):  # a line that holds a comment alone
+        s, row = lines[k - 1].strip(), masked[starts[k - 1]:starts[k - 1] + len(lines[k - 1])]
+        return k not in inside and not row.strip() and (s.startswith(("//", "/*", "*")) or s.endswith("*/"))
+    tests, edge, problem = [], -1, ""
+    for _, a, b in _js_test_calls(text, masked):
+        if a <= edge:
+            continue  # inside the test before it
+        edge = b
+        s, e = _line_of(text, a), _line_of(text, b)
+        tail = masked[b + 1:starts[e - 1] + len(lines[e - 1])]
+        if masked[starts[s - 1]:a].strip() or tail.strip() not in ("", ";"):
+            problem = problem or f"a test that shares its line with other code (line {e if tail.strip() else s})"
+            continue
+        while s > 1 and (s - 1 in blank or comment(s - 1)):
+            s -= 1
+        tests.append((starts[s - 1], starts[e] if e < len(starts) else len(text)))
+    bodies = []
+    for (cls, _, _), s, e, kind, _ in _js_entries(text):
+        a, b = starts[s - 1], starts[e] - 1 if e < len(starts) else len(text)
+        if kind != "unit" or not (_JS_METHOD_HEAD if cls else _JS_FUNCTION).match(masked, a, b):
+            continue
+        body = _JS_BODY.search(masked, a, b)
+        close = _js_close(masked, body.end() - 1) if body else b
+        if body and close < b:
+            bodies.append((body.end(), close))
+    return sorted(tests), sorted(bodies), blank, problem
+
+
+def _significant(text, layout):
+    """`text` as a rebuild compares it (layout: _py_layout, _js_layout) -> (its text without the tests and the blank
+    lines no string holds, each helper's body put as _BODY; for each of its characters, the index in `text` right
+    after it), or None when a test and a helper's body overlap."""
+    tests, bodies, blank, _ = layout
+    starts = _line_starts(text)
+    cuts = sorted([(a, b, "") for a, b in tests] + [(a, b, _BODY) for a, b in bodies])
+    for (_, b, _), (a, _, _) in zip(cuts, cuts[1:]):
+        if a < b:
+            return None
+    spans = _covers([(a, b - 1) for a, b, _ in cuts])
+    cuts = sorted(cuts + [(starts[k - 1], starts[k] if k < len(starts) else len(text), "") for k in blank
+                          if not spans(starts[k - 1])])
+    out, ends, at = [], [], 0
+    for a, b, put in cuts:
+        if a < at:  # a blank line inside a test's or a body's span
+            continue
+        out.append(text[at:a])
+        ends.extend(range(at + 1, a + 1))
+        if put:  # a body of whole lines stays a line of its own
+            put += "\n" if text[a - 1:a] in ("", "\n") and text[b - 1:b] == "\n" else ""
+            out.append(put)
+            ends.extend([b] * len(put))
+        at = b
+    out.append(text[at:])
+    ends.extend(range(at + 1, len(text) + 1))
+    return "".join(out), ends
+
+
+def _differing_line(old_text, now_text, old, now) -> str:
+    """The first line where the texts a rebuild compares (_significant) differ, as a reader names it: an added,
+    removed or edited comment, blank line or line, with its line (at the base, for one the change removed)."""
+    a, b = old[0], now[0]
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    s = a.rfind("\n", 0, i) + 1
+
+    def row(t, k):  # the line of t that starts at index k, and where the next one starts (None past the end)
+        if k >= len(t):
+            return None, None
+        e = t.find("\n", k)
+        return (t[k:], None) if e < 0 else (t[k:e], e + 1)
+    was, was_next = row(a, s)
+    got, got_next = row(b, s)
+
+    def say(verb, line, text, ends, base=False):
+        kind = ("comment" if line.strip().startswith(("#", "//", "/*", "*")) else
+                "blank line" if not line.strip() else "line")
+        where = _line_of(text, ends[s] - 1) if s < len(ends) else text.count("\n") + 1
+        shown = f" `{_short(line.replace(_BODY, '…'))}`" if line.strip() else ""
+        return f"{verb} {kind}{shown} (line {where}{' at the base' if base else ''})"
+    if got is None or was is not None and was_next is not None and row(a, was_next)[0] == got:
+        return say("a removed", was, old_text, old[1], True)
+    if was is None or got_next is not None and row(b, got_next)[0] == was:
+        return say("an added", got, now_text, now[1])
+    return say("an edited", got, now_text, now[1])
+
+
+def _py_parts(text, functions=True):
+    """The outline of Python test module `text` that names a rebuild's first difference (_first_difference), or None
+    when it does not parse: [(form, name, label, line, span)] for each statement outside the tests (as _py_layout reads
+    them), a module-level class as its head, its members one by one and its end. form: what the statement is, a
+    helper (a function or method) by its decorators and parameters only, a docstring as itself; name: (kind,
+    qualified name) for a helper or a class, None for any other; span: the helper's lines, None for any other."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text.encode("utf-8", "surrogateescape"))
+    except (SyntaxError, ValueError):
+        return None
+    lines, fn, plain, outline = text.split("\n"), (ast.FunctionDef, ast.AsyncFunctionDef), set(), []
 
     def span(n):
         return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]), n.end_lineno
@@ -4075,15 +4265,11 @@ def _py_parts(text):
         return isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
 
     def walk(body, cls, testing):
-        keep, where = [], f"{cls}." if cls else ""
+        where = f"{cls}." if cls else ""
         for i, n in enumerate(body):
-            if isinstance(n, fn) and n.name.startswith("test") and (cls is None or testing):
-                tests.append(where + ast.dump(n))
+            if isinstance(n, fn) and n.name.startswith("test") and testing:
                 continue
-            keep.append(n)
             first = _short(lines[n.lineno - 1]) if 0 < n.lineno <= len(lines) else ""
-            if i == 0 and doc(n):
-                continue
             if isinstance(n, fn):
                 head = (type(n).__name__, n.name, ast.dump(n.args), dumps(n.decorator_list),
                         ast.dump(n.returns) if n.returns else "", dumps(getattr(n, "type_params", ())))
@@ -4095,18 +4281,15 @@ def _py_parts(text):
                 head = (n.name, dumps(n.bases), dumps(n.keywords), dumps(n.decorator_list),
                         dumps(getattr(n, "type_params", ())))
                 outline.append((("class",) + head, ("class", n.name), f"class `{n.name}`", span(n)[0], None))
-                n.body = walk(n.body, n.name, tested)
+                walk(n.body, n.name, tested)
                 outline.append((("end", n.name), None, f"end of class `{n.name}`", n.end_lineno, None))
             else:
-                kind = "import" if isinstance(n, (ast.Import, ast.ImportFrom)) else "statement"
+                kind = ("docstring" if i == 0 and doc(n) else
+                        "import" if isinstance(n, (ast.Import, ast.ImportFrom)) else "statement")
                 outline.append((("code", ast.dump(n)), None, f"{kind} `{first}`", n.lineno, None))
-        return keep
 
-    tree.body = walk(tree.body, None, False)
-    for n in ast.walk(tree):
-        if isinstance(n, (ast.Module, ast.ClassDef) + fn) and n.body and doc(n.body[0]):
-            n.body = n.body[1:]
-    return ast.dump(tree), tuple(tests), outline
+    walk(tree.body, None, functions)
+    return outline
 
 
 # a JS/TS entry that is a function, whose body a rebuild may take from the base: a function declaration, a const,
@@ -4123,11 +4306,9 @@ _JS_BODY = re.compile(r"(?:\)\s*(?::[^{};=()]*)?|=>)\s*\{")
 
 
 def _js_parts(text):
-    """JS/TS test module `text` read for a rebuild (see _py_parts): (its code outside its tests, its tests, its
-    outline). The code outside its tests: its text with the tests (and a semicolon right after one) and the comments
-    left out, line by line, trailing blanks and blank lines left out; its tests, their texts in order. The outline:
-    each declaration, hook and class member outside the tests (_js_entries), a function by its text around its body,
-    any other by its text, and each other line of code as itself."""
+    """The outline of JS/TS test module `text` that names a rebuild's first difference (see _py_parts): each
+    declaration, hook and class member outside the tests (_js_entries), a function by its text around its body, any
+    other by its text, and each other line of code (its comments left out) as itself."""
     masked, code = _js_mask(text), _js_mask(text, strings=False)
     calls = _js_test_calls(text, masked)
     pieces, at = [], 0
@@ -4141,11 +4322,7 @@ def _js_parts(text):
         pieces += [code[at:a], "\n" * code.count("\n", a, end)]
         at = end
     rows = ("".join(pieces) + code[at:]).split("\n")
-    starts = [0] + [i + 1 for i in _newlines(text)]
-
-    def lines(s, e):  # the comment-free code of lines s..e, its trailing blanks and blank lines left out
-        return tuple(x.rstrip() for x in code[starts[s - 1]:starts[e] - 1 if e < len(starts) else len(code)]
-                     .split("\n") if x.strip())
+    starts = _line_starts(text)
     outline, entries = [], {}
     for key, s, e, kind, _ in _js_entries(text):
         if kind in ("unit", "head"):
@@ -4161,12 +4338,11 @@ def _js_parts(text):
                 body = _JS_BODY.search(masked, a, b)
             close = _js_close(masked, body.end() - 1) if body else b
             if body and close < b:
-                outline.append((("fn", tuple(x.rstrip() for x in code[a:body.end() - 1].split("\n") if x.strip()),
-                                 tuple(x.rstrip() for x in code[close + 1:b].split("\n") if x.strip())),
-                                ("js", cls, name), (f"hook `{name}`" if name in _JS_HOOK_NAMES else
-                                                    f"helper `{cls + '.' if cls else ''}{name}`"), ln, (ln, e)))
+                outline.append((("fn", text[a:body.end() - 1], text[close + 1:b]), ("js", cls, name),
+                                (f"hook `{name}`" if name in _JS_HOOK_NAMES else
+                                 f"helper `{cls + '.' if cls else ''}{name}`"), ln, (ln, e)))
             else:
-                outline.append((("entry", lines(ln, e)), ("js", cls, name),
+                outline.append((("entry", text[a:b]), ("js", cls, name),
                                 f"class `{cls}`" if kind == "head" else f"statement `{first}`", ln, None))
             ln = max(e, ln) + 1
             continue
@@ -4175,14 +4351,14 @@ def _js_parts(text):
             kind = "import" if re.match(r"\s*import\b", row) else "statement"
             outline.append((("code", row), None, f"{kind} `{_short(row)}`", ln, None))
         ln += 1
-    return tuple(x.rstrip() for x in rows if x.strip()), tuple(text[a:b + 1] for _, a, b in calls), outline
+    return outline
 
 
 def _first_difference(old, now) -> str:
     """The first difference between the outlines `old` (at the base) and `now` (_py_parts, _js_parts), as a reader
     names it: an added, removed or edited helper, class, import or statement, with its line (at the base, for one the
-    change removed). Past the items both share at the start and at the end, an item with a name (a helper, a class,
-    a docstring) that only one side holds is added or removed; anything else there is edited."""
+    change removed). Past the items both share at the start and at the end, an item with a name (a helper, a class)
+    that only one side holds is added or removed; anything else there is edited."""
     i = 0
     while i < min(len(old), len(now)) and old[i][0] == now[i][0]:
         i += 1
@@ -4207,57 +4383,86 @@ def _first_difference(old, now) -> str:
     return say("an edited", b)
 
 
-def _rebuild_helpers(f, old_text, text) -> dict | None:
+def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
     """Test module `f` (`text`, its text now) rebuilt for the run without the change from `old_text`, its text at the
-    base. When its code outside its tests differs from the base only inside the bodies of helpers both sides hold in
-    the same places (the same names, kinds and order, so a fix in a getter beside its setter, or in one of two
-    beforeEach hooks, counts), each such helper comes back as its base text: the module is then the base module with
-    its tests now (comments, layout and docstrings aside), which the result is checked to be. Any other difference keeps
-    the module as it is now: a helper added or removed, a helper's decorators or parameters, an import, a class, a
-    statement of the module or of a class body, the describes around the tests and their titles.
-    -> None when a side does not parse, or the module's code outside its tests reads as at the base (comments, layout
-    and docstrings aside): nothing to rebuild. Else {"text": the rebuilt module, or None when the module keeps its change;
-    "first": the first difference outside the helpers' bodies that keeps it (_first_difference), else ''}."""
-    parts = _py_parts if _lang(f) == "py" else _js_parts
-    old, now = parts(old_text), parts(text)
-    if old is None or now is None or old[0] == now[0]:
+    base. When its text outside its tests (_py_layout, _js_layout: each test with the comment and blank lines right
+    above it) differs from the base only inside the bodies of helpers both sides hold in the same places, and in blank
+    lines no string holds, the rebuilt module is the base text with each test now spliced in where the module now has
+    it (after the same text outside the tests), and nothing else: outside its tests it is the base module byte for
+    byte, which the result is checked to be. Any other difference keeps the module as it is now: a comment, a
+    docstring, a coding declaration, an import, a statement, a helper's signature or decorators, a class, a helper
+    added, removed or moved, the describes around the tests. `functions`: a module-level function named test… is a
+    test (pytest), not a helper (unittest).
+    -> None when a side does not parse, or nothing outside the tests differs but blank lines: nothing to rebuild.
+    Else {"text": the rebuilt module, or None when the module keeps its change; "first": the first difference that keeps
+    it, else ''}."""
+    py = _lang(f) == "py"
+
+    def read(t):
+        return _py_layout(t, functions) if py else _js_layout(t)
+    old, now = read(old_text), read(text)
+    if old is None or now is None:
         return None
-    if [x[0] for x in old[2]] != [x[0] for x in now[2]]:
-        return {"text": None, "first": _first_difference(old[2], now[2])}
-    # every line ends with its new line, so a helper taken from the end of the base stays on lines of its own
-    base, cur = ([x if x.endswith("\n") else x + "\n" for x in t.splitlines(keepends=True)] for t in (old_text, text))
-    out = list(cur)
-    for (s, e), (a, b) in sorted(((y[4], x[4]) for x, y in zip(old[2], now[2]) if x[4]), reverse=True):
-        if base[a - 1:b] != cur[s - 1:e]:
-            out[s - 1:e] = base[a - 1:b]
-    rebuilt = "".join(out)
-    again = parts(rebuilt)
-    if again is None or again[0] != old[0] or again[1] != now[1]:
-        return {"text": None, "first": "a helper that shares its lines with other code"}
+    for layout, t in ((now, text), (old, old_text)):
+        if layout[3]:
+            return {"text": None, "first": layout[3] if t is text else layout[3].replace(")", " at the base)")}
+    a, b = _significant(old_text, old), _significant(text, now)
+    if a is None or b is None:
+        return {"text": None, "first": "a test inside a helper's body"}
+    if a[0] != b[0]:
+        parts = (lambda t: _py_parts(t, functions)) if py else _js_parts
+        o, n = parts(old_text), parts(text)
+        same = o is None or n is None or [x[0] for x in o] == [x[0] for x in n]
+        return {"text": None, "first": _differing_line(old_text, text, a, b) if same else _first_difference(o, n)}
+    bodies = [old_text[s:e] for s, e in old[1]]
+    if bodies == [text[s:e] for s, e in now[1]]:
+        return None
+    # each test now goes where its place in the compared text puts it in the base: right after the same character
+    puts = sorted((a[1][p - 1] if p else 0, k, text[s:e]) for k, (s, e) in enumerate(now[0])
+                  for p in [bisect.bisect_left(b[1], s + 1)])
+    out, at, k = [], 0, 0
+    for s, e in old[0] + [(len(old_text), len(old_text))]:
+        while k < len(puts) and puts[k][0] <= s:
+            out += [old_text[at:max(at, puts[k][0])], puts[k][2]]
+            at = max(at, puts[k][0])
+            k += 1
+        out.append(old_text[at:s])
+        at = e
+    rebuilt = "".join(out) + old_text[at:]
+    again = read(rebuilt)
+    if again is None or again[3] or (_significant(rebuilt, again) or ("",))[0] != a[0] or \
+            [rebuilt[s:e] for s, e in again[1]] != bodies or \
+            [rebuilt[s:e] for s, e in again[0]] != [text[s:e] for s, e in now[0]]:
+        return {"text": None, "first": "a helper or a test that shares its lines with other code"}
     return {"text": rebuilt, "first": ""}
 
 
-def _helper_restore(top, base, f) -> dict | None:
+def _helper_restore(top, base, f, functions=True) -> dict | None:
     """_rebuild_helpers for test module `f` from its text at `base`; None for a module new since `base`, or neither
-    Python nor JavaScript."""
+    Python nor JavaScript. Both texts are read byte for byte (bytes no UTF-8 reads stay as they are)."""
     if _lang(f) not in ("py", "js"):
         return None
     p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
     if p.returncode != 0:
         return None
-    return _rebuild_helpers(f, p.stdout.decode("utf-8", "replace"), _read(os.path.join(top, f)))
+    try:
+        now = Path(top, f).read_bytes()
+    except OSError:
+        return None
+    return _rebuild_helpers(f, p.stdout.decode("utf-8", "surrogateescape"), now.decode("utf-8", "surrogateescape"),
+                            functions)
 
 
-def _support_text(top, base, f):
+def _support_text(top, base, f, functions=True):
     """Test module `f` as the run without the change from `base` runs it (_rebuild_helpers): a fix inside the body of a
     helper defined in a test module is part of the change, as a fix in a helper file is, so the module's tests run
-    against the base module. -> the rebuilt text, None when the module's code outside its tests reads as at the base,
+    against the base module. -> the rebuilt text, None when nothing outside the module's tests differs but blank lines,
     or _SUPPORT_TANGLED when the module keeps its change."""
-    r = _helper_restore(top, base, f)
+    r = _helper_restore(top, base, f, functions)
     return None if r is None else _SUPPORT_TANGLED if r["text"] is None else r["text"]
 
 
-# _support_text's answer for a test module that keeps its change: its code outside its tests differs from the base
+# _support_text's answer for a test module that keeps its change: its text outside its tests differs from the base
 # outside its helpers' bodies, so the run without the change runs it as it is now
 _SUPPORT_TANGLED = object()
 
@@ -5500,7 +5705,7 @@ def _prove(a, top, runners) -> int:
         without, by_file = {}, {}  # by_file: a test file's own import evidence, when the run's was incomplete
         if not problem:
             for f, text in inner.items():  # before _restore_base, which clears the copy's bytecode caches
-                Path(dest, f).write_text(text)
+                Path(dest, f).write_bytes(text.encode("utf-8", "surrogateescape"))
             _restore_base(top, base, dest, undo)
             recorder, records, recorder_env = _import_recorder(dest, top)
             bare = dict(env, **recorder_env, PYTHONPATH=os.pathsep.join(
