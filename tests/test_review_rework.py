@@ -430,6 +430,34 @@ class ReviewQueuedBehindAnotherReviewTests(Base):
         self.assertEqual(self.approved("x"), ["seraph"])
         self.assertEqual(self.told("began before"), [])
 
+    def test_one_report_that_ends_both_reviews_does_not_approve_a_rewrite_made_while_the_queued_one_waited(self):
+        # No verdict on either review before the report that ends them both: when the lane moved to review-x is
+        # unknown, so it began when the lane took it (m13), before the rewrite at m15. The report's ✓ approves w,
+        # which review-a saw, and leaves x to a new review.
+        self.edit("a_tank", "src/x.py", self.m(15))
+        gates_passed("a_ser", at=self.m(29))
+        self.stop("a_ser", "devkit:seraph", report(SER, "review-a and review-x", "✓ approve: read both"), self.m(30))
+        self.assertEqual((self.st("review-a")["state"], self.st("review-x")["state"]), ("done", "done"))
+        self.assertEqual(self.approved("w"), ["seraph"])
+        self.assertEqual(self.approved("x"), [])
+        told = self.told("began before")
+        self.assertEqual(len(told), 1)
+        self.assertIn("“x”", told[0])
+
+    def test_a_verdict_on_the_queued_review_before_the_earlier_ones_does_not_approve_a_rewrite_made_while_it_waited(
+            self):
+        # The verdict on review-x (m20) comes before review-a's (m25): when the lane moved to review-x is unknown, so
+        # it began when the lane took it (m13), before the rewrite at m15, and its ✓ leaves x to a new review.
+        self.edit("a_tank", "src/x.py", self.m(15))
+        pg.step("review-x done", which="review-x", check="✓ approve", from_agent="a_ser", now=self.m(20))
+        pg.step("review-a done", which="review-a", check="✓ approve", from_agent="a_ser", now=self.m(25))
+        self.end_review(30)
+        self.assertEqual(self.approved("w"), ["seraph"])
+        self.assertEqual(self.approved("x"), [])
+        told = self.told("began before")
+        self.assertEqual(len(told), 1)
+        self.assertIn("“x”", told[0])
+
 
 if __name__ == "__main__":
     unittest.main()
