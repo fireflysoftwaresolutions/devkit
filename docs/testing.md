@@ -245,15 +245,19 @@ never touched):
      any other error, such as `NameError`, `AttributeError`, `TypeError`, `KeyError`, or `ReferenceError`, devkit runs
      it once more in a fresh copy, with that support as it is now and only your production change undone, so nothing
      the first runs left in the copy (a folder that the test stopped before it removed, a read-only one too) decides
-     the result. Only an assertion failure there proves your production change, as in the run without it. An error
-     there or a pass is "cannot be proven: without the change it fails on TypeError, not on an assertion": the test
-     reached a name or member that only the support's edit gives, which says nothing about what it asserts, and an
-     error there may come from what an earlier run left outside the copy. This means that a test that fails with an
-     `AttributeError` on a function only your change adds, in a module whose helpers you also changed, cannot be
-     proven. Each run has a temp folder of its own (`TMPDIR`, `TEMP`, and `TMP`), which is empty when the run starts
-     and is removed with it, so nothing reaches the next run there. The home folder is not reset: a test that fails
-     there on what an earlier run left fails on an error, and cannot be proven. When the copy cannot be removed (a
-     file locked beyond its owner's permissions), there is no rerun, and the test cannot be proven either.
+     the result. An assertion failure there proves your production change, as in the run without it, and so does the
+     same error as in the run without it: the same type, which both runs name, and the same message (its first line,
+     as devkit records it), compared with only the copy's own path taken out. The support's edit did not decide that
+     failure, so a test that fails with an `AttributeError` on a function only your change adds, in a module whose
+     helpers you also changed, is proven. Another error there, or a pass, is "cannot be proven: without the change it
+     fails on TypeError, not on an assertion": the test reached a name or member that only the support's edit gives,
+     which says nothing about what it asserts, or it failed on what an earlier run left outside the copy. The same
+     type with another message is another error, and so is a plain script's exit code, which names no type. Each run
+     has a temp folder of its own (`TMPDIR`, `TEMP`, and `TMP`), which is empty when the run starts and is removed
+     with it, so nothing reaches the next run there. The home folder is not reset: a test that fails there on what an
+     earlier run left (a folder it makes again, with `FileExistsError`) fails on another error than the one it raised
+     without the change, and cannot be proven. When the copy cannot be removed (a file locked beyond its owner's
+     permissions), there is no rerun, and the test cannot be proven either.
    - **Any other change keeps the module as it is now.** When your change adds, removes, or edits anything else
      outside the tests (a comment, a docstring, a coding declaration, a helper, a helper's decorators or parameters,
      an import, a class, a statement, a `describe`), the run without your change restores only the other files. A
@@ -358,8 +362,8 @@ the change, `1` when one does not, and `2` when none could be proven because eac
 - **Node tests.** Tests that `node --test` runs are proven with Node: a `node:test` case by its title, and a plain test
   script (one that exits non-zero when a check fails) as one test. In a `test` folder, a script that another file of
   that folder imports or names in quotes is a helper (a harness, a fake), so it counts as part of the change. Name it
-  to prove it as a test: `dev test prove test/protocol.mjs`. A plain script fails by its exit code, never on an
-  assertion, so one that imports a changed helper cannot be proven.
+  to prove it as a test: `dev test prove test/protocol.mjs`. A plain script fails by its exit code, which is neither
+  an assertion nor an error type, so one that imports a changed helper cannot be proven.
 - **What cannot run here is listed, not fatal.** A changed test that no runner here can run (no runner for its
   language, `node` missing, or left out by `--runner`) and a named file that is no test are listed under "not proven"
   with the reason; the other tests are proven. When nothing is left to prove, the command exits with `2` and lists
