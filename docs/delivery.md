@@ -209,8 +209,8 @@ unavailable records `unknown`; a later visibility change triggers that check too
 visibility the policy was decided for.
 `dev backup --public` pushes once, whatever the policy. With `on`, embargoes still hold, and on a public repository a
 branch whose new commits read as a security fix, or change a red-team test that still expects a failure (an open gap),
-still waits for an embargo or `--public`. Changing the policy, `dev backup --public`, and `dev branch embargo --lift` run for whoever calls them,
-you or an agent: in guided mode, the global instructions have the agent ask you first, as for any decision about
+still waits for an embargo or `--public`. Changing the policy, `dev backup --public`, and `dev branch embargo --lift`
+run for whoever calls them, you or an agent: in guided mode, the global instructions have the agent ask you first, as for any decision about
 risk. A backup does not incidentally lift an embargo.
 
 A branch that must stay off a public remote, such as an unreleased security fix, gets an embargo:

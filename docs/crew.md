@@ -548,7 +548,7 @@ change a token-verified call makes names, in `dev progress history`, how devkit 
 
 **A plain `dev` call goes out as written where the agent checks your rules.** In Claude Code outside
 `bypassPermissions`, and in Codex where it asks and would not apply devkit's rewrite, devkit leaves a call of one plain
-`dev` command unchanged. An allow rule such as `Bash(dev progress:*)` then matches the text the agent wrote, and you get
+`dev` command in sh, bash, or zsh unchanged. An allow rule such as `Bash(dev progress:*)` then matches the text the agent wrote, and you get
 no more permission prompts than before. The `dev` command names its caller by facts the kernel keeps, never by the text
 alone (`how` is `text-pinned`):
 
@@ -593,15 +593,15 @@ These commands need the tech lead, so a member's call is refused for them:
 
 **On Codex.** Where devkit stamps every call (approval policy `never`, which `dev setup` writes), the token decides
 and `CODEX_THREAD_ID` decides no state change. Where Codex asks, a plain `dev progress`, `dev crew`, `dev watch`, or
-`dev session` call still carries the token, and any other call of one plain `dev` command names its caller by its own
+`dev session` call whose input is its command alone still carries the token, and any other call of one plain `dev` command names its caller by its own
 shell, as the earlier paragraphs describe. For a call neither covers, the thread names a member, or the tech lead for
 the session's root thread, only while that caller's own open call is exactly that `dev` command, typed alone; a
 compound state change is refused with the fix: run it as one plain `dev` command. The root thread names the tech lead
 only after a member's verified call showed that Codex gives members thread ids of their own. Any crew member can turn
 the root-thread mapping off for the rest of the session with one call that carries the root's thread id: devkit
-records it as `codex.thread-shared`, and the tech lead then runs plain `dev` commands. Reads and waits keep working either way. A session whose hook has never stamped a
-token, such as one an older devkit started, keeps the earlier rules: there, a Codex tech lead's commands are allowed
-and recorded as `caller.unverified`.
+records it as `codex.thread-shared`, and the tech lead then runs plain `dev` commands. Reads and waits keep working
+either way. A session whose hook has never stamped a token, such as one an older devkit started, keeps the earlier
+rules: there, a Codex tech lead's commands are allowed and recorded as `caller.unverified`.
 
 Claude Code gives a running conversation a new session id after a compaction. Every hook registration records the
 agent's process, so the new id takes that process over from the older record, and the older session's open run

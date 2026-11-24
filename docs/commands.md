@@ -5,7 +5,7 @@ This page lists every `dev` command and option. `dev help` (or `dev -h`) prints 
 
 A `<query>` is a project id, a project name, a path, or part of an id. A path starts with `/`, `~`, or `.` and may be
 any folder of the project; with a worktree's path the command works in that worktree and its branch. An exact id,
-alias, or path wins over an exact name, which wins over a name that starts with the query, then one that holds it.
+alias, or path wins over an exact name, which wins over a name or alias that starts with the query, then one that holds it.
 When two or more projects match equally well and not exactly one of them is on this Mac, the command lists each match
 with the command for it and exits with `2`: devkit never guesses.
 
@@ -1825,7 +1825,8 @@ and Codex's without `--agent`) and goes on with the next: a list another devkit 
 the command again in a moment; a list that does not parse, is unsafe, or cannot be written exits with `2`, with the
 repair to make first. When the copies fail in different ways, the command exits with the code that asks the most of
 you: `2` (repair) before `1` (failed), and `1` before `75` (run it again). `dev ext ack`, which writes one list,
-exits with `75` or `2` by the same rule.
+exits with `75` or `2` by the same rule when it cannot write that list, and with `1` when every acceptance it
+lists was made outside a terminal.
 
 ### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
 

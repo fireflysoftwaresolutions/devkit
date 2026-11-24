@@ -139,7 +139,8 @@ and `done` or `skipped` at the end. A crew member's step ends `unverified` when 
 
 When you reopen a step that was done, skipped, or unverified, the steps that used it, directly or further down, and
 are done or still running, such as a review running on its unverified work, keep their state and get a recheck flag,
-because their work used the old version. A new launch of a member that takes back its unverified step flags them the
+because their work used the old version. A step of yours still running that waits on the reopened step goes back to
+`pending` until that step is done again. A new launch of a member that takes back its unverified step flags them the
 same way. The flag clears when such a step finishes again after the reopened steps are closed, or when you confirm
 that its work still holds with `dev progress confirm <step> --why "…"`. `confirm` is refused while a
 reopened step it used is still open, because there is nothing to check it against yet.
