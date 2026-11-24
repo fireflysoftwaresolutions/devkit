@@ -218,47 +218,23 @@ never touched):
 
 1. **It fails without your change.** devkit restores the base version of every production file you changed (the
    merge-base with `origin/<default>`, or `--since REF`) and runs the test. A changed test helper or fixture counts
-   as part of the change and is restored too, and so is changed helper code inside a Python or JavaScript test
-   module, outside its tests, so a fix that lives only in a helper is proven. Such helpers are rebuilt one by one,
-   matched by class, name, and place among the entries of that name, from their own text at the base, never from
-   where git's diff puts a changed line. A changed helper comes back whole as its base text, a helper the change
-   removed comes back, and a helper the change adds stays. Every other statement keeps the change. The module's
-   tests are "cannot be proven" when:
+   as part of the change and is restored too. A changed Python or JavaScript test module follows these rules, so the
+   run without your change never mixes code of the base with code of your change:
 
-   - a rebuilt helper does not read as its base text, such as two members on one line.
-   - the change adds or removes a helper in a group of helpers of one class and name with more than one on either
-     side, or the helpers and tests of that name change places, or its helpers trade texts: an `@fmt.register`
-     function named `_` added before two others, `CASES += [3]` added before `CASES += [2]`, a static `get` added
-     before an instance `get`, or a `beforeEach` in a new `describe` before two others. Their places shift, so the
-     helpers cannot be told apart. A group that keeps its shape comes back place by place, so a fix in a property
-     getter beside its setter, or in one of the `beforeEach` hooks of two `describe` blocks, is proven. The
-     `describe` blocks around a hook are part of its place, so a hook in a `describe` that takes another's place is a
-     new hook. A test with the name of a helper, put before it, takes the helper's place: when the change edits or
-     removes that helper, it cannot be told apart either.
-   - a rebuilt helper reads a name that a removed import gave it.
-   - a statement outside the tests, helpers, and imports that the change adds, removes, edits, or moves names a name
-     that a rebuilt helper reads. The statement keeps the change, so the helper would run in another scope than at
-     the base, whatever binds that name now: an `if` or `try` block that set it, `REG.update(limit=1)`, `del LIMIT`,
-     `setattr(NS, 'limit', 1)`, `globalThis["LIMIT"] = 1`, `Object.defineProperty(globalThis, "LIMIT", ...)`, or
-     `LIMIT = 1;` beside a `let LIMIT;` that stays. The words in its strings count as names too; a docstring's words
-     and a title of a `describe`, `it`, or `test` do not.
-   - a helper the change adds at module level binds a name that a rebuilt helper reads, such as `LIMIT = 5` after
-     the `if` that set it, or a function named like a built-in that the helper calls. The helper would read the new
-     binding.
-
-   A test is "cannot be proven" too when it reads a name that only the change's helper edit gives, in its own text or
-   in a helper the change adds that it reaches: an attribute or name in a changed helper's lines now but not at the
-   base, or the other way round; a helper whose parameters changed; or a member of a class the change adds that a
-   changed helper now names, such as `make().extra()` after `make()` changed from `return Old()` to `return New()`.
-   When a changed helper now reaches added code that sets members from strings or expressions, those members cannot
-   be named, so every test that reaches the helper, by its name or because the framework calls it, cannot be proven.
-   That code is `setattr`, `type()` with three arguments, `exec`, `namedtuple`, an `Enum(...)` call,
-   `SimpleNamespace`, or a store such as `x[key] = ...`; in JavaScript, a class expression such as
-   `globalThis.Neu = class {...}` or `Object.assign(reg, { Neu: class {...} })`, `Object.defineProperty`, `Reflect`,
-   or `eval`; and every statement outside the tests, helpers, and imports that the change adds or edits. A name an
-   import binds in the module means the same with and without the change, so a helper fix that starts to use a
-   module both sides import, such as `json`, is still proven. A test that still passes is reported as "does not test
-   the change."
+   - **Only helper bodies changed: the module is rebuilt.** When the module's code outside its tests (helpers,
+     hooks, fixtures, imports, module and class-body statements, and the `describe` blocks around the tests with
+     their titles) differs from the base only inside the bodies of helpers that both sides hold in the same places,
+     each such helper comes back as its base text. The module is then the base module with your tests in it, and
+     devkit checks that it is. The same places means the same names, kinds, and order, so a fix in a property getter
+     beside its setter, or in one of the `beforeEach` hooks of two `describe` blocks, counts. Comments, layout, and
+     docstrings are not changes. A fix that lives only in a helper is proven this way, and a test that still passes
+     is reported as "does not test the change."
+   - **Any other change keeps the module as it is now.** When your change adds, removes, or edits anything else
+     outside the tests (a helper, a helper's decorators or parameters, an import, a class, a statement, a
+     `describe`), the run without your change restores only the other files. A test that fails then proves your
+     production change. A test that passes is "cannot be proven: its module keeps a change outside its helpers'
+     bodies," followed by the first difference, such as "an added helper `pair` (line 9)." It is never reported as
+     "does not test the change," because the module's own change was never undone.
 2. **It is stable.** It runs the test five times with your change (`--runs N` changes the count). A test that is not
    five times green is reported as flaky. This is the rule Meta's TestGen-LLM applies to generated tests.
 

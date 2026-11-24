@@ -160,72 +160,7 @@ class JsHelperTests(unittest.TestCase):
 
 
 class HelperClassTests(unittest.TestCase):
-    # a class without tests (a fake) is matched member by member: a method the change adds stays, as an added helper
-    # does, and only lines added inside a method that was there go with the change
-    def support_text(self, f, before, after):
-        with Env() as e:
-            r = e.repo({f: before})
-            edit(r, {f: after})
-            return testx._support_text(str(r), "main", f)
-
-    def test_a_method_added_to_a_python_helper_class_stays(self):
-        before = ("import unittest\n\n\nclass Fake:\n    def get(self):\n        y = 0\n        return 1 + y\n\n\n"
-                  "class T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(Fake().get(), 1)\n")
-        test = "Fake().get(), 1)\n\n    def test_close(self):\n        self.assertTrue(Fake().close())\n"
-        close = "        return 1 + y\n\n    def close(self):\n        return True\n"
-        separate = before.replace("y = 0", "y = 0 * 2").replace("        return 1 + y\n", close) \
-            .replace("Fake().get(), 1)\n", test)
-        text = self.support_text("tests/test_a.py", before, separate)
-        self.assertIn("    def close(self):\n        return True\n", text)
-        self.assertIn("        y = 0\n", text)  # the edit inside get goes with the change
-
-    # one hunk edits get's last line and adds close after it: the edit goes with the change line by line, close stays
-    def test_a_mixed_hunk_restores_the_edited_lines_and_keeps_the_added_method(self):
-        before = ("import unittest\n\n\nclass Fake:\n    def get(self):\n        y = 0\n        return 1 + y\n\n\n"
-                  "class T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(Fake().get(), 1)\n")
-        mixed = before.replace("        return 1 + y\n",
-                               "        return 2 + y\n\n    def close(self):\n        return True\n")
-        text = self.support_text("tests/test_a.py", before, mixed)
-        self.assertIsNotNone(text)
-        self.assertIn("        return 1 + y\n", text)
-        self.assertNotIn("return 2 + y", text)
-        self.assertIn("    def close(self):\n        return True\n", text)
-
-    # Fake.__init__ sets z instead of y (one hunk) and get returns z with a new close() after it (another hunk); the
-    # production change is unrelated: the run without the change must not fail on get's z and __init__'s y
-    def test_a_mixed_hunk_whose_edit_needs_a_reverted_member_proves_nothing(self):
-        fake = "class Fake:\n    def __init__(self):\n        self.y = 1\n\n    def get(self):\n        return self.y\n\n\n"
-        test = with_tests().replace("class CalcTests(", fake + "class CalcTests(")
-        with Env() as e:
-            r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": test}))
-            after = test.replace("self.y = 1", "self.z = 1").replace(
-                "        return self.y\n", "        return self.z\n\n    def close(self):\n        return True\n") + \
-                "\n    def test_close(self):\n        self.assertTrue(Fake().close())\n" \
-                "        self.assertEqual(Fake().get(), 1)\n"
-            edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
-            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
-            rows = json.loads(out)["tests"]
-        self.assertEqual([("test_calc.CalcTests.test_close", "does not test the change")],
-                         [(x["id"], x["verdict"]) for x in rows], out + err)
-        self.assertEqual(1, rc)
-
-    # one hunk edits two attributes with a new method between them: each attribute comes back from its own base text
-    # and the method stays, so the test of the edit is proven
-    def test_a_hunk_that_edits_two_members_around_an_added_one_is_undone_member_by_member(self):
-        fake = "class Fake:\n    x = 1\n    y = 2\n\n\n"
-        test = with_tests().replace("class CalcTests(", fake + "class CalcTests(")
-        with Env() as e:
-            r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": test}))
-            after = test.replace("    x = 1\n    y = 2\n",
-                                 "    x = 10\n\n    def c(self):\n        return 3\n\n    y = 20\n") + \
-                "\n    def test_c(self):\n        self.assertEqual(Fake().c() + Fake.x, 13)\n"
-            edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
-            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
-            rows = json.loads(out)["tests"]
-        self.assertEqual([("test_calc.CalcTests.test_c", "proves the change")],
-                         [(x["id"], x["verdict"]) for x in rows], out + err)
-        self.assertEqual(0, rc)
-
+    # the members of a class without tests (a fake) are read at the class body's own depth
     def test_an_arrow_property_s_if_block_is_no_member_of_a_javascript_class(self):
         before = ("class Fake {\n  close = () => {\n    return 2;\n  };\n  get() {\n    return 1;\n  }\n}\n\n"
                   "test('a', () => { expect(new Fake().get()).toBe(1); });\n")
@@ -234,15 +169,11 @@ class HelperClassTests(unittest.TestCase):
         for word in ("for", "while", "switch"):
             self.assertNotIn(("Fake", word), testx._js_members(after.replace("if (this.y)", f"{word} (this.y)")))
 
-    def test_a_method_added_to_a_javascript_helper_class_stays(self):
-        before = ("class Fake {\n  get() {\n    const y = 0;\n    return 1 + y;\n  }\n}\n\n"
-                  "test('a', () => { expect(new Fake().get()).toBe(1); });\n")
-        after = before.replace("const y = 0;", "const y = 0 * 2;").replace(
-            "    return 1 + y;\n  }\n", "    return 1 + y;\n  }\n  close() {\n    return true;\n  }\n") + \
-            "test('b', () => { expect(new Fake().close()).toBe(true); });\n"
-        text = self.support_text("tests/a.test.js", before, after)
-        self.assertIn("  close() {\n    return true;\n  }\n", text)
-        self.assertIn("    const y = 0;\n", text)
+    # only a name at the class body's own depth is a member: a call inside an arrow property's body is none
+    def test_a_call_inside_an_arrow_property_is_no_member_of_a_javascript_class(self):
+        text = ("class Fake {\n  close = () => {\n    cleanup(this.y);\n    return 2;\n  };\n  get() {\n    return 1;\n"
+                "  }\n}\n")
+        self.assertEqual({("Fake", "close"), ("Fake", "get")}, set(testx._js_members(text)))
 
 
 FAKE = "class Fake:\n    def __init__(self):\n        self.y = 1\n\n    def get(self):\n        return self.y\n\n\n"
@@ -272,46 +203,8 @@ def prove_rows(before, after):
 
 
 class MemberRestoreTests(unittest.TestCase):
-    # the run without the change rebuilds each changed helper from its own text at the base, matched by class and name,
-    # never from where git's diff puts its lines: here git pairs get's old last line with the same last line of close,
-    # which the change adds after it, and get came back without its return
-    def test_a_changed_helper_comes_back_as_its_base_text_beside_an_added_one_that_ends_alike(self):
-        before = fake_module("class Fake:\n    def get(self):\n        r = 1\n        return r\n\n\n")
-        after = before.replace("        return r\n", "        return r + 0\n\n    def close(self):\n        r = 2\n"
-                                                    "        return r\n") + \
-            "\n    def test_get(self):\n        self.assertIsNotNone(Fake().get())\n" \
-            "        self.assertEqual(Fake().close(), 2)\n"
-        with Env() as e:
-            r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": before}))
-            edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
-            text = testx._support_text(str(r), "main", "tests/test_calc.py")
-            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
-        self.assertIn("    def get(self):\n        r = 1\n        return r\n\n    def close(self):\n        r = 2\n"
-                      "        return r\n", text)
-        self.assertEqual([("test_calc.CalcTests.test_get", "does not test the change")],
-                         [(x["id"], x["verdict"]) for x in json.loads(out)["tests"]], out + err)
-
-    def test_a_changed_javascript_method_comes_back_as_its_base_text_beside_an_added_one(self):
-        before = ("class Fake {\n  get() {\n    const r = 1;\n    return r;\n  }\n}\n\n"
-                  "test('a', () => { expect(new Fake().get()).toBe(1); });\n")
-        after = before.replace("    return r;\n  }\n", "    return r + 0;\n  }\n\n  close() {\n    const r = 2;\n"
-                                                      "    return r;\n  }\n") + \
-            "test('b', () => { expect(new Fake().close()).toBe(2); });\n"
-        self.assertIn("  get() {\n    const r = 1;\n    return r;\n  }\n\n  close() {\n    const r = 2;\n    return r;\n"
-                      "  }\n", support_text("tests/a.test.js", before, after))
-
-    # a helper the change removes comes back too: without the change, setUp ran
-    def test_a_helper_the_change_removes_comes_back(self):
-        before = ("import unittest\n\n\nclass T(unittest.TestCase):\n    def setUp(self):\n        self.k = 1\n\n"
-                  "    def test_a(self):\n        self.assertTrue(True)\n")
-        after = before.replace("    def setUp(self):\n        self.k = 1\n\n", "") + \
-            "\n    def test_no_k(self):\n        self.assertFalse(hasattr(self, 'k'))\n"
-        text = support_text("tests/test_a.py", before, after)
-        self.assertIn("    def setUp(self):\n        self.k = 1\n", text)
-        self.assertIn("    def test_no_k(self):\n", text)
-
-    # a restore is checked: each helper it undid reads as at the base, each it kept as now. Two members on one line
-    # cannot be rebuilt one by one, so the module's tests cannot be proven, rather than proven by the member it lost
+    # a restore is checked: the rebuilt module must read as the base module with the tests now. Two members on one
+    # line cannot be rebuilt one by one, so the module keeps its change
     def test_a_restore_that_does_not_give_back_each_base_helper_cannot_be_proven(self):
         before = ("import unittest\n\n\nclass Fake:\n    x = 1\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n"
                   "        self.assertEqual(Fake.x, 1)\n")
@@ -319,8 +212,7 @@ class MemberRestoreTests(unittest.TestCase):
             "\n    def test_z(self):\n        self.assertEqual(Fake.z, 3)\n"
         self.assertIs(testx._SUPPORT_TANGLED, support_text("tests/test_a.py", before, after))
 
-    # imports keep the change: a helper rebuilt from its base text that needs a name only a removed import gave would
-    # fail on that name, so the module's tests cannot be proven
+    # imports are code outside the tests: a removed import keeps the module's change
     def test_a_rebuilt_helper_that_needs_a_removed_import_cannot_be_proven(self):
         before = ("import os\nimport unittest\n\n\ndef sep():\n    return os.sep\n\n\nclass T(unittest.TestCase):\n"
                   "    def test_a(self):\n        self.assertTrue(sep())\n")
@@ -331,161 +223,186 @@ class MemberRestoreTests(unittest.TestCase):
         after = js.replace("import { sep } from 'node:path';\n", "").replace("return sep;", "return '/';")
         self.assertIs(testx._SUPPORT_TANGLED, support_text("tests/a.test.js", js, after))
 
-    # a test that reads a name only the change's helper edit gives, itself or through a helper the change adds, cannot
-    # be proven: without the change it fails on that name, whatever the change does
-    def test_a_test_that_reads_a_name_the_undone_helper_lines_give_cannot_be_proven(self):
-        cases = {
-            "an added member reads an attribute the edit sets": lambda t: t.replace("self.y = 1", "self.z = 1").replace(
-                "        return self.y\n", "        return self.y if hasattr(self, 'y') else 1\n\n    def close(self):\n"
-                                         "        return self.z\n") +
-            "\n    def test_close(self):\n        self.assertEqual(Fake().close(), 1)\n",
-            "the test reads the attribute the edit sets": lambda t: t.replace("self.y = 1", "self.z = 1").replace(
-                "return self.y", "return self.z") + "\n    def test_z(self):\n        self.assertEqual(Fake().z, 1)\n",
-            "an added class calls a method whose parameters changed": lambda t: t.replace(
-                "    def get(self):\n        return self.y\n", "    def get(self, n):\n        return self.y * n\n").replace(
-                "class CalcTests(", "class Other:\n    def make(self):\n        return Fake().get(1)\n\n\nclass CalcTests(") +
-            "\n    def test_make(self):\n        self.assertEqual(Other().make(), 1)\n",
-            # the edit and the added function share one hunk of git's diff
-            "an added function calls a method whose parameters changed": lambda t: t.replace(
-                "    def get(self):\n        return self.y\n", "    def get(self, n):\n        return self.y * n\n").replace(
-                "class CalcTests(", "def make():\n    return Fake().get(1)\n\n\nclass CalcTests(") +
-            "\n    def test_make(self):\n        self.assertEqual(make(), 1)\n",
-        }
-        for name, change in cases.items():
-            with self.subTest(name):
-                rc, rows, text = prove_rows(fake_module(), change(fake_module()))
-                self.assertEqual([testx._HELPERS_TANGLED], [v for _, v in rows], text)
-                self.assertEqual(2, rc, text)
-
-    # a module-level name renamed is a helper removed and another added: the base one comes back and the new one stays,
-    # so a new test of the new one runs as it does with the change, and does not test it
-    def test_a_renamed_module_name_stays_beside_the_base_one(self):
-        before = fake_module("Z = 1\n\n\n" + FAKE)
-        after = before.replace("Z = 1\n", "W = 1\n").replace("class CalcTests(", "def w():\n    return W\n\n\n"
-                                                                               "class CalcTests(") + \
-            "\n    def test_w(self):\n        self.assertEqual(w(), 1)\n"
-        rc, rows, text = prove_rows(before, after)
-        self.assertEqual([("test_calc.CalcTests.test_w", "does not test the change")], rows, text)
-
-    # only a name at the class body's own depth is a member: a call inside an arrow property's body is none
-    def test_a_call_inside_an_arrow_property_is_no_member_of_a_javascript_class(self):
-        text = ("class Fake {\n  close = () => {\n    cleanup(this.y);\n    return 2;\n  };\n  get() {\n    return 1;\n"
-                "  }\n}\n")
-        self.assertEqual({("Fake", "close"), ("Fake", "get")}, set(testx._js_members(text)))
-
 
 PY_TEST = "class T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(h(), 1)\n"
 JS_TEST = "test('a', () => { expect(h()).toBe(1); });\n"
+PY_H = "import unittest\n\n\ndef h():\n    return 1\n\n\n"
+JS_H = "function h() {\n  return 1;\n}\n\n"
 DISPATCH = ("import functools\nimport unittest\n\n\n@functools.singledispatch\ndef fmt(v):\n    return 'any'\n\n\n"
             "@fmt.register\ndef _(v: int):\n    return 'int'\n\n\n@fmt.register\ndef _(v: str):\n    return 'str'\n\n\n")
-HOOKS = ("const state = {};\n\ndescribe('a', () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\n"
-         "  test('a one', () => { expect(state.n).toBe(1); });\n});\n\n"
-         "describe('b', () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\n"
-         "  test('b one', () => { expect(state.n).toBe(1); });\n});\n")
+FAKE_PROPERTY = ("class Fake:\n    def __init__(self):\n        self._x = 1\n\n    @property\n    def x(self):\n"
+                 "        return self._x\n\n    @x.setter\n    def x(self, v):\n        self._x = v\n\n\n")
+NODE_HEAD = 'import assert from "node:assert/strict";\nimport { test, describe, beforeEach } from "node:test";\n\n'
+HOOK_A = ('describe("a", () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\n'
+          '  test("a one", () => assert.equal(state.n, 1));\n});\n\n')
+HOOK_B = ('describe("b", () => {\n  beforeEach(() => {\n    state.n = 0;\n  });\n'
+          '  test("b one", () => assert.equal(typeof state.n, "number"));\n});\n')
+NODE_PACKAGE = json.dumps({"name": "root", "type": "module", "scripts": {"test": "node --test test/"}})
 
 
-class SameNameGroupTests(unittest.TestCase):
-    # helpers are matched by class, name and place among those of the same name: a helper the change adds before
-    # others of its name moves each of them one place on, so each would come back as its neighbor's base text (an int
-    # registration rebuilt as the str one). A group of same-name helpers the change touches, with more than one on
-    # either side, cannot be told apart, so the module's tests cannot be proven
-    def test_a_changed_group_of_same_name_helpers_cannot_be_proven(self):
-        cases = {
-            "a singledispatch registration added first": (
-                "tests/test_a.py", DISPATCH + PY_TEST,
-                DISPATCH.replace("@fmt.register\ndef _(v: int)",
-                                 "@fmt.register\ndef _(v: float):\n    return 'float'\n\n\n@fmt.register\ndef _(v: int)") +
-                PY_TEST + "\n    def test_float(self):\n        self.assertEqual(fmt(1.5), 'float')\n"),
-            "an augmented assignment added before another": (
-                "tests/test_a.py", "import unittest\n\nCASES = [1]\nCASES += [2]\n\n\n" + PY_TEST,
-                "import unittest\n\nCASES = [1]\nCASES += [3]\nCASES += [2]\n\n\n" + PY_TEST +
-                "\n    def test_cases(self):\n        self.assertEqual(sorted(CASES), [1, 2, 3])\n"),
-            "a static method added before a same-name method": (
-                "tests/a.test.js", "class Fake {\n  get() {\n    return 1;\n  }\n}\n\n" + JS_TEST,
-                "class Fake {\n  static get() {\n    return 7;\n  }\n\n  get() {\n    return 1;\n  }\n}\n\n" + JS_TEST +
-                "test('static', () => { expect(Fake.get()).toBe(7); });\n"),
-            "a hook added before two identical ones": (
-                "tests/a.test.js", HOOKS,
-                "const state = {};\n\ndescribe('new', () => {\n  beforeEach(() => {\n    state.n = 1;\n    state.m = 5;\n"
-                "  });\n  test('new five', () => { expect(state.m).toBe(5); });\n});\n\n" + HOOKS[len("const state = {};\n\n"):]),
-            # a test shares the place count of the helpers of its title: put before the helper, it takes its place
-            "a test titled like a changed helper, put before it": (
-                "tests/a.test.js", "function h() {\n  return 1;\n}\n\n" + JS_TEST,
-                "test('h', () => { expect(h()).toBe(1); });\n\nfunction h() {\n  return 2 - 1;\n}\n\n" + JS_TEST),
-        }
-        for name, (f, before, after) in cases.items():
-            with self.subTest(name):
-                self.assertIs(testx._SUPPORT_TANGLED, support_text(f, before, after))
-        # a group the change leaves as it was still lets another helper come back as its base text, and so does the
-        # one helper of a name with a test of that name after it
+def rebuilt(f, before, after):
+    """What _rebuild_helpers gives for test module `f` going from `before` to `after`: {"text", "first"}, or None."""
+    r = testx._rebuild_helpers(f, before, after)
+    return None if r is None else {"text": r.get("text"), "first": r.get("first", "no first difference named")}
+
+
+class RebuildRuleTests(unittest.TestCase):
+    # a test module rebuilds only when its code outside its tests differs from the base only inside the bodies of
+    # helpers both sides hold in the same places, and the rebuilt module is then the base module with the tests now:
+    # a helper fix and a hook fix in a describe come back as their base text. A docstring, like a comment, is no code
+    # a test runs: an edited one stays
+    def test_a_fix_inside_helper_bodies_rebuilds_the_base_module_with_the_tests_now(self):
+        before = '"""Tests of h."""\n' + PY_H + PY_TEST
+        new_test = "\n    def test_b(self):\n        self.assertEqual(h(), 2)\n"
+        after = before.replace("Tests of h.", "Tests of h and its limit.").replace(
+            "    return 1\n", "    n = 2\n    return n\n") + new_test
+        self.assertEqual({"text": before.replace("Tests of h.", "Tests of h and its limit.") + new_test, "first": ""},
+                         rebuilt("tests/test_a.py", before, after))
+        before = ("const state = {};\n\n" + JS_H + "describe('d', () => {\n  beforeEach(() => {\n    state.n = 1;\n"
+                  "  });\n  test('a', () => { expect(h()).toBe(state.n); });\n});\n")
+        new_test = "  test('b', () => { expect(h()).toBe(2); });\n"
+        after = before.replace("return 1;", "return 2;").replace("state.n = 1;", "state.n = 2;").replace(
+            "toBe(state.n); });\n", "toBe(state.n); });\n" + new_test)
+        self.assertEqual({"text": before.replace("toBe(state.n); });\n", "toBe(state.n); });\n" + new_test),
+                          "first": ""}, rebuilt("tests/a.test.js", before, after))
+
+    # helpers of one name are matched by their places, so a fix in one of them, or bodies that trade places, come
+    # back place by place: a property getter beside its setter, a singledispatch group left as it was beside a fixed
+    # helper, two beforeEach hooks whose bodies trade places
+    def test_helpers_of_one_name_in_the_same_places_come_back_place_by_place(self):
+        new_test = "\n    def test_x(self):\n        self.assertEqual(Fake().x, 10)\n"
+        before = "import unittest\n\n\n" + FAKE_PROPERTY + PY_TEST
+        after = before.replace("        return self._x\n", "        return self._x * 10\n") + new_test
+        self.assertEqual({"text": before + new_test, "first": ""}, rebuilt("tests/test_a.py", before, after))
         before = DISPATCH + "def h():\n    return 1\n\n\n" + PY_TEST
-        self.assertIn("def h():\n    return 1\n", support_text("tests/test_a.py", before,
-                                                               before.replace("    return 1\n", "    return 2 - 1\n")))
-        before = "function h() {\n  return 1;\n}\n\n" + JS_TEST
-        self.assertIn("function h() {\n  return 1;\n}\n", support_text(
-            "tests/a.test.js", before, before.replace("return 1;", "return 2 - 1;") +
-            "test('h', () => { expect(h()).toBe(1); });\n"))
+        after = before.replace("    return 1\n", "    return 2 - 1\n")
+        self.assertEqual({"text": before, "first": ""}, rebuilt("tests/test_a.py", before, after))
+        before = NODE_HEAD + "const state = {};\n\n" + HOOK_A + HOOK_B
+        new_test = '  test("b two", () => assert.equal(state.n, 1));\n'
+        after = before.replace("state.n = 1;", "state.n = @;").replace("state.n = 0;", "state.n = 1;").replace(
+            "state.n = @;", "state.n = 0;").replace('"number"));\n', '"number"));\n' + new_test)
+        self.assertEqual({"text": before.replace('"number"));\n', '"number"));\n' + new_test), "first": ""},
+                         rebuilt("test/util.test.mjs", before, after))
 
+    # nothing outside the tests changed (a test added before helpers it is named like, a comment or a docstring
+    # edited): the module runs as it is, with nothing to rebuild
+    def test_a_module_whose_code_outside_its_tests_reads_as_the_base_needs_no_rebuild(self):
+        before = '"""Tests of h."""\n' + PY_H.replace("return 1", '"""One."""\n    return 1') + PY_TEST
+        self.assertIsNone(rebuilt("tests/test_a.py", before, before.replace("Tests of h.", "Tests of h, and more.")
+                                  .replace("One.", "The one.")))
+        before = JS_H + "function g() {\n  return 1;\n}\n\n" + JS_TEST
+        self.assertIsNone(rebuilt("tests/a.test.js", before, "test('h', () => { expect(h()).toBe(1); });\n\n" + before))
+        before = JS_H.replace("return 1;", "return 1; // one") + JS_TEST
+        self.assertIsNone(rebuilt("tests/a.test.js", before, before.replace("// one", "// the only one")))
+        before = PY_H.replace("return 1", "return 1  # one") + PY_TEST
+        self.assertIsNone(rebuilt("tests/test_a.py", before, before.replace("# one", "# the only one")))
 
-class RemovedNameTests(unittest.TestCase):
-    # a helper rebuilt from its base text must still find each name it reads that the module gave it outside the
-    # helpers: one bound in an if or a try block, by an expression statement or by a destructuring declaration, which
-    # the change removed, fails on that name without the change, whatever the change does
-    def test_a_rebuilt_helper_that_reads_a_name_the_change_removed_cannot_be_proven(self):
-        cases = {
-            "bound in a try block": (
-                "tests/test_a.py",
-                "import unittest\n\ntry:\n    import json\n    HAVE = True\nexcept ImportError:\n    HAVE = False\n\n\n"
-                "def h():\n    return 1 if HAVE else 1\n\n\n" + PY_TEST,
-                "import unittest\nimport json\n\n\ndef h():\n    return 1\n\n\n" + PY_TEST),
-            "bound in an if block": (
-                "tests/test_a.py", "import unittest\n\nif True:\n    LIMIT = 1\n\n\ndef h():\n    return LIMIT\n\n\n" + PY_TEST,
-                "import unittest\n\n\ndef h():\n    return 1\n\n\n" + PY_TEST),
-            "an attribute set in an if block": (
-                "tests/test_a.py", "import types\nimport unittest\n\nNS = types.SimpleNamespace()\nif True:\n"
-                                   "    NS.limit = 1\n\n\ndef h():\n    return NS.limit\n\n\n" + PY_TEST,
-                "import types\nimport unittest\n\nNS = types.SimpleNamespace()\n\n\ndef h():\n    return 1\n\n\n" + PY_TEST),
-            "set on globalThis": (
-                "tests/a.test.js", "globalThis.LIMIT = 1;\n\nfunction h() {\n  return LIMIT;\n}\n\n" + JS_TEST,
-                "function h() {\n  return 1;\n}\n\n" + JS_TEST),
-            "a destructured const": (
-                "tests/a.test.js", "const { LIMIT } = { LIMIT: 1 };\n\nfunction h() {\n  return LIMIT;\n}\n\n" + JS_TEST,
-                "function h() {\n  return 1;\n}\n\n" + JS_TEST),
+    # any other change to the code outside the tests keeps the module as changed, and the result names the first
+    # difference: an added, removed or edited helper, import, class or statement, a helper's decorators or parameters,
+    # a statement in a test class body, the describe structure and its titles, helpers of one name whose places shift
+    def test_any_other_change_outside_the_tests_keeps_the_module_and_names_the_first_difference(self):
+        fake = "import unittest\n\n\nclass Fake:\n    def get(self):\n        return 1\n\n\n"
+        fake_test = "class T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(Fake().get(), 1)\n"
+        in_class = ("import unittest\n\n\n" + "def h():\n    return 1\n\n\n" + "class T(unittest.TestCase):\n"
+                    "    if True:\n        LIMIT = 1\n\n    def test_a(self):\n        self.assertEqual(h(), 1)\n")
+        attr = "import unittest\n\n\nclass Fake:\n    x = 1\n\n\n" + fake_test.replace("Fake().get()", "Fake.x")
+        box = "class Box {\n  static {\n    globalThis.LIMIT = 1;\n  }\n\n  get() {\n    return LIMIT;\n  }\n}\n\n"
+        hooked = ("const state = {};\n\ndescribe('one', () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\n"
+                  "  test('t', () => { expect(state.n).toBe(1); });\n});\n")
+        traded = NODE_HEAD + "const state = {};\n\n" + HOOK_A + HOOK_B
+        cases = {  # name: (file, before, after, the first difference)
+            "an added helper": ("tests/test_a.py", PY_H + PY_TEST,
+                                PY_H.replace("def h", "def build():\n    return 2\n\n\ndef h") + PY_TEST,
+                                "an added helper `build` (line 4)"),
+            "a removed helper": ("tests/test_a.py", PY_H + PY_TEST.replace(
+                "    def test_a", "    def setUp(self):\n        self.k = 1\n\n    def test_a"), PY_H + PY_TEST,
+                "a removed helper `T.setUp` (line 9 at the base)"),
+            "an added import that rebinds a name": ("tests/test_a.py", PY_H + PY_TEST, PY_H.replace(
+                "import unittest\n", "import unittest\nfrom math import pi as LIMIT\n") + PY_TEST,
+                "an added import `from math import pi as LIMIT` (line 2)"),
+            "a removed import": ("tests/test_a.py", "import os\n" + PY_H + PY_TEST, PY_H + PY_TEST,
+                                 "a removed import `import os` (line 1 at the base)"),
+            "an edited module statement": (
+                "tests/test_a.py", PY_H.replace("\n\n\ndef", "\n\nsys.path.insert(0, 'lib')\n\n\ndef") + PY_TEST,
+                PY_H.replace("\n\n\ndef", "\n\nsys.path.insert(0, 'src')\n\n\ndef").replace("return 1", "return 2")
+                + PY_TEST, "an edited statement `sys.path.insert(0, 'src')` (line 3)"),
+            "an assignment added to rebind a built-in": (
+                "tests/test_a.py", PY_H + PY_TEST,
+                PY_H.replace("\n\n\ndef", "\n\nbuiltins.len = lambda x: 7\n\n\ndef") + PY_TEST,
+                "an added statement `builtins.len = lambda x: 7` (line 3)"),
+            "a statement removed from a test class body": (
+                "tests/test_a.py", in_class, in_class.replace("    if True:\n        LIMIT = 1\n\n", ""),
+                "a removed statement `if True:` (line 9 at the base)"),
+            "a helper's parameters edited": ("tests/test_a.py", PY_H + PY_TEST, PY_H.replace(
+                "def h():\n    return 1", "def h(n=1):\n    return n") + PY_TEST, "an edited helper `h` (line 4)"),
+            "a decorator added to a helper": ("tests/test_a.py", PY_H + PY_TEST,
+                                              PY_H.replace("def h", "@staticmethod\ndef h") + PY_TEST,
+                                              "an edited helper `h` (line 4)"),
+            "an added class": ("tests/test_a.py", PY_H + PY_TEST, PY_H.replace(
+                "def h", "class New:\n    def __getattr__(self, name):\n        return 1\n\n\ndef h") + PY_TEST,
+                "an added class `New` (line 4)"),
+            "a method added to a class without tests": ("tests/test_a.py", fake + fake_test, fake.replace(
+                "        return 1\n", "        return 1\n\n    def close(self):\n        return True\n") + fake_test,
+                "an added helper `Fake.close` (line 8)"),
+            "a class attribute edited": ("tests/test_a.py", attr, attr.replace("x = 1", "x = 10"),
+                                         "an edited statement `x = 10` (line 5)"),
+            "the main guard edited": ("tests/test_a.py",
+                                      PY_H + PY_TEST + "\n\nif __name__ == '__main__':\n    unittest.main()\n",
+                                      PY_H + PY_TEST + "\n\nif __name__ == '__main__':\n    unittest.main(verbosity=2)\n",
+                                      "an edited statement `if __name__ == '__main__':` (line 13)"),
+            "a same-name registration added before the others": (
+                "tests/test_a.py", DISPATCH + PY_TEST, DISPATCH.replace(
+                    "@fmt.register\ndef _(v: int)", "@fmt.register\ndef _(v: float):\n    return 'float'\n\n\n"
+                                                    "@fmt.register\ndef _(v: int)") + PY_TEST,
+                "an added helper `_` (line 10)"),
+            "an added javascript helper": ("tests/a.test.js", JS_H + JS_TEST,
+                                           "function build() {\n  return 2;\n}\n\n" + JS_H + JS_TEST,
+                                           "an added helper `build` (line 1)"),
+            "an added const that holds an object": (
+                "tests/a.test.js", JS_H + JS_TEST, "const proto = { extra() { return 1; } };\n\n" + JS_H + JS_TEST,
+                "an added statement `const proto = { extra() { return 1; } };` (line 1)"),
+            "an added javascript import": (
+                "tests/a.test.js", JS_H + JS_TEST, 'import { other as parseInt } from "../src/util.mjs";\n\n' + JS_H +
+                JS_TEST, 'an added import `import { other as parseInt } from "../src/util.mjs";` (line 1)'),
+            "a removed global": ("tests/a.test.js",
+                                 "globalThis.LIMIT = 1;\n\n" + JS_H.replace("return 1", "return LIMIT") + JS_TEST,
+                                 JS_H + JS_TEST, "a removed statement `globalThis.LIMIT = 1;` (line 1 at the base)"),
+            "a describe title edited": ("tests/a.test.js", hooked,
+                                        hooked.replace("'one'", "'uno'").replace("state.n = 1;", "state.n = 2;"),
+                                        "an edited statement `describe('uno', () => {` (line 3)"),
+            "describes that trade places": ("test/util.test.mjs", traded,
+                                            NODE_HEAD + "const state = {};\n\n" + HOOK_B + "\n" + HOOK_A,
+                                            'an edited statement `describe("b", () => {` (line 6)'),
+            "a static block removed from a helper class": (
+                "tests/a.test.js", box + JS_TEST, box.replace("  static {\n    globalThis.LIMIT = 1;\n  }\n\n", "")
+                .replace("return LIMIT;", "return 1;") + JS_TEST, "a removed statement `static {` (line 2 at the base)"),
         }
-        for name, (f, before, after) in cases.items():
+        for name, (f, before, after, first) in cases.items():
             with self.subTest(name):
-                self.assertIs(testx._SUPPORT_TANGLED, support_text(f, before, after))
-        # a name the change keeps, or one the rebuilt helpers give each other, lets them come back
-        before = "import unittest\n\nif True:\n    LIMIT = 1\n\n\ndef h():\n    return LIMIT\n\n\n" + PY_TEST
-        self.assertIn("    return LIMIT\n", support_text("tests/test_a.py", before,
-                                                       before.replace("return LIMIT", "return LIMIT + 0")))
-        before = fake_module()
-        self.assertIn("        self.y = 1\n", support_text("tests/test_calc.py", before,
-                                                         before.replace("self.y", "self.z")))
-        # an attribute read is no binding: os.sep stays os's although the test that also read it changed
-        before = ("import os\nimport unittest\n\n\ndef slash():\n    return os.sep\n\n\nclass T(unittest.TestCase):\n"
-                  "    def test_a(self):\n        self.assertEqual(os.sep, slash())\n")
-        self.assertIn("    return os.sep\n", support_text("tests/test_a.py", before, before.replace(
-            "    return os.sep\n", "    return os.sep + ''\n").replace("assertEqual(os.sep, slash())", "assertTrue(slash())")))
+                self.assertEqual({"text": None, "first": first}, rebuilt(f, before, after))
 
 
-class AddedClassReachTests(unittest.TestCase):
-    # a rebuilt helper that, with the change, makes an object of a class the change adds: a test that reads a member of
-    # that class through the helper fails on it without the change, as on a name the helper edit gives, so it cannot
-    # be proven
-    def test_a_test_that_reads_a_member_of_a_class_only_the_helper_edit_names_cannot_be_proven(self):
-        before = fake_module("class Old:\n    pass\n\n\ndef make():\n    return Old()\n\n\n")
-        after = before.replace("def make():\n    return Old()",
-                               "class New:\n    def extra(self):\n        return 1\n\n\ndef make():\n    return New()") + \
-            "\n    def test_extra(self):\n        self.assertEqual(make().extra(), 1)\n"
-        rc, rows, text = prove_rows(before, after)
-        self.assertEqual([("test_calc.CalcTests.test_extra", testx._HELPERS_TANGLED)], rows, text)
-        before = "class Old {}\n\nfunction make() {\n  return new Old();\n}\n\n" + JS_TEST
-        after = before.replace("function make() {\n  return new Old();",
-                               "class Neu {\n  extra() {\n    return 1;\n  }\n}\n\nfunction make() {\n  return new Neu();") + \
-            "test('extra', () => { expect(make().extra()).toBe(1); });\n"
-        self.assertEqual({"extra"}, testx._reads_undone("tests/a.test.js",
-                                                        testx._rebuild_helpers("tests/a.test.js", before, after)))
+class RebuildVerdictTests(unittest.TestCase):
+    # a module whose change outside its helpers' bodies stays (here a helper the change adds) runs as it is now: a
+    # test that fails without the production change proves it, and one that passes cannot be proven, named by the
+    # module's first difference, never "does not test the change"
+    def test_a_module_that_keeps_its_change_proves_by_a_failure_and_names_its_first_difference(self):
+        after = with_tests().replace("class CalcTests", "def pair():\n    return 2, 3\n\n\nclass CalcTests") + \
+            "\n    def test_mul(self):\n        self.assertEqual(calc.mul(*pair()), 6)\n" \
+            "\n    def test_pair(self):\n        self.assertEqual(pair(), (2, 3))\n"
+        kept = ("cannot be proven: its module keeps a change outside its helpers' bodies: an added helper `pair` "
+                "(line 9)")
+        with Env() as e:
+            r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": with_tests()}))
+            edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual([("test_calc.CalcTests.test_mul", "proves the change"),
+                              ("test_calc.CalcTests.test_pair", kept)],
+                             [(x["id"], x["verdict"]) for x in json.loads(out)["tests"]], out + err)
+            self.assertEqual(0, rc, out + err)
+            rc, out, err = dev(r, "prove", "--runs", "1")
+        self.assertRegex(out, r"keeps a change outside its helpers' bodies[^\n]*:\n\s+tests/test_calc.py\s+"
+                              r"test_calc.CalcTests.test_pair  · an added helper `pair` \(line 9\)")
 
 
 class ImportedNameTests(unittest.TestCase):
@@ -499,117 +416,9 @@ class ImportedNameTests(unittest.TestCase):
         self.assertEqual([("test_calc.CalcTests.test_h", "proves the change")], rows, text)
 
 
-LIMIT_IF = "import unittest\n\nif True:\n    LIMIT = 1\n\n\ndef h():\n    return LIMIT\n\n\n"
-H_ONE = "def h():\n    return 1\n\n\n"
-JS_H_ONE = "function h() {\n  return 1;\n}\n\n"
-JS_H_LIMIT = "function h() {\n  return LIMIT;\n}\n\n"
-
-
-class ScopeStatementTests(unittest.TestCase):
-    # only helpers come back: a statement of a test module outside its tests, helpers and imports keeps the change.
-    # One the change adds, removes or edits that names a name a rebuilt helper reads leaves that helper another scope
-    # than at the base (a value it read gone, a name deleted, a registry left empty), whatever binds the name now (a
-    # test's local, a parameter, a default kept), so the module's tests cannot be proven
-    def test_a_changed_statement_that_names_what_a_rebuilt_helper_reads_cannot_be_proven(self):
-        cases = {
-            "a try-bound name another test keeps as a local": (
-                "tests/test_a.py",
-                "import unittest\n\ntry:\n    import os\n    root = os.sep\nexcept ImportError:\n    root = None\n\n\n"
-                "def fixture(name):\n    return root and name\n\n\n" + PY_TEST +
-                "\n    def test_tree(self):\n        root = 'x'\n        self.assertEqual(root, 'x')\n",
-                "import unittest\n\n\ndef fixture(name):\n    return name\n\n\n" + PY_TEST +
-                "\n    def test_tree(self):\n        root = 'x'\n        self.assertEqual(root, 'x')\n"
-                "\n    def test_fixture(self):\n        self.assertEqual(fixture('a'), 'a')\n"),
-            "a removed name kept as a parameter": (
-                "tests/test_a.py", LIMIT_IF + PY_TEST,
-                "import unittest\n\n\n" + H_ONE + "def twice(LIMIT):\n    return 2 * LIMIT\n\n\n" + PY_TEST),
-            "a default kept while the if that set the value goes": (
-                "tests/test_a.py", LIMIT_IF.replace("if True:", "LIMIT = None\nif True:") + PY_TEST,
-                "import unittest\n\nLIMIT = None\n\n\n" + H_ONE + PY_TEST),
-            "a registry fill removed": (
-                "tests/test_a.py",
-                "import unittest\n\nREG = {}\nREG.update(limit=1)\n\n\ndef h():\n    return REG['limit']\n\n\n" + PY_TEST,
-                "import unittest\n\nREG = {}\n\n\n" + H_ONE + PY_TEST),
-            "a setattr removed": (
-                "tests/test_a.py",
-                "import types\nimport unittest\n\nNS = types.SimpleNamespace()\nsetattr(NS, 'limit', 1)\n\n\n"
-                "def h():\n    return NS.limit\n\n\n" + PY_TEST,
-                "import types\nimport unittest\n\nNS = types.SimpleNamespace()\n\n\n" + H_ONE + PY_TEST),
-            "a del added": (
-                "tests/test_a.py", LIMIT_IF + PY_TEST,
-                LIMIT_IF.replace("\n\n\ndef h", "\ndel LIMIT\n\n\ndef h").replace("return LIMIT", "return 1") + PY_TEST),
-            "an assignment removed beside the declaration it kept": (
-                "tests/a.test.js", "let LIMIT;\nLIMIT = 1;\n\n" + JS_H_LIMIT + JS_TEST, "let LIMIT;\n\n" + JS_H_ONE + JS_TEST),
-            "a global set by its name in brackets": (
-                "tests/a.test.js", 'globalThis["LIMIT"] = 1;\n\n' + JS_H_LIMIT + JS_TEST, JS_H_ONE + JS_TEST),
-            "a global defined by Object.defineProperty": (
-                "tests/a.test.js", 'Object.defineProperty(globalThis, "LIMIT", { value: 1 });\n\n' + JS_H_LIMIT + JS_TEST,
-                JS_H_ONE + JS_TEST),
-            "a removed global another test keeps as a local": (
-                "tests/a.test.js", "globalThis.LIMIT = 1;\n\n" + JS_H_LIMIT + JS_TEST,
-                JS_H_ONE + JS_TEST + "test('b', () => { const LIMIT = 2; expect(LIMIT).toBe(2); });\n"),
-            "one line edited in a statement over several lines": (
-                "tests/a.test.js",
-                'Object.defineProperty(globalThis, "LIMIT", {\n  value: 1,\n});\n\n' + JS_H_LIMIT + JS_TEST,
-                'Object.defineProperty(globalThis, "LIMIT", {\n  value: 2,\n});\n\n' + JS_H_ONE + JS_TEST),
-        }
-        if sys.version_info >= (3, 10):  # Python reads a match statement since 3.10
-            cases["a match capture removed"] = (
-                "tests/test_a.py",
-                "import unittest\n\nmatch 1:\n    case LIMIT:\n        pass\n\n\ndef h():\n    return LIMIT\n\n\n" + PY_TEST,
-                "import unittest\n\n\n" + H_ONE + PY_TEST)
-        for name, (f, before, after) in cases.items():
-            with self.subTest(name):
-                self.assertIs(testx._SUPPORT_TANGLED, support_text(f, before, after))
-        # a statement whose change names nothing a rebuilt helper reads lets it come back as its base text: a docstring,
-        # a comment, a describe titled like a name the helper reads, another call
-        before = '"""Tests of h."""\n' + LIMIT_IF.replace("import unittest\n", "import sys\nimport unittest\n\n"
-                                                         "sys.path.insert(0, 'a')\n") + PY_TEST
-        after = before.replace("Tests of h.", "Tests of h and LIMIT.").replace("'a'", "'b'") \
-            .replace("return LIMIT", "return LIMIT + 0")
-        self.assertIn("    return LIMIT\n", support_text("tests/test_a.py", before, after))
-        before = "// one limit\nglobalThis.LIMIT = 1;\n\n" + JS_H_LIMIT + JS_TEST
-        after = before.replace("// one limit", "// the LIMIT is one").replace("return LIMIT;", "return LIMIT + 0;") + \
-            "describe('LIMIT', () => {\n  test('c', () => { expect(h()).toBe(1); });\n});\n"
-        self.assertIn("  return LIMIT;\n", support_text("tests/a.test.js", before, after))
-
-    # a helper the change adds at module level that binds a name a rebuilt helper reads changes its scope the same way:
-    # the helper reads the new binding (an assignment after the one it read, a function named like a built-in it calls)
-    def test_an_added_helper_that_binds_what_a_rebuilt_helper_reads_cannot_be_proven(self):
-        cases = {
-            "an assignment after the if": (
-                "tests/test_a.py", LIMIT_IF + PY_TEST,
-                LIMIT_IF.replace("return LIMIT", "return 1") + "LIMIT = 5\n\n\n" + PY_TEST),
-            "a function named like a built-in": (
-                "tests/test_a.py", "import unittest\n\n\ndef h():\n    return len('a')\n\n\n" + PY_TEST,
-                "import unittest\n\n\ndef len(x):\n    return 7\n\n\ndef h():\n    return 1\n\n\n" + PY_TEST),
-            "a function named like a global": (
-                "tests/a.test.js", "function h() {\n  return parseInt('1');\n}\n\n" + JS_TEST,
-                "function parseInt(x) {\n  return 7;\n}\n\n" + JS_H_ONE + JS_TEST),
-        }
-        for name, (f, before, after) in cases.items():
-            with self.subTest(name):
-                self.assertIs(testx._SUPPORT_TANGLED, support_text(f, before, after))
-        # a helper the change adds that binds another name, or one that only moved, lets the rebuilt helper come back
-        before = LIMIT_IF + PY_TEST
-        self.assertIn("    return LIMIT\n", support_text("tests/test_a.py", before, before.replace(
-            "return LIMIT", "return LIMIT + 0") + "OTHER = 5\n\n\n"))
-
-
-FAKE_PROPERTY = ("class Fake:\n    def __init__(self):\n        self._x = 1\n\n    @property\n    def x(self):\n"
-                 "        return self._x\n\n    @x.setter\n    def x(self, v):\n        self._x = v\n\n\n")
-NODE_HEAD = 'import assert from "node:assert/strict";\nimport { test, describe, beforeEach } from "node:test";\n\n'
-HOOK_A = ('describe("a", () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\n'
-          '  test("a one", () => assert.equal(state.n, 1));\n});\n\n')
-HOOK_B = ('describe("b", () => {\n  beforeEach(() => {\n    state.n = 0;\n  });\n'
-          '  test("b one", () => assert.equal(typeof state.n, "number"));\n});\n')
-NODE_PACKAGE = json.dumps({"name": "root", "type": "module", "scripts": {"test": "node --test test/"}})
-
-
 class SameShapeGroupTests(unittest.TestCase):
-    # helpers of one class and name whose kinds keep their places on both sides (a getter beside its setter, a
-    # beforeEach in each of two describes) are matched place by place, so a fix in one comes back as its base text and
-    # is proven. A group whose shape changes, or whose helpers trade texts, still cannot be told apart
+    # helpers of one class and name in the same places on both sides (a getter beside its setter, a beforeEach in
+    # each of two describes) are matched place by place, so a fix in one comes back as its base text and is proven
     def test_a_property_getter_fix_beside_its_setter_proves(self):
         before = fake_module(FAKE_PROPERTY)
         after = before.replace("        return self._x\n", "        return self._x * 10\n") + \
@@ -648,8 +457,9 @@ class SameShapeGroupTests(unittest.TestCase):
         self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before,
                                                            nested.replace("state.n = 0;", "state.n = 5;")))
         # the same describes keep their hooks' places
-        self.assertIn("    state.n = 0;\n", support_text("test/util.test.mjs", nested,
-                                                       nested.replace("state.n = 0;", "state.n = 5;")))
+        text = support_text("test/util.test.mjs", nested, nested.replace("state.n = 0;", "state.n = 5;"))
+        self.assertIsInstance(text, str)
+        self.assertIn("    state.n = 0;\n", text)
 
 
 class NamesakeTestTests(unittest.TestCase):
@@ -664,69 +474,19 @@ class NamesakeTestTests(unittest.TestCase):
                       support_text("tests/a.test.js", before, after.replace("g() {\n  return 1;", "g() {\n  return 2 - 1;")))
 
 
-class DynamicMemberTests(unittest.TestCase):
-    # a rebuilt helper that now reaches code the change adds whose members are set from strings or expressions
-    # (setattr, type() with a dict, a class expression, Object.assign, Object.defineProperty, a statement outside the
-    # helpers) makes what it gives unknown: a test that reaches that helper, by its name or because the framework
-    # calls it, cannot be proven
-    def test_a_test_that_reaches_an_added_class_built_from_strings_or_expressions_cannot_be_proven(self):
-        old = "import unittest\n\n\nclass Old:\n    pass\n\n\ndef make():\n    return Old()\n\n\n"
-        extra = "\n    def test_extra(self):\n        self.assertEqual(make().extra(), 1)\n"
-        py = {
-            "a setattr in a decorator": "def with_extra(cls):\n    setattr(cls, 'extra', lambda self: 1)\n    return cls"
-                                        "\n\n\n@with_extra\nclass New:\n    pass\n\n\n",
-            "type() with a dict of members": "New = type('New', (), {'extra': lambda self: 1})\n\n\n",
-        }
-        for name, added in py.items():
-            with self.subTest(name):
-                after = old.replace("def make", added + "def make").replace("return Old()", "return New()") + PY_TEST + extra
-                r = testx._rebuild_helpers("tests/test_a.py", old + PY_TEST, after)
-                self.assertEqual({"T.test_extra"}, testx._reads_undone("tests/test_a.py", r))
-        old = "class Old {}\n\nfunction make() {\n  return new Old();\n}\n\n"
-        js = {
-            "a class expression set on globalThis": (
-                "globalThis.Neu = class {\n  extra() {\n    return 1;\n  }\n};\n\n", "globalThis.Neu"),
-            "a class passed to Object.assign": (
-                "const reg = {};\nObject.assign(reg, { Neu: class {\n  extra() {\n    return 1;\n  }\n} });\n\n", "reg.Neu"),
-            "a member defined by Object.defineProperty": (
-                "const Neu = class {};\nObject.defineProperty(Neu.prototype, 'extra', { value() { return 1; } });\n\n", "Neu"),
-            "a class expression held in a const": ("const Neu = class {\n  extra() {\n    return 1;\n  }\n};\n\n", "Neu"),
-        }
-        for name, (added, made) in js.items():
-            with self.subTest(name):
-                after = old.replace("function make", added + "function make").replace("new Old()", f"new {made}()") + \
-                    JS_TEST + "test('extra', () => { expect(make().extra()).toBe(1); });\n"
-                r = testx._rebuild_helpers("tests/a.test.js", old + JS_TEST, after)
-                self.assertEqual({"extra"}, testx._reads_undone("tests/a.test.js", r))
-        # a hook the framework calls reaches every test it runs for
-        before = "class Old {}\n\nconst state = {};\n\nbeforeEach(() => {\n  state.obj = new Old();\n});\n\n" + JS_TEST
-        after = before.replace("const state", "globalThis.Neu = class {\n  extra() {\n    return 1;\n  }\n};\n\n"
-                                              "const state").replace("new Old()", "new globalThis.Neu()") + \
-            "test('extra', () => { expect(state.obj.extra()).toBe(1); });\n"
-        r = testx._rebuild_helpers("tests/a.test.js", before, after)
-        self.assertEqual({"a", "extra"}, testx._reads_undone("tests/a.test.js", r))
-        # an added helper whose members are all declared still lets a test that reads none of them prove
-        before = "import unittest\n\n\ndef h(x):\n    return str(x)\n\n\n" + PY_TEST
-        after = before.replace("def h", "def quote(x):\n    return repr(x)\n\n\ndef h").replace("str(x)", "quote(x)") + \
-            "\n    def test_q(self):\n        self.assertEqual(h('a'), \"'a'\")\n"
-        self.assertEqual(set(), testx._reads_undone("tests/test_a.py", testx._rebuild_helpers("tests/test_a.py", before,
-                                                                                             after)))
-
-
 class JsReaderCostTests(unittest.TestCase):
     # the JS readers run on every changed test module, so blanks after `function`, `function*`, a call, a parameter
-    # list, an assignment or a quote must cost them linear time. A child process reads 40,000 blanks after each of those, about 1 s in all here,
-    # and is stopped after 20 s: a pattern that backtracks over the blanks reads one such text in 30 s or more (a cubic
-    # one in hours), so the bound tells them apart on a loaded machine too
+    # list, an assignment or a quote must cost them linear time. A child process reads 40,000 blanks after each of
+    # those, about 1 s in all here, and is stopped after 20 s: a pattern that backtracks over the blanks reads one
+    # such text in 30 s or more (a cubic one in hours), so the bound tells them apart on a loaded machine too
     def test_the_js_readers_read_a_long_blank_run_in_linear_time(self):
         code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
                 "for start in ('function', 'function*', 'function f', 'export function', 'x.function', 'catch', 'f()',"
                 " 'f(): T', 'x =', 'x[0]', 'describe', 'describe(', \"'\"):\n"
                 "    for blank in (' ', '\\t'):\n"
                 "        text = start + blank * 40000 + ';\\n'\n"
-                "        testx._js_local(text), testx._js_names(text), testx._js_gives(text)\n"
-                "        testx._js_support(text), testx._js_dynamic(text), testx._js_describes(text)\n"
-                "        testx._scope('a.test.js', text, testx._js_entries(text))\n"
+                "        testx._js_support(text), testx._js_entries(text)\n"
+                "        assert testx._rebuild_helpers('a.test.js', text, text + 'x;\\n')['first']\n"
                 "print('read')\n")
         lib = str(Path(__file__).resolve().parents[1] / "lib")
         try:
@@ -734,6 +494,27 @@ class JsReaderCostTests(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("the JS readers took more than 20 s on 40,000 blanks: a pattern backtracks over them")
         self.assertEqual("read", p.stdout.strip(), p.stderr)
+
+    # a hook fix in a module of 8,000 nested describes, or of 2,000 describes one after another, each with a hook and
+    # a test, is rebuilt in about a second here; a reader that rescans the describes around each entry takes 20 s or
+    # more on the nested one
+    def test_a_hook_fix_among_thousands_of_describes_rebuilds_in_linear_time(self):
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+                "nested = \"describe('a', () => {\\n\" * 8000 + \"beforeEach(() => {\\n  state.n = 1;\\n});\\n\" + "
+                "\"test('t', () => { expect(state.n).toBe(1); });\\n\" + '});\\n' * 8000\n"
+                "flat = ''.join(f\"describe('case {i}', () => {{\\n  beforeEach(() => {{\\n    state.n = {i};\\n  }});\\n\""
+                " f\"  test('one {i}', () => {{\\n    expect(state.n).toBe({i});\\n  }});\\n}});\\n\\n\" for i in range(2000))\n"
+                "for text, fix in ((nested, ('state.n = 1;', 'state.n = 2;')), (flat, ('state.n = 3;', 'state.n = -7;'))):\n"
+                "    assert testx._rebuild_helpers('a.test.js', text, text.replace(*fix))['text'] == text\n"
+                "print('rebuilt')\n")
+        lib = str(Path(__file__).resolve().parents[1] / "lib")
+        try:
+            p = subprocess.run([sys.executable, "-I", "-c", code, lib], capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            self.fail("rebuilding a hook fix among thousands of describes took more than 20 s")
+        self.assertEqual("rebuilt", p.stdout.strip(), p.stderr)
+
+
 
 
 PY_SHARED = """

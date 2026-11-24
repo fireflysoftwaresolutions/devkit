@@ -3147,10 +3147,10 @@ class CalcTests(unittest.TestCase):
             self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in data["tests"]],
                              [("test_calc.CalcTests.test_sandbox_drops_x", "failed", "proves the change")])
 
-    # a helper of a test class that gains a parameter and a body line that reads it comes back whole without the
-    # change: restored by halves, its old signature ran the new body, and a test the change does not touch crashed on
-    # a NameError that prove took for proof. A test that calls a helper whose parameters the change changed cannot be
-    # proven: without the change, a call with the new parameters fails on the call, whatever the change does.
+    # a helper of a test class that gains a parameter changes the module outside its helpers' bodies, so the module
+    # keeps its change: restored by halves, its old signature ran the new body, and a test the change does not touch
+    # crashed on a NameError that prove took for proof. Run as it is now, the test the change does not touch passes
+    # and cannot be proven, named by that edit, and the new test proves the production change by its failure.
     def test_a_helper_comes_back_whole_so_a_test_the_change_does_not_touch_runs_cleanly(self):
         base = dict(PROVE_BASE, **{"tests/test_calc.py": with_tests().replace(
             "    def test_add(self):\n        self.assertEqual(calc.add(1, 2), 3)\n",
@@ -3167,8 +3167,9 @@ class CalcTests(unittest.TestCase):
             rc, out, err = dev(r, "prove", "--json", "--runs", "1")
             self.assertNotIn("NameError", out + err)
             self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]],
-                             [("test_calc.CalcTests.test_add", "passed", testx._HELPERS_TANGLED),
-                              ("test_calc.CalcTests.test_mul", "failed", testx._HELPERS_TANGLED)], out + err)
+                             [("test_calc.CalcTests.test_add", "passed", "cannot be proven: its module keeps a change "
+                               "outside its helpers' bodies: an edited helper `CalcTests.pair` (line 10)"),
+                              ("test_calc.CalcTests.test_mul", "failed", "proves the change")], out + err)
 
     # a test helper the change adds is test code, not the change under test: it stays in the copy, so the new test
     # runs against the old production code. Removed, every test that imports it failed on the import and was
