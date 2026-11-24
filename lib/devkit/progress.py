@@ -37,7 +37,6 @@ import stat
 import statistics
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -911,8 +910,8 @@ def open_calls(sid: str, now: float | None = None, closed_too: bool = False, bud
     with the entries of closed calls whose record could not be written (call_closed), kept as later calls for the text
     pin until SHELL_KEEP after they closed, then removed without an audit (their call ended, and its drop was audited).
     The folder is opened once, never through a link, and every entry is read and removed through it (dir_fd).
-    `budget` ([count], a sweep's): the names listed and entries read take one each, and the listing stops when it is
-    spent (the calls found by then)."""
+    `budget` ([count], a sweep's): it counts the names listed, each name taking one (dot-files and names that are no
+    entry too; reading an entry takes none), and the listing stops when it is spent (the calls found by then)."""
     now = now or time.time()
     try:  # the session's folder, never through a link: what a link points to is never read or removed
         fd = os.open(CALLS / _safe_name(sid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
