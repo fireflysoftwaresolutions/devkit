@@ -496,6 +496,32 @@ class FailureKindTests(unittest.TestCase):
         self.assertEqual(["assertion", "TypeError", "json.decoder.JSONDecodeError", "assertion", "assertion"],
                          [c.get("failure") for c in testx.parse_junit(pytest, top, top, "pytest")])
 
+    # Playwright names a failure by its type: an expect matcher (expect.toBe) or an AssertionError is an assertion, any
+    # other type names what was raised. A release that types no failure (1.55 writes FAILURE) has the error in its
+    # text
+    def test_playwright_says_by_a_failure_s_type_whether_it_is_an_assertion(self):
+        top = "/w"
+
+        def case(name, tag, kind, message, text="x"):
+            return (f'<testcase name="{name}" classname="a.spec.ts"><{tag} message="{message}" type="{kind}">'
+                    f"<![CDATA[{text}]]></{tag}></testcase>")
+        report = ('<testsuites><testsuite name="a.spec.ts">' +
+                  case("value", "failure", "expect.toBe", "expect(received).toBe(expected) // Object.is equality") +
+                  case("not value", "failure", "expect.not.toBe", "expect(received).not.toBe(expected)") +
+                  case("get", "error", "TypeError", "make(...).get is not a function") +
+                  case("node", "error", "AssertionError", "Expected values to be strictly equal:") +
+                  case("old value", "failure", "FAILURE", "a.spec.ts:7:5 old value",
+                       "  1) [chromium] › a.spec.ts:7:5 › old value ───\n\n    Error: expect(received).toBe(expected)"
+                       "\n\n    Expected: 1\n    Received: 0\n") +
+                  case("old get", "failure", "FAILURE", "a.spec.ts:9:5 old get",
+                       "  2) [chromium] › a.spec.ts:9:5 › old get ───\n\n    TypeError: make(...).get is not a "
+                       "function\n\n       at /w/a.spec.ts:10:20\n") +
+                  "</testsuite></testsuites>")
+        self.assertEqual({"a.spec.ts::value": "assertion", "a.spec.ts::not value": "assertion",
+                          "a.spec.ts::get": "TypeError", "a.spec.ts::node": "assertion",
+                          "a.spec.ts::old value": "assertion", "a.spec.ts::old get": "TypeError"},
+                         {c["id"]: c.get("failure") for c in testx.parse_playwright_junit(report, top, top, {})})
+
 
 class RebuildVerdictTests(unittest.TestCase):
     # under a rebuild, a failure without the change proves only when it is an assertion failure: one that raises

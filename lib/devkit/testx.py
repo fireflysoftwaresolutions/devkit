@@ -2080,11 +2080,20 @@ def parse_playwright_junit(text, top, base, runner) -> list:
         status = "failed" if bad is not None else "skipped" if tc.find("skipped") is not None else "passed"
         body = (bad.text or "") if bad is not None else ""
         hits = re.findall(re.escape(fabs) + r":(\d+):\d+", body)
-        msg = _first_line(bad.get("message") or body) if bad is not None else ""
+        kind = (bad.get("type") or "") if bad is not None else ""
+        # a release that types no failure (1.55 writes FAILURE) gives the test's place as its message: the error is in
+        # the failure's text
+        said = next((x.strip() for x in body.splitlines() if _ASSERTION.match(x.strip()) or _RAISED.match(x.strip())),
+                    "") if kind in ("", "FAILURE") else ""
+        msg = _first_line(said or bad.get("message") or body) if bad is not None else ""
         out.append(_case(f"{file}::{name}", file, int(hits[-1]) if hits else None, status, msg,
                          tc.get("time") or 0, name))
         if bad is not None:
-            out[-1]["failure"] = _failure_of(msg)
+            # a release that types its failures (1.64 does) names an expect matcher (expect.toBe) or an AssertionError,
+            # an assertion, or what the test raised
+            out[-1]["failure"] = ("assertion" if re.match(r"expect\.|(?:[\w.]+\.)?AssertionError$", kind) else
+                                  kind if kind not in ("", "FAILURE", "Error") else
+                                  _failure_of(msg, error=bad.tag == "error"))
     return out
 
 
