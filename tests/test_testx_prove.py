@@ -151,15 +151,6 @@ class JsHelperTests(unittest.TestCase):
         after = JS_HELPER.replace("return x * 2;", "return x + x;")
         self.assertEqual(["first", "third"], changed(JS_HELPER, after, "src/double.test.js"))
 
-    def test_the_helper_text_is_restored_for_the_run_without_the_change(self):
-        with Env() as e:
-            r = e.repo({"src/double.test.js": JS_HELPER.lstrip("\n")})
-            edit(r, {"src/double.test.js": JS_HELPER.replace("return x * 2;", "return x + x;")
-                     .replace("expect(1).toBe(1);", "expect(2).toBe(2);")})
-            text = testx._support_text(str(r), "main", "src/double.test.js")
-        self.assertIn("return x * 2;", text)
-        self.assertIn("expect(2).toBe(2);", text)  # a test keeps its change
-
 
 class HelperClassTests(unittest.TestCase):
     # the members of a class without tests (a fake) are read at the class body's own depth
@@ -240,6 +231,10 @@ HOOK_A = ('describe("a", () => {\n  beforeEach(() => {\n    state.n = 1;\n  });\
 HOOK_B = ('describe("b", () => {\n  beforeEach(() => {\n    state.n = 0;\n  });\n'
           '  test("b one", () => assert.equal(typeof state.n, "number"));\n});\n')
 NODE_PACKAGE = json.dumps({"name": "root", "type": "module", "scripts": {"test": "node --test test/"}})
+# devkit's cause for a JavaScript or TypeScript test module that changed outside its tests, and the verdict of a test
+# of it that passes without the change
+JS_NOT_REBUILT = "devkit rebuilds only Python test modules"
+JS_KEPT = "cannot be proven: its module keeps its change: " + JS_NOT_REBUILT
 
 
 def rebuilt(f, before, after):
@@ -249,11 +244,12 @@ def rebuilt(f, before, after):
 
 
 class RebuildRuleTests(unittest.TestCase):
-    # a test module rebuilds only when its text outside its tests differs from the base only inside the bodies of
-    # helpers both sides hold in the same places, and the rebuilt module is then the base text with the tests now
-    # spliced in: a helper fix and a hook fix in a describe come back as their base text, and so does every blank line
-    # between statements. A test brings the comment and blank lines right above it
-    def test_a_fix_inside_helper_bodies_rebuilds_the_base_module_with_the_tests_now(self):
+    # a Python test module rebuilds only when its text outside its tests differs from the base only inside the bodies
+    # of helpers both sides hold in the same places, and the rebuilt module is then the base text with the tests now
+    # spliced in: a helper fix comes back as its base text, and so does every blank line between statements. A test
+    # brings the comment and blank lines right above it. devkit rebuilds only Python test modules: a JavaScript one
+    # with a hook fix in a describe keeps its change
+    def test_a_fix_inside_helper_bodies_rebuilds_a_python_module_and_keeps_a_javascript_one(self):
         before = '"""Tests of h."""\n' + PY_H + PY_TEST
         new_test = "\n    # the limit, which the helper now reads\n    def test_b(self):\n        self.assertEqual(h(), 2)\n"
         after = before.replace("    return 1\n", "    n = 2\n    return n\n").replace(
@@ -264,12 +260,11 @@ class RebuildRuleTests(unittest.TestCase):
         new_test = "  test('b', () => { expect(h()).toBe(2); });\n"
         after = before.replace("return 1;", "return 2;").replace("state.n = 1;", "state.n = 2;").replace(
             "toBe(state.n); });\n", "toBe(state.n); });\n" + new_test)
-        self.assertEqual({"text": before.replace("toBe(state.n); });\n", "toBe(state.n); });\n" + new_test),
-                          "first": ""}, rebuilt("tests/a.test.js", before, after))
+        self.assertEqual({"text": None, "first": JS_NOT_REBUILT}, rebuilt("tests/a.test.js", before, after))
 
-    # helpers of one name are matched by their places, so a fix in one of them, or bodies that trade places, come
-    # back place by place: a property getter beside its setter, a singledispatch group left as it was beside a fixed
-    # helper, two beforeEach hooks whose bodies trade places
+    # helpers of one name are matched by their places, so a fix in one of them comes back place by place: a property
+    # getter beside its setter, a singledispatch group left as it was beside a fixed helper. Two beforeEach hooks of a
+    # JavaScript module whose bodies trade places keep the module's change
     def test_helpers_of_one_name_in_the_same_places_come_back_place_by_place(self):
         new_test = "\n    def test_x(self):\n        self.assertEqual(Fake().x, 10)\n"
         before = "import unittest\n\n\n" + FAKE_PROPERTY + PY_TEST
@@ -282,12 +277,12 @@ class RebuildRuleTests(unittest.TestCase):
         new_test = '  test("b two", () => assert.equal(state.n, 1));\n'
         after = before.replace("state.n = 1;", "state.n = @;").replace("state.n = 0;", "state.n = 1;").replace(
             "state.n = @;", "state.n = 0;").replace('"number"));\n', '"number"));\n' + new_test)
-        self.assertEqual({"text": before.replace('"number"));\n', '"number"));\n' + new_test), "first": ""},
-                         rebuilt("test/util.test.mjs", before, after))
+        self.assertEqual({"text": None, "first": JS_NOT_REBUILT}, rebuilt("test/util.test.mjs", before, after))
 
     # nothing outside the tests changed but blank lines between statements (a test added before helpers it is named
     # like, with a comment of its own): the module runs as it is, with nothing to rebuild. A comment or a docstring
-    # inside a helper's body is part of that body: an edited one comes back as its base text
+    # inside a Python helper's body is part of that body: an edited one comes back as its base text. One inside a
+    # JavaScript helper's body is a change outside the tests, which keeps the module
     def test_a_module_whose_code_outside_its_tests_reads_as_the_base_needs_no_rebuild(self):
         before = JS_H + "function g() {\n  return 1;\n}\n\n" + JS_TEST
         self.assertIsNone(rebuilt("tests/a.test.js", before,
@@ -296,7 +291,7 @@ class RebuildRuleTests(unittest.TestCase):
         self.assertIsNone(rebuilt("tests/test_a.py", before, before.replace("def h", "\n\ndef h") +
                                   "\n    # a second one\n    def test_b(self):\n        self.assertEqual(h(), 1)\n"))
         before = JS_H.replace("return 1;", "return 1; // one") + JS_TEST
-        self.assertEqual({"text": before, "first": ""},
+        self.assertEqual({"text": None, "first": JS_NOT_REBUILT},
                          rebuilt("tests/a.test.js", before, before.replace("// one", "// the only one")))
         before = PY_H.replace("return 1", '"""One."""\n    return 1  # one') + PY_TEST
         self.assertEqual({"text": before, "first": ""},
@@ -305,7 +300,9 @@ class RebuildRuleTests(unittest.TestCase):
 
     # any other change to the code outside the tests keeps the module as changed, and the result names the first
     # difference: an added, removed or edited helper, import, class or statement, a helper's decorators or parameters,
-    # a statement in a test class body, the describe structure and its titles, helpers of one name whose places shift
+    # a statement in a test class body. A JavaScript module keeps such a change too (a helper, an import, a statement,
+    # the describe structure and its titles, helpers of one name whose places shift), named by devkit's cause: it
+    # rebuilds only Python test modules
     def test_any_other_change_outside_the_tests_keeps_the_module_and_names_the_first_difference(self):
         fake = "import unittest\n\n\nclass Fake:\n    def get(self):\n        return 1\n\n\n"
         fake_test = "class T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(Fake().get(), 1)\n"
@@ -363,25 +360,25 @@ class RebuildRuleTests(unittest.TestCase):
                 "an added helper `_` (line 10)"),
             "an added javascript helper": ("tests/a.test.js", JS_H + JS_TEST,
                                            "function build() {\n  return 2;\n}\n\n" + JS_H + JS_TEST,
-                                           "an added helper `build` (line 1)"),
+                                           JS_NOT_REBUILT),
             "an added const that holds an object": (
                 "tests/a.test.js", JS_H + JS_TEST, "const proto = { extra() { return 1; } };\n\n" + JS_H + JS_TEST,
-                "an added statement `const proto = { extra() { return 1; } };` (line 1)"),
+                JS_NOT_REBUILT),
             "an added javascript import": (
                 "tests/a.test.js", JS_H + JS_TEST, 'import { other as parseInt } from "../src/util.mjs";\n\n' + JS_H +
-                JS_TEST, 'an added import `import { other as parseInt } from "../src/util.mjs";` (line 1)'),
+                JS_TEST, JS_NOT_REBUILT),
             "a removed global": ("tests/a.test.js",
                                  "globalThis.LIMIT = 1;\n\n" + JS_H.replace("return 1", "return LIMIT") + JS_TEST,
-                                 JS_H + JS_TEST, "a removed statement `globalThis.LIMIT = 1;` (line 1 at the base)"),
+                                 JS_H + JS_TEST, JS_NOT_REBUILT),
             "a describe title edited": ("tests/a.test.js", hooked,
                                         hooked.replace("'one'", "'uno'").replace("state.n = 1;", "state.n = 2;"),
-                                        "an edited statement `describe('uno', () => {` (line 3)"),
+                                        JS_NOT_REBUILT),
             "describes that trade places": ("test/util.test.mjs", traded,
                                             NODE_HEAD + "const state = {};\n\n" + HOOK_B + "\n" + HOOK_A,
-                                            'an edited statement `describe("b", () => {` (line 6)'),
+                                            JS_NOT_REBUILT),
             "a static block removed from a helper class": (
                 "tests/a.test.js", box + JS_TEST, box.replace("  static {\n    globalThis.LIMIT = 1;\n  }\n\n", "")
-                .replace("return LIMIT;", "return 1;") + JS_TEST, "a removed statement `static {` (line 2 at the base)"),
+                .replace("return LIMIT;", "return 1;") + JS_TEST, JS_NOT_REBUILT),
         }
         for name, (f, before, after, first) in cases.items():
             with self.subTest(name):
@@ -393,8 +390,9 @@ ROOT_JS = "function isRoot(p) {\n  return /^\\/*$/.test(p);\n}\n\n"
 
 class RebuildByteTests(unittest.TestCase):
     # a rebuild compares the base and the module now byte for byte outside the tests and the helpers' bodies, blank
-    # lines between statements aside: a docstring, a coding declaration, a comment, or a blank line inside a template
-    # literal keeps the module as it is now, even beside a helper fix, and names the first difference
+    # lines between statements aside: a docstring, a coding declaration, or a comment keeps the module as it is now,
+    # even beside a helper fix, and names the first difference. A JavaScript module whose text outside its tests
+    # differs (a blank line inside a template literal too) keeps it, named by devkit's cause
     def test_any_other_byte_outside_the_tests_and_the_helper_bodies_keeps_the_module(self):
         fix = ("    return 1\n", "    return 2 - 1\n")
         box = PY_H + "class Box:\n    '''one'''\n\n    def tag(self):\n        return 'one'\n\n\n" + PY_TEST
@@ -417,17 +415,17 @@ class RebuildByteTests(unittest.TestCase):
                                                  "an edited comment `# two` (line 4)"),
             "a blank line inside a template literal": (
                 "tests/a.test.js", template, template.replace("`a\n\nb`", "`a\nb`").replace("return 1;", "return 2;"),
-                "a removed blank line (line 2 at the base)"),
+                JS_NOT_REBUILT),
             "trailing blanks inside a template literal": (
                 "tests/a.test.js", template.replace("`a\n\nb`", "`a  \nb`"),
                 template.replace("`a\n\nb`", "`a\nb`").replace("return 1;", "return 2;"),
-                "an edited statement `const EXPECTED = `a` (line 1)"),
+                JS_NOT_REBUILT),
             "a global renamed after a regular expression that follows return": (
                 "tests/a.test.js", ROOT_JS + "globalThis.MAX = 5; /* the limit */\n\n" +
                 JS_H.replace("return 1;", "return globalThis.MAX;") + JS_TEST,
                 ROOT_JS + "globalThis.LIMIT = 5; /* the limit */\n\n" +
                 JS_H.replace("return 1;", "return globalThis.LIMIT;") + JS_TEST,
-                "an edited statement `globalThis.LIMIT = 5;` (line 5)"),
+                JS_NOT_REBUILT),
         }
         for name, (f, before, after, first) in cases.items():
             with self.subTest(name):
@@ -445,17 +443,13 @@ class RebuildByteTests(unittest.TestCase):
 LIMIT_FAKE = ("class Fake:\n    def get(self):\n        x = 1\n        return self.limit + x - 1\n    limit = %d\n\n\n"
               "class LimitTests(unittest.TestCase):\n    def test_limit(self):\n"
               "        self.assertEqual(Fake().get(), %d)\n")
-# a statement between a helper and a comment that a line break ends for the engine (`{sep}`)
-UNSEEN_JS = ('import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n'
-             "function h() {\n  return 1; // a{sep}}\nglobalThis.LIMIT = {v};\n// b{sep}{\n}\n\n"
-             'test("t", () => {\n  assert.equal(globalThis.LIMIT, {v});\n});\n')
 
 
 class UnseenLineBreakTests(unittest.TestCase):
-    # Python ends a line at a carriage return without a new line, and a // comment of JavaScript ends there too and at
-    # a line separator or a paragraph separator; the rebuild's readers end lines at new lines only. A module that holds
-    # such a line break keeps its change, named by it: here a comment that holds one moves a class attribute edit into
-    # the method above it for the readers, and a rebuild would run the base attribute against the test now
+    # Python ends a line at a carriage return without a new line; the rebuild's readers end lines at new lines only. A
+    # module that holds such a line break keeps its change, named by it: here a comment that holds one moves a class
+    # attribute edit into the method above it for the readers, and a rebuild would run the base attribute against the
+    # test now
     def test_a_python_carriage_return_without_a_new_line_keeps_the_module(self):
         before = with_tests("\n\n# a\r# b\n" + LIMIT_FAKE % (2, 2))
         after = with_tests("\n\n# a\r# b\n" + LIMIT_FAKE % (3, 3))
@@ -464,135 +458,81 @@ class UnseenLineBreakTests(unittest.TestCase):
                            "cannot be proven: its module keeps a change outside its helpers' bodies: a carriage return "
                            "without a new line, a line break the rebuild does not read (line 14)")], rows, text)
 
-    def test_a_javascript_line_break_that_ends_a_comment_keeps_the_module(self):
-        def js(sep, v):
-            return UNSEEN_JS.replace("{sep}", sep).replace("{v}", v)
-        cases = {  # name: (base, now, the first difference)
-            "a line separator": (js("\u2028", "2"), js("\u2028", "3"),
-                                 "a line separator U+2028, a line break the rebuild does not read (line 5)"),
-            "a paragraph separator": (js("\u2029", "2"), js("\u2029", "3"),
-                                      "a paragraph separator U+2029, a line break the rebuild does not read (line 5)"),
-            "a carriage return": (js("\r", "2"), js("\r", "3"), "a carriage return without a new line, a line break "
-                                                                "the rebuild does not read (line 5)"),
-            "a line separator at the base only": (
-                js("\u2028", "2"), js("\n", "3"),
-                "a line separator U+2028, a line break the rebuild does not read (line 5 at the base)"),
-        }
-        for name, (before, after, first) in cases.items():
-            with self.subTest(name):
-                self.assertEqual({"text": None, "first": first}, rebuilt("test/util.test.mjs", before, after))
-
 
 JS_IMPORTS = 'import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n'
-JS_LIMIT_TEST = 'test("t", () => {\n  assert.equal(globalThis.LIMIT, %s);\n});\n'
 JS_H_TEST = 'test("t", () => {\n  assert.equal(h(), 1);\n});\n'
+UTIL_HEAD = NODE_HEAD + 'import * as util from "../src/util.mjs";\n\n'
+UTIL_BEFORE = "export const value = () => 1;\n"
+UTIL_AFTER = UTIL_BEFORE + "export const other = () => 3;\n"
+# a template literal that holds code, between two lines with a backtick the reader once took for one that opens a
+# template literal (in a comment after a division by `of`, in a regular expression after a closing parenthesis): the
+# reader read the code inside the template literal as a helper of the module
+TEMPLATE_FIXTURE = 'const SRC = `\nfunction fixture() {\n  return "%s";\n}\n`;\n'
+TEMPLATE_AROUND = {
+    "a backtick in a comment after a division by of": ("const of = 4;\nlet r = of / 2; // a ` mark\n",
+                                                       "let r2 = of / 2; // `\n\n"),
+    "a backtick in a regular expression after a closing parenthesis": ("const s = 'x';\nif (s) /`/.test(s);\n",
+                                                                       "if (s) /`/.test(s);\n\n"),
+}
 
 
-def node_strips_types():
-    """Whether the node on PATH can strip TypeScript's types (module.stripTypeScriptTypes, Node 22.13 and later)."""
-    node = shutil.which("node")
-    return bool(node) and subprocess.run(
-        [node, "-e", "process.exit(typeof require('node:module').stripTypeScriptTypes === 'function' ? 0 : 1)"],
-        capture_output=True).returncode == 0
+def node_prove(before, after, *args):
+    """(exit, output, errors) of prove after test/util.test.mjs goes from `before` to `after`, beside a production
+    change that adds util.other."""
+    with Env() as e:
+        r = e.repo({"package.json": NODE_PACKAGE, "src/util.mjs": UTIL_BEFORE, "test/util.test.mjs": before})
+        edit(r, {"src/util.mjs": UTIL_AFTER, "test/util.test.mjs": after})
+        return dev(r, "prove", "--runs", "1", *args)
 
 
-@unittest.skipUnless(shutil.which("node"), "node is not installed, so Node cannot read the bodies here")
-class JsNodeReadTests(unittest.TestCase):
-    # after the reader cuts a JS/TS module, Node reads each helper body and each test it cut, all of a module in one
-    # run: a body Node does not read as one whole function body keeps the module, named by it. A misread boundary
-    # leaves a brace or a token open in Node's view, so this holds for misreads nobody has found: here two the reader
-    # still makes, with the code after the helper indented as if inside it. A body only an async function, a generator
-    # or a class method reads (await, yield, super, a private name, import.meta) is one function body too: its fix
-    # rebuilds
-    def test_a_fix_rebuilds_only_when_node_reads_each_body_as_one_function_body(self):
-        helpers = {
-            "await": "async function h() {\n  return await %s;\n}\n\n",
-            "yield": "function* h() {\n  yield %s;\n}\n\n",
-            "super and a private name": "class B extends Object {\n  #n = 1;\n\n  h() {\n"
-                                        "    return super.toString() && this.#n * %s;\n  }\n}\n\n",
-            "import.meta": "function h() {\n  return import.meta.url && %s;\n}\n\n",
-        }
-        for name, mid in helpers.items():
+class JsModuleKeptTests(unittest.TestCase):
+    # devkit rebuilds only Python test modules: a JavaScript or TypeScript test module that changed outside its tests,
+    # a helper's body too, keeps its change, so the run without the change runs it as it is now. One whose only change
+    # is its tests (with the comment and blank lines right above each) has nothing to rebuild
+    def test_a_javascript_or_typescript_module_that_changed_outside_its_tests_keeps_its_change(self):
+        before = JS_IMPORTS + JS_H + JS_H_TEST
+        new_test = '\n// the second one\ntest("u", () => {\n  assert.equal(h(), 1);\n});\n'
+        for ext in ("js", "cjs", "mjs", "ts", "jsx", "tsx", "mts", "cts"):
+            with self.subTest(ext):
+                f = f"test/util.test.{ext}"
+                self.assertEqual({"text": None, "first": JS_NOT_REBUILT},
+                                 rebuilt(f, before, before.replace("return 1;", "return 2 - 1;") + new_test))
+                self.assertIsNone(rebuilt(f, before, before + new_test))
+
+    # a test of such a module that passes without the change cannot be proven, named by devkit's cause, whatever the
+    # reader takes for a helper: here the code inside a template literal fixture, which a misread backtick once put
+    # outside it, so the run without the change ran the module with the fixture's base text
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_a_test_of_a_kept_javascript_module_that_passes_without_the_change_cannot_be_proven(self):
+        old = 'test("old", () => {\n  assert.equal(util.value(), 1);\n});\n'
+        new = 'test("src", () => {\n  assert.match(SRC, /new/);\n});\n'
+        for name, (head, tail) in TEMPLATE_AROUND.items():
             with self.subTest(name):
-                before = JS_IMPORTS + mid % "1" + JS_H_TEST
-                self.assertEqual({"text": before, "first": ""},
-                                 rebuilt("test/util.test.mjs", before, JS_IMPORTS + mid % "2 - 1" + JS_H_TEST))
-        cases = {  # name: (the code between the imports and the test, the line of the helper)
-            "a division after a variable named of": (
-                "const of = 4;\nfunction h() {\n  return of / 2; // {\n  }\n  globalThis.LIMIT = %s;\n"
-                "  let r = of / 2; // }\n\n", 5),
-            "a regular expression after a closing parenthesis": (
-                "function h(s) {\n  if (s) /'/.test(s); }\n  globalThis.LIMIT = %s;\n"
-                "  if (globalThis.LIMIT) /}/.test('x');\n\n", 4),
-            "a division after a variable named of, the code after the helper not indented": (
-                "const of = 4;\nfunction h() {\n  return of / 2; // {\n}\nglobalThis.LIMIT = %s;\nlet r = of / 2; // }"
-                "\n\n", 5),
-            "a regular expression after a closing parenthesis, the code after the helper not indented": (
-                "function h(s) {\n  if (s) /'/.test(s); }\nglobalThis.LIMIT = %s;\nif (globalThis.LIMIT) /}/.test('x');"
-                "\n\n", 4),
-        }
-        for name, (mid, line) in cases.items():
-            with self.subTest(name):
-                got = rebuilt("test/util.test.mjs", JS_IMPORTS + mid % "2" + JS_LIMIT_TEST % "2",
-                              JS_IMPORTS + mid % "3" + JS_LIMIT_TEST % "3")
-                self.assertIsNone(got["text"])
-                self.assertRegex(got["first"], rf"^a helper's body that Node does not read as one function body "
-                                               rf"\(line {line}\): \S")
+                before = UTIL_HEAD + head + TEMPLATE_FIXTURE % "old" + tail + old
+                after = UTIL_HEAD + head + TEMPLATE_FIXTURE % "new" + tail + old + new
+                rc, out, err = node_prove(before, after, "--json")
+                self.assertEqual({"test/util.test.mjs::src": JS_KEPT},
+                                 {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
+                self.assertEqual(2, rc, out + err)
+        rc, out, err = node_prove(before, after)
+        self.assertRegex(out, r"devkit rebuilds only Python test modules[^\n]*:\n\s+test/util.test.mjs\s+"
+                              r"test/util.test.mjs::src\n")
 
-    # TypeScript's types are stripped (by Node) before Node reads a body; a body of a .jsx or .tsx module that may hold
-    # JSX (a <), which Node does not read, keeps the module
-    def test_a_typescript_body_is_read_without_its_types_and_one_that_may_hold_jsx_keeps_the_module(self):
-        if not node_strips_types():
-            self.skipTest("this node cannot strip TypeScript's types (Node 22.13 and later)")
-        typed = "function h(x: number = 1): number {\n  return (x as number) * %s;\n}\n\n"
-        before = JS_IMPORTS + typed % "1" + JS_H_TEST
-        self.assertEqual({"text": before, "first": ""},
-                         rebuilt("test/util.test.ts", before, JS_IMPORTS + typed % "(2 - 1)" + JS_H_TEST))
-        jsx = "function h() {\n  return <p>Don't</p> && %s;\n}\n\n"
-        for f in ("test/util.test.jsx", "test/util.test.tsx"):
-            with self.subTest(f):
-                self.assertEqual({"text": None, "first": "a helper's body that Node does not read as one function body "
-                                                         "(line 4): it may hold JSX, which Node does not read"},
-                                 rebuilt(f, JS_IMPORTS + jsx % "1" + JS_H_TEST, JS_IMPORTS + jsx % "2 - 1" + JS_H_TEST))
-
-    # with no node to read the bodies, nothing vouches for the reader's cut: the module keeps its change
-    def test_without_node_the_module_keeps_its_change(self):
-        mid = "function h() {\n  return %s;\n}\n\n"
-        with mock.patch.dict(os.environ, {"PATH": ""}):
-            got = rebuilt("test/util.test.mjs", JS_IMPORTS + mid % "1" + JS_H_TEST,
-                          JS_IMPORTS + mid % "2 - 1" + JS_H_TEST)
-        self.assertEqual({"text": None, "first": "no Node to read the bodies the rebuild cuts (node is not on PATH)"},
-                         got)
-
-
-@unittest.skipUnless(shutil.which("node"), "node is not installed, so Node cannot read the bodies here")
-class JsReaderFixTests(unittest.TestCase):
-    # three constructs the JS reader misread, so their modules kept a helper fix: a postfix ++ or -- before a division,
-    # a brace in a template literal's expression (an object literal, an inner template), and an HTML-like comment of a
-    # .cjs module (<!-- anywhere, --> at the start of a line). Their fix rebuilds now. A .js module may be a script or a
-    # module, where such a comment is code: Node reads its bodies both ways, so a body that holds one keeps the module
-    def test_a_postfix_operator_a_template_brace_and_an_html_like_comment_are_read_as_the_engine_does(self):
-        cases = {  # name: (file, the code between the imports and the test)
-            "a postfix ++ before a division": (
-                "test/x.test.mjs", "let i = 4;\nfunction h() {\n  const a = i++ / 2; // {\n  return %s;\n}\n\n"),
-            "a postfix -- before a division": (
-                "test/x.test.mjs", "let i = 4;\nfunction h() {\n  const a = i-- / 2; // {\n  return %s;\n}\n\n"),
-            "an object literal and an inner template in a template's expression": (
-                "test/x.test.mjs", "function h() {\n  const s = `${ {}.x ?? `{` }`;\n  return %s;\n}\n\n"),
-            "<!-- in a .cjs module": ("test/x.test.cjs", "function h() {\n  return %s; <!-- {\n}\n\n"),
-            "--> at the start of a line of a .cjs module": ("test/x.test.cjs",
-                                                            "function h() {\n  return %s;\n  --> {\n}\n\n"),
-        }
-        for name, (f, mid) in cases.items():
-            with self.subTest(name):
-                before = JS_IMPORTS + mid % "1" + JS_H_TEST
-                self.assertEqual({"text": before, "first": ""},
-                                 rebuilt(f, before, JS_IMPORTS + mid % "2 - 1" + JS_H_TEST))
-        got = rebuilt("test/x.test.js", JS_IMPORTS + cases["<!-- in a .cjs module"][1] % "1" + JS_H_TEST,
-                      JS_IMPORTS + cases["<!-- in a .cjs module"][1] % "2 - 1" + JS_H_TEST)
-        self.assertIsNone(got["text"])
-        self.assertRegex(got["first"], r"^a helper's body that Node does not read as one function body \(line 4\): "
-                                       r"as a module, \S")
+    # a test of such a module that fails without the production change proves it, on an error too: only the
+    # production change was undone, so nothing else decided the failure
+    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
+    def test_a_test_of_a_kept_javascript_module_that_fails_without_the_change_proves_it(self):
+        before = UTIL_HEAD + "function h() {\n  return null;\n}\n\n" + \
+            'test("a", () => assert.equal(util.value(), 1));\n'
+        after = before.replace("return null;", "return { k: 1 };") + \
+            'test("other", () => assert.equal(util.other(), 3));\n' + \
+            'test("tripled", () => {\n  const k = h().k;\n' \
+            '  assert.equal((util.other ?? (() => 0))() * 3 * k, 9);\n});\n'
+        rc, out, err = node_prove(before, after, "--json")
+        self.assertEqual({"test/util.test.mjs::other": "proves the change",
+                          "test/util.test.mjs::tripled": "proves the change"},
+                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
+        self.assertEqual(0, rc, out + err)
 
 
 class FailureKindTests(unittest.TestCase):
@@ -716,20 +656,6 @@ class RebuildVerdictTests(unittest.TestCase):
                           ("test_calc.CalcTests.test_value", "proves the change")], rows, text)
         self.assertEqual(0, rc, text)
 
-    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
-    def test_under_a_rebuild_a_javascript_error_is_no_proof(self):
-        before = NODE_HEAD + "function make() {\n  return { n: 0 };\n}\n\n" + 'test("a", () => assert.equal(1, 1));\n'
-        after = before.replace("return { n: 0 };", "return { n: 1, get: () => 1 };") + \
-            'test("value", () => assert.equal(make().n, 1));\ntest("get", () => assert.equal(make().get(), 1));\n'
-        with Env() as e:
-            r = e.repo({"package.json": NODE_PACKAGE, "test/util.test.mjs": before})
-            edit(r, {"test/util.test.mjs": after})
-            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
-        self.assertEqual({"test/util.test.mjs::get": "cannot be proven: without the change it fails on TypeError, not "
-                                                     "on an assertion",
-                          "test/util.test.mjs::value": "proves the change"},
-                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
-
     # a module whose change outside its helpers' bodies stays (here a helper the change adds) runs as it is now: a
     # test that fails without the production change proves it, and one that passes cannot be proven, named by the
     # module's first difference, never "does not test the change"
@@ -805,25 +731,6 @@ class SupportRerunTests(unittest.TestCase):
                                                      "not on an assertion",
                           "test_a.CalcTests.test_mul": "cannot be proven: without the change it fails on "
                                                        "AttributeError, not on an assertion"},
-                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
-
-    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
-    def test_a_javascript_error_under_a_rebuild_proves_when_the_module_as_it_is_now_fails_on_an_assertion(self):
-        head = NODE_HEAD + 'import * as util from "../src/util.mjs";\n\n'
-        before = head + "function h() {\n  return null;\n}\n\n" + 'test("a", () => assert.equal(util.value(), 1));\n'
-        after = before.replace("return null;", "return { k: 1 };") + \
-            'test("other", () => assert.equal(util.other(), 3));\n' + \
-            'test("tripled", () => {\n  const k = h().k;\n' \
-            '  assert.equal((util.other ?? (() => 0))() * 3 * k, 9);\n});\n'
-        with Env() as e:
-            r = e.repo({"package.json": NODE_PACKAGE, "src/util.mjs": "export const value = () => 1;\n",
-                        "test/util.test.mjs": before})
-            edit(r, {"src/util.mjs": "export const value = () => 1;\nexport const other = () => 3;\n",
-                     "test/util.test.mjs": after})
-            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
-        self.assertEqual({"test/util.test.mjs::other": "cannot be proven: without the change it fails on TypeError, "
-                                                       "not on an assertion",
-                          "test/util.test.mjs::tripled": "proves the change"},
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
 
 
@@ -980,8 +887,8 @@ class UnittestModuleFunctionTests(unittest.TestCase):
 
 
 class SameShapeGroupTests(unittest.TestCase):
-    # helpers of one class and name in the same places on both sides (a getter beside its setter, a beforeEach in
-    # each of two describes) are matched place by place, so a fix in one comes back as its base text and is proven
+    # helpers of one class and name in the same places on both sides (a getter beside its setter) are matched place by
+    # place, so a fix in one comes back as its base text and is proven
     def test_a_property_getter_fix_beside_its_setter_proves(self):
         before = fake_module(FAKE_PROPERTY)
         after = before.replace("        return self._x\n", "        return self._x * 10\n") + \
@@ -990,51 +897,9 @@ class SameShapeGroupTests(unittest.TestCase):
         self.assertEqual([("test_calc.CalcTests.test_x", "proves the change")], rows, text)
         self.assertEqual(0, rc, text)
 
-    @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
-    def test_a_fix_in_one_of_two_same_name_hooks_proves(self):
-        before = NODE_HEAD + "const state = {};\n\n" + HOOK_A + HOOK_B
-        after = before.replace("state.n = 0;", "state.n = 2;").replace(
-            '"number"));\n', '"number"));\n  test("b two", () => assert.equal(state.n, 2));\n')
-        with Env() as e:
-            r = e.repo({"package.json": NODE_PACKAGE, "test/util.test.mjs": before})
-            edit(r, {"test/util.test.mjs": after})
-            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
-        self.assertEqual({"test/util.test.mjs::a > a one": "does not test the change",
-                          "test/util.test.mjs::b > b one": "does not test the change",
-                          "test/util.test.mjs::b > b two": "proves the change"},
-                         {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
-        # the describes trade places: each hook would come back as the other's base text; a third hook is a new shape
-        traded = NODE_HEAD + "const state = {};\n\n" + HOOK_B + "\n" + HOOK_A
-        self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before, traded))
-        third = after + '\ndescribe("c", () => {\n  beforeEach(() => {\n    state.n = 3;\n  });\n' \
-                        '  test("c one", () => assert.equal(state.n, 3));\n});\n'
-        self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before, third))
 
-    # a hook's describe is part of its place: the hook of a describe the change puts in another's place is a hook the
-    # change adds, so the group's shape changes, rather than the new hook coming back as the old one's base text
-    def test_a_hook_in_another_describe_takes_no_place_of_the_old_one(self):
-        before = NODE_HEAD + "const state = {};\n\n" + HOOK_A + HOOK_B
-        after = before.replace('describe("b"', 'describe("c"').replace("state.n = 0;", "state.n = 5;")
-        self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before, after))
-        nested = before.replace(HOOK_B, 'describe("outer", () => {\n' + HOOK_B + "});\n")
-        self.assertIs(testx._SUPPORT_TANGLED, support_text("test/util.test.mjs", before,
-                                                           nested.replace("state.n = 0;", "state.n = 5;")))
-        # the same describes keep their hooks' places
-        text = support_text("test/util.test.mjs", nested, nested.replace("state.n = 0;", "state.n = 5;"))
-        self.assertIsInstance(text, str)
-        self.assertIn("    state.n = 0;\n", text)
-
-
-class NamesakeTestTests(unittest.TestCase):
-    # a test titled like a helper shares the place count of that name's helpers. Put before a helper the change leaves
-    # as it was, it leaves nothing of that helper to undo: the module runs as it is, or its other changed helpers come
-    # back as their base text
-    def test_a_namesake_test_before_an_unchanged_helper_leaves_nothing_to_undo(self):
-        before = "function h() {\n  return 1;\n}\n\nfunction g() {\n  return 1;\n}\n\n" + JS_TEST
-        after = "test('h', () => { expect(value()).toBe(2); });\n\n" + before
-        self.assertIsNone(support_text("tests/a.test.js", before, after))
-        self.assertIn("function g() {\n  return 1;\n}\n",
-                      support_text("tests/a.test.js", before, after.replace("g() {\n  return 1;", "g() {\n  return 2 - 1;")))
+# what a JS/TS module that changed outside its tests gives, as a cost test's child process compares it
+COST_KEPT = f"KEPT = {{'text': None, 'first': {JS_NOT_REBUILT!r}}}\n"
 
 
 class JsReaderCostTests(unittest.TestCase):
@@ -1043,13 +908,13 @@ class JsReaderCostTests(unittest.TestCase):
     # those, about 1 s in all here, and is stopped after 20 s: a pattern that backtracks over the blanks reads one
     # such text in 30 s or more (a cubic one in hours), so the bound tells them apart on a loaded machine too
     def test_the_js_readers_read_a_long_blank_run_in_linear_time(self):
-        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n" + COST_KEPT +
                 "for start in ('function', 'function*', 'function f', 'export function', 'x.function', 'catch', 'f()',"
                 " 'f(): T', 'x =', 'x[0]', 'describe', 'describe(', \"'\"):\n"
                 "    for blank in (' ', '\\t'):\n"
                 "        text = start + blank * 40000 + ';\\n'\n"
-                "        testx._js_support(text), testx._js_entries(text)\n"
-                "        assert testx._rebuild_helpers('a.test.js', text, text + 'x;\\n')['first']\n"
+                "        testx._js_support(text), testx._js_units(text)\n"
+                "        assert testx._rebuild_helpers('a.test.js', text, text + 'x;\\n') == KEPT\n"
                 "print('read')\n")
         lib = str(Path(__file__).resolve().parents[1] / "lib")
         try:
@@ -1059,34 +924,34 @@ class JsReaderCostTests(unittest.TestCase):
         self.assertEqual("read", p.stdout.strip(), p.stderr)
 
     # a hook fix in a module of 8,000 nested describes, or of 2,000 describes one after another, each with a hook and
-    # a test, is rebuilt in about a second here; a reader that rescans the describes around each entry takes 20 s or
-    # more on the nested one
-    def test_a_hook_fix_among_thousands_of_describes_rebuilds_in_linear_time(self):
-        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+    # a test, is read in about a second here; a reader that rescans the describes around each test takes 20 s or more
+    # on the nested one
+    def test_a_hook_fix_among_thousands_of_describes_is_read_in_linear_time(self):
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n" + COST_KEPT +
                 "nested = \"describe('a', () => {\\n\" * 8000 + \"beforeEach(() => {\\n  state.n = 1;\\n});\\n\" + "
                 "\"test('t', () => { expect(state.n).toBe(1); });\\n\" + '});\\n' * 8000\n"
                 "flat = ''.join(f\"describe('case {i}', () => {{\\n  beforeEach(() => {{\\n    state.n = {i};\\n  }});\\n\""
                 " f\"  test('one {i}', () => {{\\n    expect(state.n).toBe({i});\\n  }});\\n}});\\n\\n\" for i in range(2000))\n"
                 "for text, fix in ((nested, ('state.n = 1;', 'state.n = 2;')), (flat, ('state.n = 3;', 'state.n = -7;'))):\n"
-                "    assert testx._rebuild_helpers('a.test.js', text, text.replace(*fix))['text'] == text\n"
-                "print('rebuilt')\n")
+                "    assert testx._rebuild_helpers('a.test.js', text, text.replace(*fix)) == KEPT\n"
+                "print('read')\n")
         lib = str(Path(__file__).resolve().parents[1] / "lib")
         try:
             p = subprocess.run([sys.executable, "-I", "-c", code, lib], capture_output=True, text=True, timeout=20)
         except subprocess.TimeoutExpired:
-            self.fail("rebuilding a hook fix among thousands of describes took more than 20 s")
-        self.assertEqual("rebuilt", p.stdout.strip(), p.stderr)
+            self.fail("reading a hook fix among thousands of describes took more than 20 s")
+        self.assertEqual("read", p.stdout.strip(), p.stderr)
 
     # each declaration, hook, test and class finds where it ends in one pass over the brackets, so 5,000 of them
     # nested in one another, open or closed, are read in about 5 s in all here; a reader that scans from each to its
     # end takes 30 s or more on the 5,000 nested declarations alone
     def test_thousands_of_nested_declarations_hooks_tests_and_classes_read_in_linear_time(self):
-        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n" + COST_KEPT +
                 "for line, close in (('const x = () => {', '};'), ('beforeEach(() => {', '});'), "
                 "(\"test('a', () => {\", '});'), ('class C {', '}'), ('function f() {', '}')):\n"
                 "    for text in ((line + '\\n') * 5000, (line + '\\n') * 5000 + (close + '\\n') * 5000):\n"
-                "        testx._js_entries(text), testx._js_support(text), testx._js_units(text)\n"
-                "        assert testx._rebuild_helpers('a.test.js', text, 'y;\\n' + text)['first']\n"
+                "        testx._js_support(text), testx._js_units(text)\n"
+                "        assert testx._rebuild_helpers('a.test.js', text, 'y;\\n' + text) == KEPT\n"
                 "print('read')\n")
         lib = str(Path(__file__).resolve().parents[1] / "lib")
         try:
@@ -1099,12 +964,11 @@ class JsReaderCostTests(unittest.TestCase):
     # the one before it found the statement's end, so the readers take about a second here; a reader that scans from
     # each declaration to that end takes many minutes
     def test_a_statement_over_thousands_of_declaration_lines_reads_in_linear_time(self):
-        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n" + COST_KEPT +
                 "for line in ('const x = 1 +', 'let y = a ||', 'var z = b,'):\n"
                 "    text = (line + '\\n') * 20000 + '1;\\nfunction g() {\\n  return 1;\\n}\\n'\n"
-                "    testx._js_entries(text), testx._js_support(text), testx._js_parts(text)\n"
-                "    assert testx._rebuild_helpers('a.test.js', text, text.replace('return 1;', 'return 2;'))['text'] == "
-                "text\n"
+                "    testx._js_support(text), testx._js_units(text)\n"
+                "    assert testx._rebuild_helpers('a.test.js', text, text.replace('return 1;', 'return 2;')) == KEPT\n"
                 "print('read')\n")
         lib = str(Path(__file__).resolve().parents[1] / "lib")
         try:
@@ -1113,20 +977,20 @@ class JsReaderCostTests(unittest.TestCase):
             self.fail("the JS readers took more than 20 s on 20,000 declaration lines of one statement")
         self.assertEqual("read", p.stdout.strip(), p.stderr)
 
-    # every reader of one module gets the same masked text, and a rebuilt module equal to the base is the base's text,
-    # so the caches keyed by a text find it at once: a fix in each of 32,000 helpers between as many tests rebuilds in
-    # about 4 s here, where comparing each lookup's text with an equal copy takes a minute
-    def test_a_fix_among_thousands_of_helpers_and_tests_rebuilds_in_linear_time(self):
-        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+    # every reader of one module gets the same masked text, so the caches keyed by a text find it at once: a fix in
+    # each of 32,000 helpers between as many tests is read in about a second here, where comparing each lookup's text
+    # with an equal copy takes a minute
+    def test_a_fix_among_thousands_of_helpers_and_tests_is_read_in_linear_time(self):
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n" + COST_KEPT +
                 "text = \"function g() {\\n  return 1;\\n}\\ntest('t', () => {});\\n\" * 32000\n"
-                "assert testx._rebuild_helpers('a.test.js', text, text.replace('return 1', 'return 2'))['text'] == text\n"
-                "print('rebuilt')\n")
+                "assert testx._rebuild_helpers('a.test.js', text, text.replace('return 1', 'return 2')) == KEPT\n"
+                "print('read')\n")
         lib = str(Path(__file__).resolve().parents[1] / "lib")
         try:
             p = subprocess.run([sys.executable, "-I", "-c", code, lib], capture_output=True, text=True, timeout=25)
         except subprocess.TimeoutExpired:
-            self.fail("rebuilding a fix in each of 32,000 helpers between as many tests took more than 25 s")
-        self.assertEqual("rebuilt", p.stdout.strip(), p.stderr)
+            self.fail("reading a fix in each of 32,000 helpers between as many tests took more than 25 s")
+        self.assertEqual("read", p.stdout.strip(), p.stderr)
 
 
 PY_SHARED = """

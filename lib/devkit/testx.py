@@ -3635,14 +3635,13 @@ def _js_word_before(text: str, i: int) -> str:
 
 
 @functools.lru_cache(maxsize=16)
-def _js_scan(text: str, html: bool = False) -> tuple:
+def _js_scan(text: str) -> tuple:
     """Where the comments and the literals of JS/TS `text` lie, in one pass -> (comments, literals): comments, [(start,
     end)] of each comment; literals, [(start, end, kind)] of the inside of each string ("string"), template literal
     ("template", its expressions with it) and regular expression ("regex"). A template literal's expressions are read
     as code, their braces, strings, comments and inner templates too, so none of those ends it. A ++ or -- after a
-    value is postfix, a value itself: a slash after it divides. `html`: <!--, and --> at the start of a line (after
-    blanks and comments only), open a comment to the end of the line, as a script reads them (.js and .cjs files)."""
-    comments, literals, i, n, last, fresh = [], [], 0, len(text), "", True
+    value is postfix, a value itself: a slash after it divides."""
+    comments, literals, i, n, last = [], [], 0, len(text), ""
     templates = []  # each template literal whose expression is being read: [where its inside starts, braces open]
     while i < n:
         c = text[i]
@@ -3658,7 +3657,6 @@ def _js_scan(text: str, html: bool = False) -> tuple:
             else:
                 literals.append((start, min(j, n), "template"))
                 i, last = j + 1, "`"
-            fresh = False
             continue
         if templates and c in "{}":
             templates[-1][1] += 1 if c == "{" else -1
@@ -3667,8 +3665,8 @@ def _js_scan(text: str, html: bool = False) -> tuple:
             while j < n and text[j] != c and text[j] != "\n":
                 j += 2 if text[j] == "\\" else 1
             literals.append((i + 1, min(j, n), "string"))
-            i, last, fresh = j + 1, c, False
-        elif text.startswith("//", i) or html and (text.startswith("<!--", i) or fresh and text.startswith("-->", i)):
+            i, last = j + 1, c
+        elif text.startswith("//", i):
             j = text.find("\n", i)
             j = n if j < 0 else j
             comments.append((i, j))
@@ -3677,7 +3675,6 @@ def _js_scan(text: str, html: bool = False) -> tuple:
             j = text.find("*/", i + 2)
             j = n if j < 0 else j + 2
             comments.append((i, j))
-            fresh = fresh or "\n" in text[i:j]
             i = j
         elif c == "/" and (last in _JS_REGEX_BEFORE or last == "a" and _js_word_before(text, i) in _JS_REGEX_AFTER):
             j, cls = i + 1, False
@@ -3690,30 +3687,16 @@ def _js_scan(text: str, html: bool = False) -> tuple:
                     cls = False
                 j += 1
             literals.append((i + 1, min(j, n), "regex"))
-            i, last, fresh = j + 1, "/", False
+            i, last = j + 1, "/"
         elif c in "+-" and text.startswith(c + c, i):
             post = last in (")", "]") or last == "a" and _js_word_before(text, i) not in _JS_REGEX_AFTER
-            i, last, fresh = i + 2, ")" if post else c, False
+            i, last = i + 2, ")" if post else c
         else:
-            if c == "\n":
-                fresh = True
-            elif not c.isspace():
-                last, fresh = c if not (c.isalnum() or c in "_$") else "a", False
+            if not c.isspace():
+                last = c if not (c.isalnum() or c in "_$") else "a"
             i += 1
     literals += [(start, n, "template") for start, _ in templates]  # templates the text ends inside
     return tuple(comments), tuple(literals)
-
-
-@functools.lru_cache(maxsize=16)
-def _js_html_view(text: str) -> str:
-    """`text` of a .js or .cjs module with each HTML-like comment (<!--, and --> at the start of a line) opened by //
-    in place, so the JS readers read it as a script does: a comment to the end of the line."""
-    out = None
-    for a, _ in _js_scan(text, True)[0]:
-        if text.startswith(("<!--", "-->"), a):
-            out = out or list(text)
-            out[a:a + 2] = "//"
-    return text if out is None else "".join(out)
 
 
 @functools.lru_cache(maxsize=16)
@@ -4074,62 +4057,15 @@ def _covers(spans):
     return inside
 
 
-def _js_entries(text) -> list:
-    """A JS/TS test module entry by entry: [(key, first line, last line, kind, None)] in the order of the text. key:
-    (class or '', name, occurrence). kind: "fixed", a test (named by its title); "unit", a declaration or hook outside
-    the tests (one inside another's body is part of it, and one that holds a test is none) or a member of a class;
-    "class", a class whose members are units and whose lines before them are its "head"."""
-    masked, cands = _js_mask(text), []
-    tests = [(title, _line_of(text, a), _line_of(text, b)) for title, a, b in _js_test_calls(text, masked)]
-    in_test = _covers([(s, e) for _, s, e in tests])
-    test_starts = sorted(s for _, s, _ in tests)
-    cands += [(s, e, "fixed", title, None) for title, s, e in tests]
-    for m in _JS_DECL.finditer(masked):
-        start = _line_of(text, m.start())
-        if in_test(start):
-            continue
-        members = None
-        if m.group(3):
-            end = _js_statement_end(masked, m.end())
-        else:
-            brace = masked.find("{", m.end())
-            if brace < 0:
-                continue
-            end = _js_close(masked, brace)
-            members = _js_class_members(text, masked, brace) if m.group(2) else None
-        kind = "class" if members and members[0][1] > start else "unit"
-        cands.append((start, _line_of(text, end), kind, next(g for g in m.groups() if g), members))
-    for m in _JS_HOOK.finditer(masked):
-        start = _line_of(text, m.start())
-        if not in_test(start):
-            cands.append((start, _line_of(text, _js_close(masked, m.end() - 1)), "unit", m.group(0).strip(" \t("),
-                          None))
-    out, seen, held = [], {}, 0  # held: the last line of the entries taken so far, which start no later
-
-    def add(cls, name, s, e, kind):
-        k = seen[(cls, name)] = seen.get((cls, name), -1) + 1
-        out.append(((cls, name, k), s, e, kind, None))
-    for s, e, kind, name, members in sorted(cands, key=lambda c: (c[0], -c[1])):
-        k = bisect.bisect_left(test_starts, s)
-        if kind != "fixed" and k < len(test_starts) and test_starts[k] <= e or held >= s:
-            continue
-        held = max(held, e)
-        add("", name, s, e, kind)
-        if kind == "class":
-            add(name, "<head>", s, members[0][1] - 1, "head")
-            for x, ms, me in members:
-                add(name, x, ms, me, "unit")
-    return out
-
-
-# The rebuild of a changed test module for the run without the change. A test module rebuilds only when its text
-# outside its tests differs from the base only inside the bodies of helpers both sides hold in the same places
+# The rebuild of a changed Python test module for the run without the change. A test module rebuilds only when its
+# text outside its tests differs from the base only inside the bodies of helpers both sides hold in the same places
 # (_rebuild_helpers): the rebuilt module is then the base text with the tests now spliced in, so outside the tests it
 # is the base module byte for byte, whatever a reader takes for a comment, a docstring or layout. The comparison
 # reads each side's tests (with the comment and blank lines right above each), its helpers' bodies and its blank lines
-# outside every string (_py_layout, _js_layout); any other byte that differs keeps the module as it is now: a comment,
-# a docstring, a coding declaration, an import, a statement, a helper's signature. The outline (_py_parts, _js_parts)
-# only names the first difference.
+# outside every string (_py_layout); any other byte that differs keeps the module as it is now: a comment, a
+# docstring, a coding declaration, an import, a statement, a helper's signature. The outline (_py_parts) only names
+# the first difference. devkit rebuilds only Python test modules: a JavaScript or TypeScript module that changed
+# outside its tests keeps its change (_js_outside_tests).
 
 def _short(code: str) -> str:
     """A line of code as a label names it: at most 60 characters."""
@@ -4146,13 +4082,12 @@ def _line_starts(text: str) -> list:
 
 
 def _py_layout(text, functions=True):
-    """Python test module `text` read for a rebuild -> (tests, bodies, blank, problem), or None when it does not
-    parse. tests: [(start, end)] indexes of each test's whole lines with the comment and blank lines right above it,
-    a test being a method named test… of a class a runner collects (_py_test_class), or a module-level function so
-    named when `functions` (pytest's; unittest runs none); bodies: those of each helper's body (a module-level
-    function or a method of a module-level class, outside the tests) whose first statement starts a line after its
-    signature; blank: the numbers of the blank lines no string holds; problem: '' (no line holds a test and other
-    code in Python)."""
+    """Python test module `text` read for a rebuild -> (tests, bodies, blank), or None when it does not parse. tests:
+    [(start, end)] indexes of each test's whole lines with the comment and blank lines right above it, a test being a
+    method named test… of a class a runner collects (_py_test_class), or a module-level function so named when
+    `functions` (pytest's; unittest runs none); bodies: those of each helper's body (a module-level function or a
+    method of a module-level class, outside the tests) whose first statement starts a line after its signature; blank:
+    the numbers of the blank lines no string holds."""
     data = text.encode("utf-8", "surrogateescape")
     try:
         with warnings.catch_warnings():
@@ -4201,16 +4136,15 @@ def _py_layout(text, functions=True):
     except (tokenize.TokenError, SyntaxError, ValueError):
         code = set(range(1, len(lines) + 1))
     blank = {k for k in range(1, len(lines) + 1) if not lines[k - 1].strip() and k not in code}
-    return sorted(tests), sorted(bodies), blank, ""
+    return sorted(tests), sorted(bodies), blank
 
 
-def _js_layout(text):
-    """JS/TS test module `text` read for a rebuild (see _py_layout) -> (tests, bodies, blank, problem). tests: each
-    test's whole lines (the outermost test of nested ones) with the comment and blank lines right above it; bodies:
-    the inside of the braces of each helper's body (a function, a const, let or var that holds one, a hook, a class
-    method: the entries _js_entries reads); blank: the blank lines no string or template literal holds; problem: the
-    first test that shares a line with other code, which no rebuild can splice, or ''. Whether a body or a test is cut
-    where the engine reads it, Node's own reading tells (_js_whole_bodies)."""
+def _js_outside_tests(text) -> list:
+    """The lines of JS/TS test module `text` outside its tests, as prove compares a module with its base to tell
+    whether it changed outside its tests (_rebuild_helpers): every line but those of a test (the outermost of nested
+    ones, from its first line to the line of the bracket that closes its call, with the comment and blank lines right
+    above it) and the blank lines no string or template literal holds. A test that shares a line with other code keeps
+    its lines, so a change to that code is never taken for the test's."""
     masked, (_, literals) = _js_mask(text), _js_scan(text)
     lines, starts, nl = text.split("\n"), _line_starts(text), _newlines(text)
     inside = set()  # lines that start inside a string or a template literal
@@ -4222,10 +4156,9 @@ def _js_layout(text):
                 k += 1
     blank = {k for k in range(1, len(lines) + 1) if not lines[k - 1].strip() and k not in inside}
 
-    def comment(k):  # a line that holds a comment alone
-        s, row = lines[k - 1].strip(), masked[starts[k - 1]:starts[k - 1] + len(lines[k - 1])]
-        return k not in inside and not row.strip() and (s.startswith(("//", "/*", "*")) or s.endswith("*/"))
-    tests, edge, problem = [], -1, ""
+    def code(k):  # line k as the engine reads its code: strings, literals and comments blanked
+        return masked[starts[k - 1]:starts[k - 1] + len(lines[k - 1])]
+    tests, edge = set(), -1
     for _, a, b in _js_test_calls(text, masked):
         if a <= edge:
             continue  # inside the test before it
@@ -4233,29 +4166,18 @@ def _js_layout(text):
         s, e = _line_of(text, a), _line_of(text, b)
         tail = masked[b + 1:starts[e - 1] + len(lines[e - 1])]
         if masked[starts[s - 1]:a].strip() or tail.strip() not in ("", ";"):
-            problem = problem or f"a test that shares its line with other code (line {e if tail.strip() else s})"
             continue
-        while s > 1 and (s - 1 in blank or comment(s - 1)):
+        while s > 1 and (s - 1 in blank or s - 1 not in inside and not code(s - 1).strip()):
             s -= 1
-        tests.append((starts[s - 1], starts[e] if e < len(starts) else len(text)))
-
-    bodies = []
-    for (cls, _, _), s, e, kind, _ in _js_entries(text):
-        a, b = starts[s - 1], starts[e] - 1 if e < len(starts) else len(text)
-        if kind != "unit" or not (_JS_METHOD_HEAD if cls else _JS_FUNCTION).match(masked, a, b):
-            continue
-        body = _JS_BODY.search(masked, a, b)
-        close = _js_close(masked, body.end() - 1) if body else b
-        if body and close < b:
-            bodies.append((body.end(), close))
-    return sorted(tests), sorted(bodies), blank, problem
+        tests.update(range(s, e + 1))
+    return [lines[k - 1] for k in range(1, len(lines) + 1) if k not in tests and k not in blank]
 
 
 def _significant(text, layout):
-    """`text` as a rebuild compares it (layout: _py_layout, _js_layout) -> (its text without the tests and the blank
-    lines no string holds, each helper's body put as _BODY; for each of its characters, the index in `text` right
-    after it), or None when a test and a helper's body overlap."""
-    tests, bodies, blank, _ = layout
+    """`text` as a rebuild compares it (layout: _py_layout) -> (its text without the tests and the blank lines no
+    string holds, each helper's body put as _BODY; for each of its characters, the index in `text` right after it), or
+    None when a test and a helper's body overlap."""
+    tests, bodies, blank = layout
     starts = _line_starts(text)
     cuts = sorted([(a, b, "") for a, b in tests] + [(a, b, _BODY) for a, b in bodies])
     for (_, b, _), (a, _, _) in zip(cuts, cuts[1:]):
@@ -4298,7 +4220,7 @@ def _differing_line(old_text, now_text, old, now) -> str:
     got, got_next = row(b, s)
 
     def say(verb, line, text, ends, base=False):
-        kind = ("comment" if line.strip().startswith(("#", "//", "/*", "*")) else
+        kind = ("comment" if line.strip().startswith("#") else
                 "blank line" if not line.strip() else "line")
         where = _line_of(text, ends[s] - 1) if s < len(ends) else text.count("\n") + 1
         shown = f" `{_short(line.replace(_BODY, '…'))}`" if line.strip() else ""
@@ -4361,70 +4283,8 @@ def _py_parts(text, functions=True):
     return outline
 
 
-# a JS/TS entry that is a function, whose body a rebuild may take from the base: a function declaration, a const,
-# let or var that holds a function, a hook; and a class member that is a method or holds an arrow function
-_JS_FUNCTION = re.compile(r"\s*(?:(?:export\s+(?:default\s+)?)?(?:async\s+)?function\b|(?:export\s+)?(?:const|let|var)\s+"
-                          r"[A-Za-z_$][\w$]*\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:function\b|\(|[A-Za-z_$][\w$]*\s*=>)|"
-                          r"(?:beforeEach|afterEach|beforeAll|afterAll)\s*\()")
-_JS_METHOD_HEAD = re.compile(r"\s*(?:@[\w$.]+(?:\([^()\n]*\))?\s*)*(?:(?:static|async|get|set|public|private|protected|"
-                             r"readonly|override|abstract|declare|accessor)\s+)*\*?\s*(?:#?[A-Za-z_$][\w$]*|\[[^\]\n]*\]|"
-                             r"'[^'\n]*'|\"[^\"\n]*\")\s*[?!]?\s*(?:(?:<[^>\n]*>)?\s*\(|(?::[^=\n]+)?=\s*(?:async\s+)?"
-                             r"(?:function\b|\(|[A-Za-z_$][\w$]*\s*=>))")
-# where a function's body opens: a brace after its parameters (and a return type) or after an arrow
-_JS_BODY = re.compile(r"(?:\)\s*(?::[^{};=()]*)?|=>)\s*\{")
-
-
-def _js_parts(text):
-    """The outline of JS/TS test module `text` that names a rebuild's first difference (see _py_parts): each
-    declaration, hook and class member outside the tests (_js_entries), a function by its text around its body, any
-    other by its text, and each other line of code (its comments left out) as itself."""
-    masked, code = _js_mask(text), _js_mask(text, strings=False)
-    calls = _js_test_calls(text, masked)
-    pieces, at = [], 0
-    for _, a, b in calls:
-        if a < at:
-            continue
-        end = b + 1
-        while end < len(code) and code[end] in " \t":
-            end += 1
-        end = end + 1 if code[end:end + 1] == ";" else b + 1
-        pieces += [code[at:a], "\n" * code.count("\n", a, end)]
-        at = end
-    rows = ("".join(pieces) + code[at:]).split("\n")
-    starts = _line_starts(text)
-    outline, entries = [], {}
-    for key, s, e, kind, _ in _js_entries(text):
-        if kind in ("unit", "head"):
-            entries.setdefault(s, (e, key, kind))
-    ln = 1
-    while ln <= len(rows):
-        if ln in entries:
-            e, (cls, name, _), kind = entries[ln]
-            a, b = starts[ln - 1], starts[e] - 1 if e < len(starts) else len(text)
-            first = _short(text[a:b].split("\n", 1)[0])
-            body = None
-            if kind == "unit" and (_JS_METHOD_HEAD if cls else _JS_FUNCTION).match(masked, a, b):
-                body = _JS_BODY.search(masked, a, b)
-            close = _js_close(masked, body.end() - 1) if body else b
-            if body and close < b:
-                outline.append((("fn", text[a:body.end() - 1], text[close + 1:b]), ("js", cls, name),
-                                (f"hook `{name}`" if name in _JS_HOOK_NAMES else
-                                 f"helper `{cls + '.' if cls else ''}{name}`"), ln, (ln, e)))
-            else:
-                outline.append((("entry", text[a:b]), ("js", cls, name),
-                                f"class `{cls}`" if kind == "head" else f"statement `{first}`", ln, None))
-            ln = max(e, ln) + 1
-            continue
-        row = rows[ln - 1].rstrip()
-        if row.strip():
-            kind = "import" if re.match(r"\s*import\b", row) else "statement"
-            outline.append((("code", row), None, f"{kind} `{_short(row)}`", ln, None))
-        ln += 1
-    return outline
-
-
 def _first_difference(old, now) -> str:
-    """The first difference between the outlines `old` (at the base) and `now` (_py_parts, _js_parts), as a reader
+    """The first difference between the outlines `old` (at the base) and `now` (_py_parts), as a reader
     names it: an added, removed or edited helper, class, import or statement, with its line (at the base, for one the
     change removed). Past the items both share at the start and at the end, an item with a name (a helper, a class)
     that only one side holds is added or removed; anything else there is edited."""
@@ -4452,88 +4312,44 @@ def _first_difference(old, now) -> str:
     return say("an edited", b)
 
 
-# a line break that Python reads (a carriage return without a new line) or that ends a JavaScript comment (that, a line
-# separator, a paragraph separator), where the rebuild's readers end lines at new lines only: it would move what they
-# read, a statement into a helper's body or out of a comment
-_UNSEEN_BREAK = {"py": re.compile("\r(?!\n)"), "js": re.compile("\r(?!\n)|[\u2028\u2029]")}
-_BREAK_NAME = {"\r": "a carriage return without a new line", "\u2028": "a line separator U+2028",
-               "\u2029": "a paragraph separator U+2029"}
-
-
-_JS_READ = Path(__file__).with_name("testx_jscheck.cjs")  # Node's reading of the bodies a rebuild cuts
-
-
-def _js_whole_bodies(f, sides) -> str:
-    """Whether Node reads each helper body and each test that the reader cut from JS/TS test module `f` as one whole
-    function body (testx_jscheck.cjs), each side's being (its text, its layout as _js_layout reads it, where: '' or
-    ' at the base'), all of them in one node run: a reader that misplaced a boundary leaves a brace or a token open
-    there in Node's view. -> '' when it reads them all, else the first it does not read, named by its line and Node's
-    reason, or why Node could not read them."""
-    items = []  # (kind, line, where, text): each side's cuts in the order they come
-    for t, layout, where in sides:
-        cuts = sorted([(s, e, "test") for s, e in layout[0]] + [(s, e, "body") for s, e in layout[1]])
-        items += [(kind, _line_of(t, s), where, t[s:e]) for s, e, kind in cuts]
-    texts = list(dict.fromkeys(x[3] for x in items))
-    if not texts:
-        return ""
-    node = shutil.which("node")
-    if not node:
-        return "no Node to read the bodies the rebuild cuts (node is not on PATH)"
-    try:
-        p = subprocess.run([node, "--no-warnings", str(_JS_READ)], input=json.dumps({"file": f, "bodies": texts}),
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
-                           env={k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"})
-        answers = json.loads(p.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
-        return f"Node could not read the bodies the rebuild cuts ({type(e).__name__})"
-    if not isinstance(answers, list) or len(answers) != len(texts):
-        return "Node could not read the bodies the rebuild cuts (it gave no answer for each)"
-    why = dict(zip(texts, answers))
-    for kind, line, where, t in items:
-        if why[t]:
-            what = "a helper's body that Node does not read as one function body" if kind == "body" else \
-                "a test that Node does not read as whole statements"
-            return f"{what} (line {line}{where}): {why[t]}"
-    return ""
+# a carriage return without a new line, which ends a line for Python where the rebuild's readers end lines at new lines
+# only: it would move what they read, a statement into a helper's body or out of a comment
+_UNSEEN_BREAK = re.compile("\r(?!\n)")
+# why a JavaScript or TypeScript test module that changed outside its tests keeps its change
+_JS_NOT_REBUILT = "devkit rebuilds only Python test modules"
 
 
 def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
-    """Test module `f` (`text`, its text now) rebuilt for the run without the change from `old_text`, its text at the
-    base. When its text outside its tests (_py_layout, _js_layout: each test with the comment and blank lines right
+    """Python test module `f` (`text`, its text now) rebuilt for the run without the change from `old_text`, its text
+    at the base. When its text outside its tests (_py_layout: each test with the comment and blank lines right
     above it) differs from the base only inside the bodies of helpers both sides hold in the same places, and in blank
     lines no string holds, the rebuilt module is the base text with each test now spliced in where the module now has
     it (after the same text outside the tests), and nothing else: outside its tests it is the base module byte for
     byte, which the result is checked to be. Any other difference keeps the module as it is now: a comment, a
     docstring, a coding declaration, an import, a statement, a helper's signature or decorators, a class, a helper
-    added, removed or moved, the describes around the tests. A side that holds a line break its readers do not see
-    (_UNSEEN_BREAK) keeps the module too, named by that line break. `functions`: a module-level function named test… is
-    a test (pytest), not a helper (unittest).
+    added, removed or moved. A side that holds a line break its readers do not see (_UNSEEN_BREAK) keeps the module
+    too, named by that line break. `functions`: a module-level function named test… is a test (pytest), not a helper
+    (unittest). devkit rebuilds only Python test modules: a JavaScript or TypeScript module whose lines outside its
+    tests (_js_outside_tests) differ from the base keeps its change, named by _JS_NOT_REBUILT.
     -> None when a side does not parse, or nothing outside the tests differs but blank lines: nothing to rebuild.
     Else {"text": the rebuilt module, or None when the module keeps its change; "first": the first difference that keeps
     it, else ''}."""
-    py = _lang(f) == "py"
-    # a .js or .cjs module may be a script, where an HTML-like comment is a comment: its readers read it so
-    view = _js_html_view if Path(f).suffix.lower() in (".js", ".cjs") else (lambda t: t)
-
-    def read(t):
-        return _py_layout(t, functions) if py else _js_layout(view(t))
-    old, now = read(old_text), read(text)
+    if _lang(f) != "py":
+        return None if _js_outside_tests(old_text) == _js_outside_tests(text) else \
+            {"text": None, "first": _JS_NOT_REBUILT}
+    old, now = _py_layout(old_text, functions), _py_layout(text, functions)
     if old is None or now is None:
         return None
     for t, where in ((text, ""), (old_text, " at the base")):
-        m = _UNSEEN_BREAK["py" if py else "js"].search(t)
+        m = _UNSEEN_BREAK.search(t)
         if m:
-            return {"text": None, "first": f"{_BREAK_NAME[m.group()]}, a line break the rebuild does not read "
-                                           f"(line {t.count(chr(10), 0, m.start()) + 1}{where})"}
-    for layout, t in ((now, text), (old, old_text)):
-        if layout[3]:
-            return {"text": None, "first": layout[3] if t is text else layout[3].replace(")", " at the base)")}
+            return {"text": None, "first": f"a carriage return without a new line, a line break the rebuild does not "
+                                           f"read (line {t.count(chr(10), 0, m.start()) + 1}{where})"}
     a, b = _significant(old_text, old), _significant(text, now)
     if a is None or b is None:
         return {"text": None, "first": "a test inside a helper's body"}
     if a[0] != b[0]:
-        parts = (lambda t: _py_parts(t, functions)) if py else (lambda t: _js_parts(view(t)))
-        o, n = parts(old_text), parts(text)
+        o, n = _py_parts(old_text, functions), _py_parts(text, functions)
         same = o is None or n is None or [x[0] for x in o] == [x[0] for x in n]
         return {"text": None, "first": _differing_line(old_text, text, a, b) if same else _first_difference(o, n)}
     bodies = [old_text[s:e] for s, e in old[1]]
@@ -4551,16 +4367,11 @@ def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
         out.append(old_text[at:s])
         at = e
     rebuilt = "".join(out) + old_text[at:]
-    rebuilt = old_text if rebuilt == old_text else rebuilt  # the caches keyed by a text find the base's at once
-    again = read(rebuilt)
-    if again is None or again[3] or (_significant(rebuilt, again) or ("",))[0] != a[0] or \
+    again = _py_layout(rebuilt, functions)
+    if again is None or (_significant(rebuilt, again) or ("",))[0] != a[0] or \
             [rebuilt[s:e] for s, e in again[1]] != bodies or \
             [rebuilt[s:e] for s, e in again[0]] != [text[s:e] for s, e in now[0]]:
         return {"text": None, "first": "a helper or a test that shares its lines with other code"}
-    if not py:  # Node's own reading vouches for each body and test the reader cut, or keeps the module
-        why = _js_whole_bodies(f, ((text, now, ""), (old_text, old, " at the base")))
-        if why:
-            return {"text": None, "first": why}
     return {"text": rebuilt, "first": ""}
 
 
@@ -4582,9 +4393,10 @@ def _helper_restore(top, base, f, functions=True) -> dict | None:
 
 def _support_text(top, base, f, functions=True):
     """Test module `f` as the run without the change from `base` runs it (_rebuild_helpers): a fix inside the body of a
-    helper defined in a test module is part of the change, as a fix in a helper file is, so the module's tests run
-    against the base module. -> the rebuilt text, None when nothing outside the module's tests differs but blank lines,
-    or _SUPPORT_TANGLED when the module keeps its change."""
+    helper defined in a Python test module is part of the change, as a fix in a helper file is, so the module's tests
+    run against the base module. -> the rebuilt text, None when nothing outside the module's tests differs but blank
+    lines, or _SUPPORT_TANGLED when the module keeps its change (a JavaScript or TypeScript module that changed outside
+    its tests always does)."""
     r = _helper_restore(top, base, f, functions)
     return None if r is None else _SUPPORT_TANGLED if r["text"] is None else r["text"]
 
@@ -5086,13 +4898,16 @@ _NOT_FROM_COPY = "cannot be proven: imported none of the changed files from the 
 # a test of a module that keeps its change (_rebuild_helpers) that passes without the change: + the module's first
 # difference outside its helpers' bodies
 _HELPERS_KEPT = "cannot be proven: its module keeps a change outside its helpers' bodies: "
+# a test of a JavaScript or TypeScript module that changed outside its tests, which devkit does not rebuild
+# (_rebuild_helpers), that passes without the change
+_JS_KEPT = "cannot be proven: its module keeps its change: " + _JS_NOT_REBUILT
 # a test whose run without the change undid test support it reaches (its module rebuilt, a rebuilt module or a test
 # helper file it imports) that fails there on anything but an assertion, and passes once more with that support as it
 # is now (_prove): + what it raised
 _NOT_ASSERTION = "cannot be proven: without the change it fails on "
 
 _NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD,
-               _NOT_FROM_COPY)
+               _NOT_FROM_COPY, _JS_KEPT)
 
 
 def _not_proven(verdict: str) -> bool:
@@ -5743,7 +5558,8 @@ def _prove(a, top, runners) -> int:
     # test helpers, conftest.py, fixtures: part of the change, restored with it
     helpers = [f for f in changed if repo.is_test(f) and not repo.runnable(f) and f not in scripts and f not in tests]
     # helpers defined inside the changed test modules (outside every test): a fix inside their bodies is part of the
-    # change too, so such a module is rebuilt as the base module with its tests now (_rebuild_helpers)
+    # change too, so such a Python module is rebuilt as the base module with its tests now (_rebuild_helpers); a
+    # JavaScript or TypeScript module that changed outside its tests keeps its change
     inner, kept = {}, {}  # kept: the modules that keep their change, each with its first difference
     # a module-level function named test… is a test only where the runner runs one: unittest runs none
     functions = {f: (owner(runners, f) or {}).get("name") != "unittest" for f in tests}
@@ -5967,9 +5783,11 @@ def _prove(a, top, runners) -> int:
         verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
-                   # its module ran as it is now, its change outside the helpers' bodies in place: a pass says nothing
-                   # about the change, as only the production change was undone
-                   _HELPERS_KEPT + kept[rec["file"]] if rec["file"] in kept and st == "passed" else
+                   # its module ran as it is now, its change outside the helpers' bodies (anywhere outside the tests of
+                   # a JavaScript or TypeScript one) in place: a pass says nothing about the change, as only the
+                   # production change was undone
+                   (_JS_KEPT if lang == "js" else _HELPERS_KEPT + kept[rec["file"]])
+                   if rec["file"] in kept and st == "passed" else
                    # the run without the change ran the checkout's changed code: its result says nothing
                    _CHECKOUT_IMPORT + ", ".join(stayed) if stayed else
                    _NO_IMPORT_RECORD if py and py_undo and (not mine["recorded"] or mine["unrecorded"]) else
@@ -6056,6 +5874,9 @@ def _prove(a, top, runners) -> int:
                 (_HELPERS_KEPT, ui.WARN, "cannot be proven: their module keeps a change outside its helpers' bodies "
                                          "(named below), so the run without the change ran it as it is now, and they "
                                          "pass:"),
+                (_JS_KEPT, ui.WARN, "cannot be proven: their JavaScript or TypeScript module changed outside its "
+                                    "tests, and devkit rebuilds only Python test modules, so the run without the "
+                                    "change ran it as it is now, and they pass:"),
                 (_NOT_ASSERTION, ui.WARN, "cannot be proven: without the change their test support (their module "
                                           "rebuilt, a rebuilt module or a test helper file they import) came back as "
                                           "at the base, and they fail on an error, not on an assertion, and pass "
