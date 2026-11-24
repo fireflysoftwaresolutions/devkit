@@ -402,5 +402,34 @@ class ReworkWhileTheReviewIsOpenTests(Base):
         self.assertIn("“y”", later[0])
 
 
+class ReviewQueuedBehindAnotherReviewTests(Base):
+    # The Code reviewer's lane runs review-a from m12; review-x joins it at m13, queued behind review-a, which closes at
+    # m20. The Backend engineer, who runs y (src/**, like x) since m11, rewrites src/x.py at m15. The lane was still on
+    # review-a then, so review-x began at m20 and saw the rewrite: as without the queue, its ✓ approves x.
+    def setUp(self):
+        super().setUp()
+        pg.start("Fix", plan=["w=10m [backend]", "x=30m [backend]", "y=30m [backend]",
+                              "review-a=20m [review] after w", "review-x=20m [review] after x"], now=self.m(0))
+        pg.assign("w", "Tank", activity="backend", scope="docs/**", now=self.m(0))
+        pg.assign("x", "Tank", activity="backend", scope="src/**", now=self.m(0))
+        launch("a_tank", "devkit:tank", f"{TANK}: w and x", at=self.m(1))
+        pg.step("w built", which="w", check="✓ 1 of 1", from_agent="a_tank", now=self.m(5))
+        pg.step("x built", which="x", check="✓ 3 of 3", from_agent="a_tank", now=self.m(10))
+        pg.assign("y", "Tank", activity="backend", scope="src/**", now=self.m(11))
+        pg.assign("review-a", "Seraph", activity="review", now=self.m(11))
+        launch("a_ser", "devkit:seraph", f"{SER}: review-a", at=self.m(12))
+        pg.assign("review-x", "Seraph", activity="review", now=self.m(13))
+        self.assertEqual((self.st("review-x")["owner"], self.st("review-x")["state"]), ("a_ser", "running"))
+
+    def test_a_rewrite_while_the_lane_was_still_on_the_earlier_review_is_not_unseen_by_the_queued_one(self):
+        self.assertFalse(pg._review_at_work(self.run_(), self.st("review-x"), self.m(15)))
+        self.edit("a_tank", "src/x.py", self.m(15))
+        pg.step("review-a done", which="review-a", check="✓ approve", from_agent="a_ser", now=self.m(20))
+        self.assertAlmostEqual(approvals.began(self.run_(), self.st("review-x")), self.m(20), delta=1)
+        self.end_review(30)
+        self.assertEqual(self.approved("x"), ["seraph"])
+        self.assertEqual(self.told("began before"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

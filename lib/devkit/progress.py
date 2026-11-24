@@ -8026,7 +8026,7 @@ def _review_at_work(run: dict, r: dict, ts: float) -> bool:
     """Was review step `r` at work at time `ts`: begun by then (approvals.began) and not ended by then? One still
     running or blocked has not ended; a done or skipped one ended when it finished, an unverified one when it ended
     (`ended`). A pending review, which no lane holds, is at work on nothing: the lane that takes it sees the files as
-    they are then."""
+    they are then; so is one queued in its lane behind an earlier review the lane has not given its verdict on."""
     from . import approvals
     if r.get("state") == "pending":
         return False

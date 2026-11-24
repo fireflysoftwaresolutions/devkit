@@ -356,13 +356,62 @@ def is_review(s: dict, roster=None) -> bool:
 
 
 def began(run: dict, s: dict):
-    """When review step `s` began in the lane that holds it: when that lane took it (`taken`: a lane that holds one
-    review takes the next when its work ends, and a reopened review keeps its first start), else the later of the
-    lane's start and the step's. Neither comes after the take, so work that ended later is work the review may not have
-    seen. None when nothing is known."""
-    lane = (run.get("agents") or {}).get(s.get("owner") or "") or {}
-    times = [t for t in (lane.get("started"), s.get("taken") or s.get("started")) if isinstance(t, (int, float))]
-    return max(times) if times else None
+    """When review step `s` began in the lane that holds it: when that lane moved to it. The lane takes it (`taken`)
+    when it is assigned or its work ends, even while it still runs an earlier review, since reviews share a lane; it
+    moves to it once each step it held open then has let go of the lane (_let_go), so work that ended while the lane
+    was still on the earlier step is work this review saw. Until then, a review still open began at nothing yet
+    (None); one that ended no later than such a step (one report ends them all) began when the lane took it, since
+    when it moved to it is unknown. Without `taken` (a step recorded before steps kept it), the later of the lane's
+    start and the step's. A reopened review keeps its first start. None when nothing is known."""
+    owner = s.get("owner") or ""
+    lane = (run.get("agents") or {}).get(owner) or {}
+    took = s.get("taken") or s.get("started")
+    times = [t for t in (lane.get("started"), took) if isinstance(t, (int, float))]
+    if not times:
+        return None
+    since = max(times)
+    if not isinstance(took, (int, float)):
+        return since
+    ends = []
+    for x in run.get("plan") or []:
+        t = x.get("taken") or x.get("started") if isinstance(x, dict) else None
+        if x is s or not isinstance(t, (int, float)) or t >= took or x.get("owner") != owner:
+            continue  # another lane's, or one the lane took with this review or after it
+        end = _let_go(run, x)
+        if end is None or end > took:
+            ends.append(end)  # the lane still held it when it took this review
+    if not ends:
+        return since
+    mine = _let_go(run, s)
+    if None in ends or (mine is not None and max(ends) >= mine):
+        return None if mine is None else since
+    return max([since] + ends)
+
+
+def _let_go(run: dict, x: dict):
+    """When the lane that owns step `x` was done with it: its first `dev progress step --step <x> --check …` since it
+    took it (a review stays running after its member's verdict, until the report), else when the step stopped holding
+    the lane: a done or skipped step when it finished, an unverified one when it ended so, a blocked one when it was
+    blocked (the run's history). None while it runs with no verdict; 0 when the record does not say: long ago."""
+    state = x.get("state")
+    if state == "running":
+        t = None
+    elif state in ("done", "skipped"):
+        t = x.get("finished")
+    elif state == "unverified":
+        t = x.get("ended") or x.get("unverified_at")
+    elif state == "blocked":
+        t = next((h.get("ts") for h in reversed(run.get("history") or []) if isinstance(h, dict)
+                  and h.get("step") == x.get("name") and h.get("to") == "blocked"), None)
+    else:
+        t = 0
+    t = t if isinstance(t, (int, float)) or t is None else 0
+    took = x.get("taken") or x.get("started") or 0
+    lane = (run.get("agents") or {}).get(x.get("owner") or "") or {}
+    said = next((u["ts"] for u in lane.get("updates") or [] if isinstance(u, dict) and u.get("kind") == "step"
+                 and u.get("step") == x.get("name") and str(u.get("check") or "").strip()
+                 and isinstance(u.get("ts"), (int, float)) and u["ts"] >= took - 1), None)  # updates keep whole seconds
+    return said if said is not None and (t is None or said < t) else t
 
 
 def saw(run: dict, review: dict, x: dict, closed=()) -> bool:

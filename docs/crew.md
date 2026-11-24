@@ -235,7 +235,10 @@ close of unverified work while its review runs, with the tech lead's evidence or
 that work ended, so the review's ✓ still approves it, unless the step got work since it ended unverified: then its work
 ends at that close. Its author's own close (its report's ✓ or its own `dev progress step` ✓) always ends its work at
 that close. A review's ✓ neither closes nor approves work that ended after the review began, or that got work since it
-began. Each time, the tech lead is told to have the new work reviewed. As soon as that work starts again, from done or
+began. A review that joins a reviewer's lane while that lane still runs an earlier review begins once the lane gives
+its verdict on the earlier one (`dev progress step --step <it> --check …`), so work done before that is work the
+review saw; when one report ends both with no verdict before it, the review began when it joined the lane. Each time,
+the tech lead is told to have the new work reviewed. As soon as that work starts again, from done or
 from unverified, the review and any other step running on it are flagged for recheck, so the run does not end before
 they are checked again. An author's lane that stops with no work since its unverified step ended keeps the time that
 step ended, so a verdict given in between still counts; work since then ends the step unverified again at the stop, and
