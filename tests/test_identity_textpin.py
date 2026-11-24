@@ -1964,6 +1964,31 @@ class LedgerFolderTests(TextPinCase):
         self.assertEqual(sorted(os.listdir(outside)), sorted(planted))
         self.assertEqual([(outside / n).read_text() for n in sorted(planted)], [planted[n] for n in sorted(planted)])
 
+    # a use mark planted where a linked session folder points never makes the PostToolUse hook flag the tech lead's
+    # call as resolved by a dev command its text does not run; the same mark in a real folder does
+    def test_a_use_mark_seen_through_a_linked_session_folder_flags_no_unexplained_use(self):
+        from devkit import hooks
+        outside = self.linked()
+        (pg.CALLS / "s1").mkdir()
+        for sid, folder in (("s-link", outside), ("s1", pg.CALLS / "s1")):
+            (folder / ".toolu_u.used").write_text(json.dumps({"pid": 1, "start": 1.0, "inode": 1}))
+            entry = {"pin": str(self.root / "no-pin"), "caller": "main", "cmd": "git status", "agent": "claude",
+                     "ts": time.time(), "session": sid, "tool_use_id": "toolu_u"}
+            hooks._pin_audits(entry, {"session_id": sid, "tool_use_id": "toolu_u", "hook_event_name": "PostToolUse"},
+                              "")
+        self.assertEqual([r["ref"]["session"] for r in self.records("caller.token-unexplained-use")], ["s1"])
+
+    # nor the Codex thread check flag a mismatch for it
+    def test_a_use_mark_seen_through_a_linked_session_folder_flags_no_codex_thread_mismatch(self):
+        from devkit import hooks
+        outside = self.linked()
+        (pg.CALLS / "s1").mkdir()
+        for sid, folder in (("s-link", outside), ("s1", pg.CALLS / "s1")):
+            (folder / ".toolu_t.used").write_text(json.dumps({"pid": 1, "start": 1.0, "inode": 1}))
+            hooks._codex_thread_mismatch("codex", {"session_id": sid, "tool_use_id": "toolu_t"},
+                                         {"thread_id": "thread-other"})
+        self.assertEqual([r["ref"]["session"] for r in self.records("caller.mismatch")], ["s1"])
+
     # the hook's ledger writes (call_opened, call_note) never change the mode of a folder a link points to, nor
     # write there
     def test_a_ledger_write_never_goes_through_a_linked_session_folder(self):
