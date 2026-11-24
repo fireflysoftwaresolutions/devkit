@@ -9,8 +9,12 @@
 # `dev visual verify`, `dev visual compare` and the marks use) and the folder `dev visual` names for axe-core
 # (commands.py); wizard.py's are in tests/test_wizard.py.
 #
+# Each try waits as long as its caller allows (30 s unless the caller gives its own limit: the wizard and dev doctor give
+# 15 s), and npm missing from PATH is named with the command that installs it, without a second ask. npmroot.cjs keeps
+# the same rule for the capture driver and axe; NodeLookup runs what the capture tests do not reach.
+#
 # A stand-in npm first on PATH answers from a plan, one line a call: `empty` prints nothing, `fail` exits 1, `slow`
-# sleeps past the timeout, anything else is printed as the folder; it logs every call. The folder it names holds a
+# sleeps 5 s, past the limit a test gives, anything else is printed as the folder; it logs every call. The folder it names holds a
 # playwright-core as dev install puts it under @playwright/cli. Each caller runs in a Python process of its own, so a
 # test sees what one process asks.
 # Tests carry comments, not docstrings: `dev test prove` leaves out tests with a docstring.
@@ -22,12 +26,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "lib"
+NPMROOT_CJS = LIB / "devkit" / "visual" / "npmroot.cjs"
+NODE = shutil.which("node")
 sys.path.insert(0, str(ROOT / "tests"))
 import _hermetic  # noqa: E402
 
@@ -111,12 +118,6 @@ class Lookup(NpmStandIn, unittest.TestCase):
         self.assertEqual(str(e.exception), "npm root -g gave no folder (it did not answer in 1 s, twice)")
         self.assertEqual(len(self.calls()), 2)
 
-    def test_an_npm_that_cannot_start_is_named(self):
-        with mock.patch.dict(os.environ, {"PATH": str(self.top / "no-npm-here")}), \
-                self.assertRaises(self.npmroot.NoFolder) as e:
-            self.npmroot.global_root()
-        self.assertEqual(str(e.exception), "npm root -g gave no folder (it could not start (ENOENT), twice)")
-
     def test_a_folder_on_the_second_ask_is_the_answer(self):
         for first in ("empty", "fail", "slow"):
             with self.subTest(first=first), mock.patch.object(self.npmroot, "_kept", None), \
@@ -199,6 +200,73 @@ class Callers(NpmStandIn, unittest.TestCase):
                 "did not run on VC-g33z1a8k0e. Reinstall it: dev install --only tools.\n")
         self.assertEqual(self.axe_warnings(2).count(line), 2)
         self.assertEqual(len(self.calls()), 2)
+
+
+class TryLimit(NpmStandIn, unittest.TestCase):
+    # A caller gives each try its own limit; npm missing from PATH is named with the command that installs it.
+    def setUp(self):
+        self.start_npm()
+        from devkit.visual import npmroot
+        self.npmroot = npmroot
+        for patcher in (mock.patch.dict(os.environ, {"PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}"}),
+                        mock.patch.object(npmroot, "_kept", None)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_each_try_waits_the_limit_its_caller_gives(self):
+        self.answers("slow", "slow")
+        start = time.monotonic()
+        with self.assertRaises(self.npmroot.NoFolder) as e:
+            self.npmroot.global_root(1)
+        self.assertEqual(str(e.exception), "npm root -g gave no folder (it did not answer in 1 s, twice)")
+        self.assertEqual(len(self.calls()), 2)
+        self.assertLess(time.monotonic() - start, 5)  # the stand-in sleeps 5 s: neither try waited it out
+
+    def test_a_missing_npm_says_to_install_it(self):
+        with mock.patch.dict(os.environ, {"PATH": str(self.top / "no-npm-here")}), \
+                self.assertRaises(self.npmroot.NoFolder) as e:
+            self.npmroot.global_root()
+        self.assertEqual(str(e.exception),
+                         "npm root -g gave no folder (npm is not installed: run dev install --only tools)")
+
+
+@unittest.skipUnless(NODE, "node is not on PATH")
+class NodeLookup(NpmStandIn, unittest.TestCase):
+    # npmroot.cjs, where the capture driver and axe read npm's folder: a try that does not answer in time, a missing
+    # npm, and the time a capture leaves for the lookup (store.CAPTURE_TIMEOUT, of which capture.cjs's own bound takes
+    # BOUNDS.captureSeconds after the lookup).
+    def setUp(self):
+        self.start_npm()
+
+    def node(self, script: str, path=None) -> dict:
+        # node -e with npmroot.cjs as `npmroot`; PATH is the stand-in's first, or `path`
+        env = _sandbox.env(stubs=[self.bin])
+        if path is not None:
+            env["PATH"] = path
+        p = subprocess.run([NODE, "-e", "const npmroot = require(process.argv[1]);\n" + script, str(NPMROOT_CJS),
+                            str(LIB / "devkit" / "visual" / "capture.cjs")], capture_output=True, text=True,
+                           timeout=120, env=env, cwd=str(self.top))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_an_npm_that_does_not_answer_in_time_is_asked_again_then_named(self):
+        self.answers("slow", "slow")
+        out = self.node("const start = Date.now(); const answer = npmroot.globalRoot(1000);"
+                        "process.stdout.write(JSON.stringify({answer, ms: Date.now() - start}));")
+        self.assertEqual(out["answer"], {"why": "it did not answer in 1 s, twice"})
+        self.assertEqual(len(self.calls()), 2)
+        self.assertLess(out["ms"], 5000)  # the stand-in sleeps 5 s: neither try waited it out
+
+    def test_a_missing_npm_says_to_install_it(self):
+        out = self.node("process.stdout.write(JSON.stringify(npmroot.globalRoot()));", path=str(self.top / "no-npm"))
+        self.assertEqual(out, {"why": "npm is not installed: run dev install --only tools"})
+
+    def test_two_tries_fit_the_time_a_capture_leaves_before_its_own_bound(self):
+        from devkit.visual import store
+        out = self.node("const { BOUNDS } = require(process.argv[2]);"
+                        "process.stdout.write(JSON.stringify("
+                        "{lookup: npmroot.TRIES * npmroot.TIMEOUT_MS / 1000, capture: BOUNDS.captureSeconds}));")
+        self.assertLessEqual(out["lookup"] + out["capture"], store.CAPTURE_TIMEOUT, out)
 
 
 if __name__ == "__main__":
