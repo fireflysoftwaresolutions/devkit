@@ -1330,13 +1330,16 @@ def _resolve_after(plan, s, refs) -> list:
 def _build_steps(items, plan) -> list:
     """parse_plan items -> their new steps, with `after` resolved against `plan` plus the new steps. The plan they make
     together is validated (validate_plan) before anything changes: on error, `plan` is untouched. A declared kind of
-    work ([id] in the spec) is stored on its step as explicit; an unknown id is refused."""
+    work ([id] in the spec) is stored on its step as explicit; an unknown id is refused. A new step whose name gives
+    the scratch folder of a step of `plan` or of an earlier new step (folder_twin) is refused; two steps of `plan`
+    saved before that rule may share one, and the plan still takes other steps."""
     new = [_new_step(it[0], it[1]) for it in items]
     full = list(plan or []) + new
     dup = _duplicate_name(full)
     if dup:
         raise StepError(f"two steps are named “{dup}”: give each step its own name, so `after` can name it")
-    for k, s in enumerate(full):
+    for k in range(len(full) - len(new), len(full)):
+        s = full[k]
         twin = folder_twin(full[:k], s["name"])
         if twin:
             raise StepError(f"“{twin['name']}” and “{s['name']}” differ only in case, accents, spaces or punctuation, "

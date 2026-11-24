@@ -214,5 +214,24 @@ class SharedFolderStepNameTests(unittest.TestCase):
             self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]], ["api-v2", "web"])
 
 
+class OldTwinRunAddStepTests(unittest.TestCase):
+    """A run saved before such names were refused may hold "api v2" and "api-v2". The rule checked every step of the
+    plan, so that run refused every step added to it, even "web", while `dev crew delegate` still added one: only the
+    steps being added are checked, against the plan and each other."""
+
+    def test_a_saved_run_with_steps_that_share_a_folder_still_takes_an_unrelated_step(self):
+        with TempState():
+            pg.start("Fix", plan=["base=30m"], now=T0)
+            run = pg.load_run("claude", "s1")
+            run["plan"] += [pg._new_step("api v2", 30), pg._new_step("api-v2", 30)]
+            pg.run_path("claude", "s1").write_text(json.dumps(run))
+            pg.add_step("web=30m", now=T0 + 60)
+            with self.assertRaises(pg.StepError) as twin:
+                pg.add_step("API_V2=30m", now=T0 + 120)
+            self.assertIn("“api v2” and “API_V2”", str(twin.exception))
+            self.assertEqual([s["name"] for s in pg.load_run("claude", "s1")["plan"]],
+                             ["base", "api v2", "api-v2", "web"])
+
+
 if __name__ == "__main__":
     unittest.main()
