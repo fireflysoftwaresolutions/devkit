@@ -372,28 +372,34 @@ def release_tag(repo, version: str, policy=None) -> str:
     return ("v" if release_tag_format(repo, policy).startswith("v") else "") + version
 
 
-def tag_violation(scope: str, tag: str):
-    """A tag that does not follow the recorded scheme -> the reason, else None."""
+def tag_violation(scope: str, tag: str, repo=None):
+    """A tag that does not follow the recorded scheme -> the reason, else None. The reason spells the tag as dev release
+    does (release_tag): `repo`'s tags spell it where the policy records no tag_format, else the v."""
     p = load(scope)
     if not p or not tag or not p.get("versioning"):
         return None
-    v = "v" if str(p.get("tag_format") or "v").startswith("v") else ""  # the spelling dev release tags in
+    if repo is not None:
+        v = release_tag(repo, "", p)
+    else:
+        v = "v" if str(p.get("tag_format") or "v").startswith("v") else ""
+    fmt = p.get("tag_format") or {"calver": f"{v}YY.MM.PATCH", "semver": f"{v}MAJOR.MINOR.PATCH",
+                                  "pep440": f"{v}{PEP440_FORMAT}"}.get(p["versioning"])
     if p["versioning"] == "calver":
         m = CALVER_RE.match(tag)
         if m and 1 <= int(m.group(2)) <= 12:
             return None
-        return (f"`{tag}` does not follow this project's CalVer policy ({p.get('tag_format')}). The next version is "
+        return (f"`{tag}` does not follow this project's CalVer policy ({fmt}). The next version is "
                 f"`dev calver --next`; tag it as {v}<that>, or change the policy with `dev delivery apply --set "
                 f"versioning=… --why \"…\"`.")
     if p["versioning"] == "semver":
         if SEMVER_RE.match(tag):
             return None
-        return (f"`{tag}` is not a SemVer tag ({p.get('tag_format')}). Use {v}MAJOR.MINOR.PATCH, or change the policy "
+        return (f"`{tag}` is not a SemVer tag ({fmt}). Use {v}MAJOR.MINOR.PATCH, or change the policy "
                 f"with `dev delivery apply --set versioning=… --why \"…\"`.")
     if p["versioning"] == "pep440":
         if PEP440_RE.match(tag):
             return None
-        return (f"`{tag}` is not a PEP 440 version tag ({p.get('tag_format')}). Use {v}{PEP440_FORMAT}, for example "
+        return (f"`{tag}` is not a PEP 440 version tag ({fmt}). Use {v}{PEP440_FORMAT}, for example "
                 f"{v}0.1.0a17, or change the policy with `dev delivery apply --set versioning=… --why \"…\"`.")
     return None
 

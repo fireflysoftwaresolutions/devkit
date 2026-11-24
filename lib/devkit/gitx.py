@@ -5381,7 +5381,7 @@ def _release(a, c) -> int:
         if notes:
             print(ui.dim("  notes: " + notes.splitlines()[0][:100]))
         return 0
-    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)  # the recorded policy's tag format
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag, c.top)  # the recorded policy's tag format
     if bad:
         return refuse(bad)
     rc, _, err = core.git(c.top, "tag", "-s" if sign else "-a", tag, "-m", f"Release {version}")
@@ -5603,7 +5603,7 @@ def _tag_push(c, tag: str, sha: str, remote: str = "origin"):
     """A tag the push sends: the recorded delivery policy's tag format (delivery.tag_violation), then the embargoes,
     since a tag publishes the commits it points to. -> the refusal's exit code, or None."""
     from . import delivery
-    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag, c.top)
     if bad:
         return refuse(bad)
     return _embargo_refusal(c, tag, sha, remote=remote) if sha else None
@@ -5845,7 +5845,7 @@ def cmd_gh(a) -> int:
                                                     "--notes-start-tag"})
             if pos:
                 from . import delivery
-                bad = delivery.tag_violation(delivery.scope_for(c.top), pos[0])  # the tag gh would create
+                bad = delivery.tag_violation(delivery.scope_for(c.top), pos[0], c.top)  # the tag gh would create
                 if bad:
                     return refuse(bad)
     return EXEC(["gh", *args], cwd=cwd)

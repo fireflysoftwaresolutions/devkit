@@ -96,7 +96,8 @@ class DetectTests(unittest.TestCase):
                   "26.11.3", ("calver", "YY.MM.PATCH", "26.11.2"), "26.11.3"),
                  ("semver with one old v tag", ["1.0.0", "1.1.0", "1.2.0", "v0.9.0"],
                   "1.3.0", ("semver", "MAJOR.MINOR.PATCH", "1.2.0"), "1.3.0"),
-                 ("70 old v tags, then newer ones without it", [f"v25.1.{n}" for n in range(70)] + ["26.11.0", "26.11.1"],
+                 ("70 old v tags, then newer ones without it",
+                  [f"v25.1.{n}" for n in range(70)] + ["26.11.0", "26.11.1"],
                   "26.11.2", ("calver", "YY.MM.PATCH", "26.11.1"), "26.11.2"),
                  ("calver back to the v", ["26.9.0", "26.10.0", "v26.11.0"],
                   "26.11.1", ("calver", "vYY.MM.PATCH", "v26.11.0"), "v26.11.1"),
@@ -169,6 +170,17 @@ class RecordTests(unittest.TestCase):
             with self.subTest(fmt=fmt):
                 delivery.record("acme/tags", {"versioning": scheme, "tag_format": fmt}, "the test's policy", a=A)
                 self.assertIn(told, delivery.tag_violation("acme/tags", bad) or "")
+
+    def test_a_policy_without_a_tag_format_is_told_in_the_spelling_of_the_repositorys_tags(self):
+        # dev release tags as the repository's tags are spelled when the policy names no format (delivery.release_tag),
+        # so the refusal names that spelling too, not always the v
+        delivery.record("acme/bare", {"versioning": "calver"}, "no tag format recorded", a=A)
+        for tags, told in ((["26.10.0"], "tag it as <that>"), (["v26.10.0"], "tag it as v<that>"),
+                           ([], "tag it as v<that>")):
+            with self.subTest(tags=tags):
+                r = repo_with({"README.md": "x"}, tags=tags)
+                self.assertIn(told, delivery.tag_violation("acme/bare", "1.4.0", r) or "")
+                self.assertIsNone(delivery.tag_violation("acme/bare", "26.11.0", r))
 
     def test_job_timeout_is_a_policy_field(self):
         p = delivery.set_field({}, "job_timeout_minutes", "45")

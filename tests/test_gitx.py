@@ -3054,6 +3054,22 @@ class GitPushFlagTests(unittest.TestCase):
                     self.assertEqual(rc, 2)
                     self.assertIn("`release-1` is not a SemVer tag", err)
 
+    def test_a_policy_without_a_tag_format_names_the_fix_in_the_spelling_of_the_repositorys_tags(self):
+        # the refusal told a repository whose tags have no v to use vMAJOR.MINOR.PATCH, a tag dev release never makes
+        with Sandbox() as s:
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver"}))
+            git(s.repo, "tag", "1.0.0")
+            git(s.repo, "tag", "release-1")
+            rc, err = self.push(s, "origin", "release-1")
+            self.assertEqual(rc, 2)
+            self.assertIn("`release-1` is not a SemVer tag (MAJOR.MINOR.PATCH). Use MAJOR.MINOR.PATCH,", err)
+            dev("ci", "--mark-passed")
+            rc, _, err = dev("gh", "release", "create", "release-1", "--notes", "x")
+            self.assertEqual(rc, 2)
+            self.assertIn("Use MAJOR.MINOR.PATCH,", err)
+
     def test_follow_tags_follows_the_recorded_tag_format(self):
         # --follow-tags sends the branch and the local tags the remote lacks along with it
         with Sandbox() as s:
