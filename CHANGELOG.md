@@ -217,8 +217,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   test it cut as one whole function body, so a construct devkit's reader misreads keeps the module instead of
   proving falsely; postfix `++` and `--` before a division, braces inside a template expression, and HTML-like
   comments in `.cjs` files are read correctly. Each run has its own temporary folder, a test that failed on an error
-  is run again from a fresh copy and proves only when it fails the same way, a read-only folder left in the copy no
-  longer crashes the run, and pytest-timeout's current `Timeout (>1.0s)` message is never an assertion.
+  is run again from a fresh copy and proves when it fails on an assertion or with the same error type and message
+  as the run without the change, a read-only folder left in the copy no longer crashes the run, and
+  pytest-timeout's current `Timeout (>1.0s)` message is never an assertion.
 - `dev visual verify`, `compare`, and the marks, `dev doctor`'s pinned npm packages row, and the packages step ask
   `npm root -g` again when it fails or prints nothing, keep a good answer for the process, and say `npm root -g gave
   no folder` instead of reporting no browser or every pinned package as not installed. Each try waits at most 30 s
