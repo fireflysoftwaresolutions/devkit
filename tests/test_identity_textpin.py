@@ -1877,5 +1877,53 @@ class TextPinRecordFailureTests(TextPinCase):
         self.assertEqual(pg.open_calls("s1"), [])
 
 
+
+# The ledger's session folders and files as a user's other processes may leave them: a session folder that is a link,
+# a ledger file that is a link or a FIFO. devkit never reads, writes or removes through a link, and never blocks.
+class LedgerFolderTests(TextPinCase):
+    def linked(self, sid="s-link"):
+        outside = self.root / f"outside-{sid}"
+        outside.mkdir(mode=0o755)
+        outside.chmod(0o755)
+        pg.CALLS.mkdir(parents=True, exist_ok=True)
+        os.symlink(outside, pg.CALLS / sid)
+        return outside
+
+    def kept_record(self, sid, tid, ts):
+        return json.dumps({"session": sid, "tool_use_id": tid, "ts": ts, "pin_by": "text", "background": True,
+                           "caller": "main", "agent": "claude", "cmd": "dev watch --wait"})
+
+    # the hook's ledger writes (call_opened, call_note) never change the mode of a folder a link points to, nor
+    # a ledger entry that is a link is never read, whatever it points to
+    def test_a_ledger_entry_that_is_a_link_is_never_read(self):
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        target = self.root / "planted.json"
+        target.write_text(json.dumps({"tool_use_id": "toolu_l", "ts": time.time(), "caller": "main", "session": "s1",
+                                      "agent": "claude", "cmd": "dev progress add extra"}))
+        os.symlink(target, folder / "toolu_l.json")
+        self.assertEqual(pg.open_calls("s1"), [])
+        self.assertTrue(target.exists())
+
+    # SessionEnd: a contest that lands while the call closes (call_closed can wait on the record's lock) is audited,
+    # as at the call's PostToolUse
+    def test_a_contest_made_while_the_session_end_closes_the_call_is_audited(self):
+        self.plan_with_link()
+        data, _, _ = self.hook(LEAD)
+        entry = pg.call_entry(data)
+        real, contested = pg.call_closed, []
+
+        def contest_then_close(*a, **k):
+            contested.append(identity._contest(entry))
+            return real(*a, **k)
+        with mock.patch.object(pg, "call_closed", contest_then_close):
+            identity.end_session(self.agent, "s1")
+        self.assertEqual(contested, [True])
+        found = [r for r in self.records("calls.pin-contested") if r["ref"]["result"] == "flagged"]
+        self.assertEqual(len(found), 1)
+        self.assertIn("session-ended", found[0]["detail"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
