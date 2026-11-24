@@ -90,7 +90,7 @@ class OldRecordHostnameTest(unittest.TestCase):
     # dashboard (work._LABEL); anything else, control characters that would reach a terminal included, is another Mac
     def test_an_old_records_hostname_shows_only_when_it_is_a_plain_short_hostname(self):
         self.assertEqual(vmap.mac_name("mac-studio"), "mac-studio")
-        for name in ("mac\x1b]0;owned\x07studio", "mac\x1b[2J", "mac‮oiduts", "Bob's <b>Mac</b>", "mac studio", "a" * 64):
+        for name in ("mac\x1b]0;owned\x07studio", "mac\x1b[2J", "mac\u202eoiduts", "Bob's <b>Mac</b>", "mac studio", "a" * 64):
             self.assertEqual(vmap.mac_name(name), "another Mac", repr(name))
 
 
