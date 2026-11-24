@@ -512,8 +512,9 @@ To update a third-party skill, review the upstream change, put the new full comm
 version, and, for `@playwright/cli`, the playwright-core inside it at the exact version the CLI's own `package.json`
 names. When the row fails, run the npm command it prints, for example
 `npm install -g --ignore-scripts @playwright/cli@0.1.24`, then `dev doctor` again. When it says
-`npm root -g gave no folder`, npm failed or printed nothing twice, so the row could not check the pins: check that
-`npm root -g` prints a folder here, then run `dev doctor` again. To move a pin,
-change its version in `config/npm-globals.txt` in a branch: `dev doctor` then prints the command that installs it.
+`npm root -g gave no folder`, npm failed, did not answer in time, or printed nothing on both of its tries (15 s each),
+so the row could not check the pins: check that `npm root -g` prints a folder here, then run `dev doctor` again. To
+move a pin, change its version in `config/npm-globals.txt` in a branch: `dev doctor` then prints the command that
+installs it.
 
 See also [Agents](agents.md), [Skills and plugins](skills-and-plugins.md), and [Models and tokens](models-and-tokens.md).
