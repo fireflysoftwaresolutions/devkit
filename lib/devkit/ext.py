@@ -328,8 +328,11 @@ def skill_applicability(agent: str, groups=None) -> dict:
     return {name: name in on for name in known}
 
 def _read_json(path: Path):
+    """An agent's JSON file (its settings, a repository's .claude/settings.json, its plugin records) -> its value
+    (core.load_json), or None when it cannot be read: a session start reads them, and a repository's are a
+    teammate's."""
     try:
-        return json.loads(path.read_text())
+        return core.load_json(path.read_text())
     except (OSError, ValueError):
         return None
 
@@ -382,8 +385,9 @@ def _toml_value(text: str):
     if m:
         return m.group(1) if _TOML_TAIL.match(m.group(2)) else _UNREAD
     try:
-        v, end = json.JSONDecoder().raw_decode(text)
-    except ValueError:
+        v, end = json.JSONDecoder().raw_decode(text)  # where the value ends: a comment may follow it
+        v = core.load_json(text[:end])  # nested deeper than core.JSON_MAX_DEPTH: a form the reader does not read
+    except (ValueError, RecursionError, MemoryError):
         return _UNREAD
     plain = (lambda x: isinstance(x, (str, bool, int)) or (isinstance(x, float) and x == x and abs(x) != float("inf"))
              or (isinstance(x, list) and all(plain(y) for y in x)))
@@ -516,6 +520,9 @@ def _toml_check(text: str, servers: dict, loose: list):
         real = tomllib.loads(text).get("mcp_servers", {})
     except tomllib.TOMLDecodeError:
         loose.append("the file is not valid TOML")
+        return
+    except (RecursionError, MemoryError):  # a value nested past what tomllib can read: none of the region is read
+        loose.append("the file nests a value too deep to read")
         return
     if not isinstance(real, dict):
         loose.append("mcp_servers is no table")

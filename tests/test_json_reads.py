@@ -32,7 +32,7 @@ import test_acceptance_hooks as acceptance  # noqa: E402  (the hook entry run as
 import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extension runs it)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import (audit, branches, bugs, canary, ciwatch, codexlaunch, continuity, core, gates, gc,  # noqa: E402
+from devkit import (audit, branches, bugs, canary, ciwatch, codexlaunch, continuity, core, ext, gates, gc,  # noqa: E402
                     hooks, language, lessonlint, lessons, mcp, policy, progress, scope, shellparse, skillguard, state)
 from devkit.visual import compare as vcompare, map as vmap, report as vreport, store as vstore, walk as vwalk  # noqa: E402,E501
 
@@ -665,6 +665,44 @@ class HookInputTests(acceptance.Sandbox):
                 self.assertEqual((code, err), (0, ""))
         self.assertEqual(self.failures(), [])
 
+    def session_start(self):
+        """A Claude Code session start, its spawns recorded rather than started (acceptance.BOOT) -> its output."""
+        out = self.hook("session-start", "claude", self.claude("SessionStart", source="startup",
+                                                               model="claude-opus-5-5"))
+        self.assertIn("devkit · workspace context", out["hookSpecificOutput"]["additionalContext"])
+        return out
+
+    def test_session_start_reads_deep_project_settings_as_unreadable(self):
+        """ext reads the repository's committed .claude/settings.json for its enabled plugins at every start."""
+        settings = self.repo / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text('{"enabledPlugins": {"tool@acme": true}}')
+        self.assertEqual(ext.project_plugins(str(self.repo)),
+                         {"tool@acme": {"on": True, "file": ".claude/settings.json"}})
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                settings.write_text('{"enabledPlugins": {"tool@acme": true}, "x": ' + deep(d) + "}")
+                self.session_start()
+                self.assertEqual(self.failures(), [])
+                self.assertEqual(ext.project_plugins(str(self.repo)), {})
+
+    def test_session_start_reads_a_deep_codex_mcp_value_as_unread(self):
+        """ext reads Codex's config.toml for its MCP servers at every start; a value nested too deep is a form it does
+        not read, which takes the server out of the app's."""
+        config = self.home / ".codex" / "config.toml"
+        config.parent.mkdir(exist_ok=True)
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                text = '[mcp_servers.tool]\ncommand = "npx"\nargs = ' + deep(d) + "\n"
+                config.write_text(text)
+                self.session_start()
+                self.assertEqual(self.failures(), [])
+                servers, _ = ext.codex_mcp_servers(text)
+                self.assertEqual((servers["tool"]["table"], servers["tool"]["unread"]),
+                                 ({"command": "npx"}, ["line 3"]))
+        self.assertEqual(ext.codex_mcp_servers('[mcp_servers.tool]\nargs = [["a"], "b"]\n')[0]["tool"]["table"],
+                         {"args": [["a"], "b"]})
+
     def test_config_change_refuses_a_settings_file_with_a_byte_that_is_not_utf8(self):
         """Claude Code reads such a file with the byte replaced, so its DEVKIT_* variables still take effect."""
         local = self.repo / ".claude" / "settings.local.json"
@@ -772,9 +810,9 @@ REVIEWED = {
     ("docs", "_vale_stops"): (1, TOOL),
     ("docs", "check"): (1, TOOL),
     ("ext", "Upstream._json"): (1, TOOL),
-    ("ext", "_read_json"): (1, COMMAND + " (the agents' settings, read by dev ext and dev install)"),
     ("ext", "_rw"): (1, SHIPPED),
-    ("ext", "_toml_value"): (1, COMMAND + " (a line of Codex's config.toml)"),
+    ("ext", "_toml_value"): (1, "raw_decode finds where a value of Codex's config.toml ends, on one line, and "
+                                "core.load_json reads it bounded; RecursionError there reads as unread"),
     ("ext", "bump"): (1, SHIPPED),
     ("fs", "_grep_ast"): (1, TOOL),
     ("fs", "_history"): (1, OWN),
