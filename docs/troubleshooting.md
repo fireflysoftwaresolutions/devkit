@@ -35,6 +35,23 @@ tail -50 ~/.local/state/devkit/logs/sync.log
 dev sync                                                  # run a sync in the foreground
 ```
 
+## Exit codes
+
+A `dev` command's exit code tells a refusal from devkit's own bug, so a script or an agent knows whether to change
+the command, run it again, or work around a bug.
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `0` | The command did its work | Nothing |
+| `1` | The command ran and found problems, or could not finish a step and says why: `dev stubs` found unfinished work, `dev docs check` found errors, `dev test` had failing tests | Read the output: it names each problem. Fix them, or wait as it says, and run the command again |
+| `2` | devkit refused on purpose. stderr says `dev <command>: <the reason>`, and a `fix:` line says what to run instead | Do what the reason or the `fix:` line says. No bug report is filed |
+| `75` | Busy: another devkit process held the record the command needs, and the message names it | Run the command again |
+| `70` | devkit's own bug. stderr shows `devkit bug <fingerprint>`, the known detour when there is one, and the `devkit-bug:` marker | Follow the detour, or get the same result another way. The traceback stays in `~/.local/state/devkit/crashes/`, and the safe report is delivered automatically (see [the bug registry](bug-registry.md)) |
+| `130` | You stopped the command with `Ctrl-C` | Run it again when you want |
+| `141` | The program reading the output closed it first, as `head` does in `dev audit --json \| head` | Nothing: devkit did not fail |
+
+`dev session` also exits `3` when another session holds the claim and `4` when no live session matches the target.
+
 ## Installing and updating
 
 ### The installer stopped at a step
@@ -316,7 +333,10 @@ A miss never sends the turn back, because you have already read the reply. devki
 carries a short reminder for the agent: what went wrong and the form to use, to follow when that turn is development
 work. A background notification or a message you type while the agent works gets no reminder, and the reminder comes
 again until a development turn ends after it. The same holds for a crew member named without the role, a missing or
-wrong Progress line, and a reply in another language than yours. `dev canary` lists them per rule and day on its
+wrong Progress line, a reply in another language than yours, and a **You** bullet that asks you to approve or decide
+while the work is in auto mode and no decision waits for you: the reminder tells the agent to take the recommended
+option, record it with `dev crew ask --decision`, and keep in **You** only an action on your machine or account or a
+decision that approves a step. `dev canary` lists them per rule and day on its
 `reminded, not sent back` line; a miss in a turn that went back for other work joins that send-back instead and shows
 on the `added to a send-back` line. If the agent rewrites or repeats its earlier reply after a reminder, the session
 runs instructions from an older release: restart it.
@@ -325,7 +345,8 @@ runs instructions from an older release: restart it.
 
 The Stop hook asks for one more pass, never in a loop, when the turn needs more work. The agent does that work, then
 ends with a short final message that says only what is new since its last reply: it never repeats that reply. The
-status block, names without roles, the Progress line, and the reply language never send a turn back (see
+status block, names without roles, the Progress line, the reply language, and the **You** bullet never send a turn
+back (see
 [The status block is missing or scored as malformed](#the-status-block-is-missing-or-scored-as-malformed)); when the
 turn goes back for another reason, their reminder joins that message.
 
@@ -404,9 +425,9 @@ change instead of taking it as the tech lead's, and records why:
 
 Reads and waits, such as `dev crew read` and `dev watch --wait`, are not refused. `dev audit --action caller` lists
 the records ([The audit trail › Caller identity records](audit.md#caller-identity-records)). Outside Claude Code's
-bypass mode, or a Codex approval policy other than `never`, only a call that visibly runs `dev` carries the token: do
-not add an allow rule for `export` to get one on every call, since it would allow any command that starts with an
-export.
+bypass mode, or with a Codex approval policy other than `never`, a call of one plain `dev` command in sh, bash, or zsh
+goes out as written and its own shell names its caller ([The crew › Who is calling](crew.md#who-is-calling)): do not add an allow rule for
+`export` to get a token on every call, since it would allow any command that starts with an export.
 
 ### Codex profile models are not available
 
@@ -481,8 +502,12 @@ disk, and stops when the new text would lose lines that the command does not cha
    dev task edit <id> --title "<that heading>" --why "the heading was edited by hand"
    ```
 
-3. If it still refuses, devkit misread the file. Leave the file as it is, and report the bug with the file and the
-   message.
+3. If it still refuses, devkit misread the file. Leave the file as it is, and report the bug, as the message's
+   `fix:` line says:
+
+   ```bash
+   dev bug report --title "a write of a work item or plan would drop lines it does not edit"
+   ```
 
 The sync's lock jobs, which renew your locks and release expired ones, skip an item they can't write for the same
 reason and leave it as it is. They say so in `~/.local/state/devkit/logs/sync.log` (`dev jobs logs sync` for the
@@ -547,6 +572,20 @@ configuration). They are local checks, and each failure prints the sign-in comma
 `aws configure sso`, `gcloud auth login`, `doctl auth init`, or the token to export for Bitbucket
 (`BITBUCKET_TOKEN`) and Azure DevOps (`AZURE_DEVOPS_EXT_PAT`). A missing CLI is installed by
 `dev install --only tools`.
+
+### Extensions accepted by an agent stay at every session start
+
+An agent that installs or updates an extension accepts the change outside a terminal, and its own `dev ext ack`
+leaves that acceptance listed: the command exits with `1`, says which acceptances stay, and records the attempt in
+the audit trail. Only you acknowledge what an agent accepted:
+
+```bash
+dev audit --action ext.accept   # which process accepted each change, from which terminal
+dev ext ack                     # in a terminal window, not through an agent
+```
+
+If you did not expect an entry, do not acknowledge it: remove what it accepted first. See
+[Skills and plugins](skills-and-plugins.md).
 
 ## Files
 

@@ -20,7 +20,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "tests"))
-from devkit import codexlaunch, core, hooks, progress  # noqa: E402
+from devkit import codexlaunch, core, hooks, progress, readonly  # noqa: E402
 from test_progress import TempState, repo_with_worktrees  # noqa: E402
 
 
@@ -306,6 +306,34 @@ class CliScratchTests(unittest.TestCase):
         self.assertFalse(self.own.exists())
         with codexlaunch.codex_scratch_context("claude", self.event()):
             self.assertIsNone(codexlaunch.APP_SCRATCH.get())
+
+
+class JoinedStepTests(ScratchCase):
+    # The Code reviewer's lane ran review-api, the step its brief named, and review-ui joined it. Its folders followed
+    # only the step it runs now, so a redirect into scratchpad/seraph-review-api/, the folder its brief named, counted
+    # as a shell write and ended its review unverified, and scratchpad/seraph-review-ui/ was never made.
+    def setUp(self):
+        super().setUp()
+        self.register_member(agents={"child": {
+            "persona": "seraph", "state": "running", "binding": "bound", "label": "Code reviewer (Seraph): review-api",
+            "assigned_steps": ["review-api", "review-ui"]}}, plan=[
+            {"name": "review-api", "label": "Seraph", "owner": "child", "state": "done", "finished": 1},
+            {"name": "review-ui", "label": "Seraph", "owner": "child", "state": "running", "joined": "child"}])
+        self.save_record(launches={}, subagents={})  # as the hooks keep it: this call binds nothing new
+        self.pad = self.host / "work/scratchpad"
+        self.event = {"session_id": "chat", "agent_id": "child", "cwd": str(self.host)}
+
+    def test_a_redirect_into_the_folder_its_brief_named_is_no_write_after_a_review_joins_its_lane(self):
+        folders = self.registered(agent_id="child")[1]
+        self.assertEqual(folders, (str(self.pad / "seraph-review-ui"), str(self.pad / "seraph-review-api"),
+                                   str(self.pad / "seraph")))
+        with codexlaunch.codex_scratch_context("codex", self.event):
+            self.assertTrue(readonly.redirect_reads(str(self.pad / "seraph-review-api/probe.log"), str(self.host)))
+            self.assertFalse(readonly.redirect_reads(str(self.pad / "seraph-review-x/probe.log"), str(self.host)))
+
+    def test_the_joined_steps_folder_is_made_at_the_lanes_next_tool_call(self):
+        hooks._bind_member("codex", dict(self.event, tool_name="exec_command"))
+        self.assertTrue((self.pad / "seraph-review-ui").is_dir())
 
 
 if __name__ == "__main__":

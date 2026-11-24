@@ -28,6 +28,11 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS.parent / "lib"))
 sys.path.insert(0, str(TESTS))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, canary, core, hooks, skillguard, state  # noqa: E402
 from test_handoff_check import NOTE, commit  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402

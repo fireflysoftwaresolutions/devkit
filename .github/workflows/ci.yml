@@ -60,21 +60,41 @@ jobs:
           path: ${{ env.DEVKIT_NATIVE_EVIDENCE }}/native.json
           if-no-files-found: error
           retention-days: 14
-      - name: Unit tests
-        # Part DEVKIT_TEST_PART of PARTS: every PARTS-th test file by name, then the real-state check of this part's
-        # run; the parts together take each test file once. Where the matrix is not expanded (dev ci --run gives no
-        # part), the step runs the whole suite, the delivery policy's test gate, never a part of it: the part has a
-        # name of devkit's own, so a SHARD the developer's shell exports never makes the local gate a part.
+      # The test that devkit's generated documents pass its own docs checks needs markdownlint-cli2 (on Node 22 or
+      # newer) and Vale, and skips without them: both are installed at exact versions, each released at least two
+      # weeks before it was pinned. Vale's archive must match its release checksum; npm installs markdownlint-cli2
+      # without running any package's install scripts. dev ci --run skips these steps and uses the linters installed
+      # on this Mac.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Install the docs linters
+        env:
+          VALE_VERSION: "3.26.0"
         run: |
-          if [ -z "${DEVKIT_TEST_PART:-}" ]; then
-            python -m unittest discover -s tests -t .
-            exit
+          build=macOS_arm64 sum=a6c3370f53bad93086c6b85f3163676e44e08049d69743afdcc13f3aab5b7482
+          if [ "$(uname -m)" = x86_64 ]; then
+            build=macOS_64-bit sum=df42b317be6ece6a6a70d06b952deec581d047046eb93ea4632f58da56a86ff9
           fi
-          modules=$(cd tests && for f in test_*.py; do [ "$f" = test_zz_real_state_untouched.py ] || echo "$f"; done |
-            awk -v n="${PARTS:-1}" -v k="$DEVKIT_TEST_PART" '(NR - 1) % n == k - 1 { sub(/[.]py$/, ""); print "tests." $0 }')
-          if [ -z "$modules" ]; then echo "no test file in part $DEVKIT_TEST_PART of ${PARTS:-1}" >&2; exit 1; fi
-          # shellcheck disable=SC2086 # one module name per word
-          python -m unittest $modules tests.test_zz_real_state_untouched
+          tools="$RUNNER_TEMP/docs-linters"
+          mkdir -p "$tools/bin"
+          curl -fsSL -o "$tools/vale.tar.gz" \
+            "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_${build}.tar.gz"
+          echo "$sum  $tools/vale.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$tools/vale.tar.gz" -C "$tools/bin" vale
+          npm install --global --prefix="$tools" --ignore-scripts --no-audit --no-fund markdownlint-cli2@0.24.0
+          "$tools/bin/vale" --version
+          npm ls --global --prefix "$tools" markdownlint-cli2
+          echo "$tools/bin" >> "$GITHUB_PATH"
+      - name: Unit tests
+        # The delivery policy's test gate, the very command dev ci --run runs here and observes, so its --resume reruns
+        # only the failed and affected tests. On the runner the matrix gives it part DEVKIT_TEST_PART of PARTS:
+        # tests/__init__.py then loads every PARTS-th test module by name, then the real-state check of this part's
+        # run, and the parts together load each module once. dev ci --run expands no matrix, so it gives no part and
+        # the whole suite runs: the part has a name of devkit's own, so a SHARD the developer's shell exports never
+        # makes the local gate a part.
+        run: python -m unittest discover -s tests -t .
         env:
           DEVKIT_NO_NOTIFY: "1"
           PARTS: "2"

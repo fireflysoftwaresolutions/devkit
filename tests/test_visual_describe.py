@@ -43,6 +43,8 @@ import test_visual_store as base  # noqa: E402  (the pinned Chromium, or why it 
 import test_visual_cli as clitest  # noqa: E402  (dev's parser over the temporary store)
 
 from devkit.visual import store  # noqa: E402
+from devkit import work  # noqa: E402
+from test_visual_map import presence  # noqa: E402
 
 VISUAL = ROOT / "lib" / "devkit" / "visual"
 DESCRIBE = VISUAL / "describe.js"
@@ -339,6 +341,15 @@ class PlantedCase(clitest.CliCase):
         return out.split(f"<<captured-data {starts[0]}>>", 1)[1].split(f"<<end captured-data {ends[0]}>>", 1)[0]
 
 
+def taken_elsewhere(case, c):
+    # the capture as another Mac took it: the record names that Mac by its machine id, which publishes "studio"
+    c["by"]["host"], c["image"]["where"] = "m-studio01", "local:m-studio01"
+    store.save(base.P, c)
+    case.patched(work, "PRESENCE", new=case.tmp / "presence")
+    presence(case.tmp / "presence", "bob@m-studio01", "studio")
+    return c
+
+
 class DescribeCommandTest(PlantedCase):
     def test_describe_prints_every_element_inside_one_data_block_whose_nonce_is_new_each_run(self):
         elements = self.invoices()
@@ -400,11 +411,29 @@ class DescribeCommandTest(PlantedCase):
         self.assertIn(f"The description of {c['id']} is not on this Mac", err)
         self.assertIn(f"dev visual capture --again {c['id']}", err)
 
+    # the message names the Mac the description is on as the dashboard does, its name with its id, never the bare id
+    def test_describe_names_the_mac_the_description_is_on(self):
+        c = taken_elsewhere(self, self.plant(self.invoices()))
+        (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+        rc, out, err = self.dev("describe", c["id"])
+        self.assertEqual(rc, 1)
+        self.assertIn(f"The description of {c['id']} is not on this Mac: it was taken on another Mac (m-studio01). Capture it "
+                      f"again here: dev visual capture --again {c['id']}", " ".join(err.split()))
+
 
 @unittest.skipUnless(base.BROWSERS, base.NO_BROWSER or "")
 class MarksCommandTest(PlantedCase):
     def paths(self, out):
         return [Path(p) for p in re.findall(r"(/\S+\.png)", out)]
+
+    # the picture is on another Mac: the message names it as the dashboard does, its name with its id
+    def test_marks_names_the_mac_the_picture_is_on(self):
+        c = taken_elsewhere(self, self.plant(self.invoices()))
+        (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+        rc, out, err = self.dev("marks", c["id"])
+        self.assertEqual(rc, 1)
+        self.assertIn(f"The picture of {c['id']} is not on this Mac: it was taken on another Mac (m-studio01). Capture it "
+                      f"again here: dev visual capture --again {c['id']}", " ".join(err.split()))
 
     def test_marks_cuts_viewport_high_tiles_and_one_marked_copy_whose_marks_name_elements(self):
         c = self.plant(self.invoices())
@@ -460,6 +489,42 @@ class MarksCommandTest(PlantedCase):
         self.assertEqual((rc, out), (1, ""))
         self.assertIn("does not match its record", err)
         self.assertIsNone(self.record(c["id"])["marks"])
+
+
+class PrunedHereTest(PlantedCase):
+    # This Mac took the capture and later pruned its picture and description from its store. The record names this
+    # Mac, by its machine id or, from before the machine id, by the hostname it carried then, so "is not on this Mac:
+    # it was taken on <this Mac>" contradicted itself: describe and marks say it is no longer in this Mac's store,
+    # and how to capture the screen again
+    WHERE = ("local:m-test0001", f"local:{base.HOST}")
+
+    def here(self, where):
+        c = self.plant(self.invoices())
+        c["image"]["where"] = where
+        store.save(base.P, c)
+        return c
+
+    def test_describe_says_a_description_this_mac_pruned_is_no_longer_in_its_store(self):
+        for where in self.WHERE:
+            with self.subTest(where=where):
+                c = self.here(where)
+                (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+                rc, out, err = self.dev("describe", c["id"])
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn(f"The description of {c['id']} is no longer in this Mac's store. Capture it again "
+                              f"here: dev visual capture --again {c['id']}", " ".join(err.split()))
+                self.assertNotIn("not on this Mac", err)
+
+    def test_marks_says_a_picture_this_mac_pruned_is_no_longer_in_its_store(self):
+        for where in self.WHERE:
+            with self.subTest(where=where):
+                c = self.here(where)
+                (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+                rc, out, err = self.dev("marks", c["id"])
+                self.assertEqual((rc, out), (1, ""))
+                self.assertIn(f"The picture of {c['id']} is no longer in this Mac's store. Capture it again here: "
+                              f"dev visual capture --again {c['id']}", " ".join(err.split()))
+                self.assertNotIn("not on this Mac", err)
 
 
 @unittest.skipUnless(base.NODE and base.GITLEAKS, "node and gitleaks check a judgment's note for secrets")

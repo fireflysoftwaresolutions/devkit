@@ -322,19 +322,14 @@
   {
    "active_min": 48.0,
    "agent": "codex",
-   "agents": [
-    {
-     "label": "Neo: rate tables",
-     "min": 8.0,
-     "state": "running"
-    },
-    {
-     "label": "Mouse: parity",
-     "min": 0.0,
-     "state": "running"
-    }
-   ],
+   "agents": [],
    "branch": "feat/rules-engine",
+   "crew": 2,
+   "current": [
+    "rate tables",
+    "parity tests"
+   ],
+   "current_more": 0,
    "decisions": [],
    "estimate": 90,
    "estimate_cal": null,
@@ -368,20 +363,6 @@
    "pace": 1.0,
    "plan": [
     {
-     "est": 20,
-     "min": 18.0,
-     "name": "rules model",
-     "owner": "main",
-     "state": "done"
-    },
-    {
-     "est": 20,
-     "min": 22.0,
-     "name": "migration",
-     "owner": "main",
-     "state": "done"
-    },
-    {
      "est": 30,
      "min": 8.0,
      "name": "rate tables",
@@ -403,6 +384,9 @@
    "state": "running",
    "step": 2,
    "steps": 4,
+   "steps_done": 2,
+   "steps_skipped": 0,
+   "steps_total": 4,
    "total_min": null,
    "updated": 1793977980,
    "updates": [],

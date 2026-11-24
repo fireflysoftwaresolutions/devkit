@@ -128,6 +128,7 @@ class WatchSandbox(unittest.TestCase):
         self.repos = {name: self.repo(name) for name in ("api", "web")}
         self.repos["portfolio"] = self.home / "Development"  # a session at the portfolio level: no repository
         self.procs = []
+        self.lead_calls = 0  # the tech lead's calls opened in the ledger (lead_call)
         self.addCleanup(self.end_processes)
 
     def repo(self, name):
@@ -202,15 +203,29 @@ class WatchSandbox(unittest.TestCase):
     def spawn(self, argv, session=None, cwd=None, shell=False, **extra):
         # a real `dev …` (or a shell command line, as an agent's Bash runs it) in its own process group. A `dev` the
         # test starts itself is the tech lead's, stamped as the PreToolUse hook stamps the tech lead's calls
-        # (DEVKIT_SPEAKER=main), unless it runs in a member's lane (DEVKIT_FROM_AGENT); a shell line is as given
+        # (DEVKIT_SPEAKER=main), unless it runs in a member's lane (DEVKIT_FROM_AGENT); a shell line is as given.
+        # The hook stamps only a call it opened in the ledger, and devkit takes the stamp for a wait only while that
+        # call is open: a stamped command of a Claude Code session gets its open call first (lead_call)
         if not shell and "DEVKIT_FROM_AGENT" not in extra:
             extra.setdefault("DEVKIT_SPEAKER", "main")
+        if extra.get("DEVKIT_SPEAKER") == "main" and session and session.startswith("claude:"):
+            self.lead_call(session.split(":", 1)[1], argv if shell else "dev " + " ".join(argv))
         cmd = argv if shell else [sys.executable, "-I", str(self.launcher), *argv]
         p = subprocess.Popen(cmd, shell=shell, cwd=str(cwd or self.repos["api"]), env=self.env(session, **extra),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
                              executable="/bin/sh" if shell else None)
         self.procs.append(p)
         return p
+
+    def lead_call(self, sid, command):
+        # the tech lead's Bash call of `command` as the PreToolUse hook opens it in session `sid`'s call ledger; it
+        # stays open while the command runs, as a foreground call does until its PostToolUse
+        self.lead_calls += 1
+        self.py(f'''
+            from devkit import progress as pg
+            pg.call_opened("claude", {{"session_id": {sid!r}, "tool_use_id": "toolu_lead{self.lead_calls}",
+                                       "tool_name": "Bash", "tool_input": {{"command": {command!r}}}}})
+        ''')
 
     def finish(self, p, seconds=30):
         # -> (exit code, output) of a process that must end by itself

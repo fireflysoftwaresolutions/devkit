@@ -18,6 +18,7 @@ import shlex
 import sys
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import textwrap
@@ -1543,17 +1544,61 @@ def _install_skills():
     print("    " + ui.dim(", ".join(sorted(wanted))))
 
 
+class SettingsNotWritten(RuntimeError):
+    """devkit left the user settings (~/.claude/settings.json) as they are: a file it cannot open, parse or write
+    (read_claude_settings, write_claude_settings). The message names the file, the problem and the fix. dev install
+    fails its Claude step on it, dev config repair leaves the Claude drifts unrepaired, lock and unlock exit 1."""
+
+
+def read_claude_settings() -> dict:
+    """The user settings devkit merges its keys into: {} when there is no file, or it is empty or JSON null. Raises
+    SettingsNotWritten for a file devkit leaves as it is, naming the problem and the fix: one that does not open; one it
+    cannot parse (a byte order mark, a byte that is not UTF-8, nested deeper than core.JSON_MAX_DEPTH, an integer of
+    more digits than Python converts, JSON that is no object), which Claude Code may still read, so devkit's keys
+    written over it would lose the developer's own; or NaN, Infinity or a number past a float's range: Python reads
+    1e400 as inf, and json.dumps would write Infinity, which Claude Code (Node's JSON.parse) cannot read."""
+    f = CLAUDE_HOME / "settings.json"
+    fix = "then run dev install --only claude"
+    try:
+        raw = f.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise SettingsNotWritten(f"devkit cannot open {tilde(f)} ({type(e).__name__}: {e.strerror or e}): it left the "
+                                 f"file as it is. Make it a file you can read, {fix}") from None
+    try:
+        cur = core.load_json(raw.decode("utf-8"), allow_nan=False)
+    except core.JSONNonFiniteError as e:
+        raise SettingsNotWritten(f"{tilde(f)} holds {e}: devkit left the file as it is. Fix that value, {fix}") from None
+    except ValueError:  # a byte that is not UTF-8 included
+        if not raw.strip():
+            return {}
+        from .hooks import _unreadable_why
+        raise SettingsNotWritten(f"devkit cannot parse {tilde(f)} ({_unreadable_why(raw)}): it left the file as it is, "
+                                 f"since Claude Code may still read it. Make it plain JSON (UTF-8 without a byte order "
+                                 f"mark, nested at most {core.JSON_MAX_DEPTH} levels), {fix}") from None
+    if cur and not isinstance(cur, dict):
+        from .hooks import _not_settings
+        raise SettingsNotWritten(f"devkit cannot merge its settings into {tilde(f)} ({_not_settings(cur)}): it left "
+                                 f"the file as it is. Make it a settings object, {fix}")
+    return cur or {}
+
+
 def write_claude_settings(include_hooks=True):
     """Merge devkit's managed keys into ~/.claude/settings.json (other keys untouched). -> whether it changed. A copy
-    older than the pinned release writes nothing (core.older_copy_skip)."""
+    older than the pinned release writes nothing (core.older_copy_skip). Neither does a file read_claude_settings
+    refuses, nor one that cannot be written: both raise SettingsNotWritten, the file left as it was, and every caller
+    fails on it rather than report the settings as written."""
     f = CLAUDE_HOME / "settings.json"
     if core.older_copy_skip(tilde(f)):
         return False
-    cur = read_json(f, {}) or {}
+    cur = read_claude_settings()
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
     new = core.deep_merge(cur, {k: v for k, v in frag.items() if k != "hooks"})
     new.pop("includeCoAuthoredBy", None)  # deprecated since Claude Code 2.0.62; `attribution` replaces it
+    if new.get("disableAllHooks", False) is not False:
+        new.pop("disableAllHooks")  # it turns devkit's hooks off too (policy.diff_claude): only false is left
     new["hooks"] = merge_hooks(cur.get("hooks") or {}, frag.get("hooks") or {} if include_hooks else {})
     if not new["hooks"]:
         new.pop("hooks")
@@ -1576,9 +1621,15 @@ def write_claude_settings(include_hooks=True):
     elif mine and not (core.CFG.get("claude") or {}).get("statusline", True):
         new.pop("statusLine", None)
     if new != cur:
-        backup(f)
-        f.parent.mkdir(parents=True, exist_ok=True)
-        core.replace_text(f, json.dumps(new, indent=2, ensure_ascii=False) + "\n")  # a temporary file of its own
+        try:
+            backup(f)
+            f.parent.mkdir(parents=True, exist_ok=True)
+            # a temporary file of its own; never NaN or Infinity, which Node cannot read
+            core.replace_text(f, json.dumps(new, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+        except OSError as e:
+            raise SettingsNotWritten(f"devkit could not write {tilde(f)} ({type(e).__name__}: {e.strerror or e}): the "
+                                     f"file is left as it was. Make it writable, then run dev install --only claude") \
+                from None
     return new != cur
 
 
@@ -2840,9 +2891,9 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     blocking = [e for e in errors if not configschema.unknown_key(e)]
     if blocking:  # a saved key devkit does not read is left as it was, as every writer leaves it
         fail("invalid configuration; run dev config validate or dev config edit: "
-             + "; ".join(configschema.describe(blocking)))
+             + "; ".join(core.say_config_errors(blocking)))
         return 2
-    for line in configschema.describe(errors):
+    for line in core.say_config_errors(errors):
         note(line)
     try:
         profiles.resolve(cfg)
@@ -3102,9 +3153,9 @@ def config_diagnosis(errors) -> tuple:
     unknown = [e for e in errors if core.configschema.unknown_key(e)]
     if len(unknown) < len(errors):
         return ("invalid configuration; run dev config validate or dev config edit: "
-                + "; ".join(core.configschema.describe(errors))), None
+                + "; ".join(core.say_config_errors(errors))), None
     if unknown:
-        return None, ("Workspace", "config keys", False, "; ".join(core.configschema.describe(unknown)),
+        return None, ("Workspace", "config keys", False, "; ".join(core.say_config_errors(unknown)),
                       "dev config edit")
     return None, None
 
@@ -3118,6 +3169,77 @@ def retired_settings_check(path=None):
 
 DOCTOR_WARN = "warn"  # a doctor row's verdict besides True and False: worth knowing, not a fault of the setup
 DOCTOR_CHECKS_FAILED = 1  # the doctor's exit when it ran and a check failed (2: it refused to run; 70: it crashed)
+
+
+def _regular_text(f):
+    """A regular file's text, a byte that is not UTF-8 replaced, or None when it is no regular file or does not open:
+    a FIFO or a device a repository ships in its place would hold the reader forever, or act on the open. It is
+    stat-ed before it is opened, so a device is never opened, and checked again once open. Links are followed, as
+    Claude Code follows them: the caller resolves them first (project_hooks_check)."""
+    try:
+        if not stat.S_ISREG(os.stat(f).st_mode):
+            return None
+        fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            return stream.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def _inside(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def project_hooks_check(cwd=None) -> tuple:
+    """dev doctor's row for the current project's Claude settings (.claude/settings.json and settings.local.json in
+    the working folder and in its repository's top folder): a disableAllHooks that is not false turns every hook off,
+    devkit's included, from the session's start, where no ConfigChange hook sees it. The user settings have their own
+    check (policy.diff_claude). Each file is read as Claude Code reads it (policy.hooks_off), its value cut to
+    policy.SHOWN characters. A file whose real path (links resolved) lies outside the repository's top folder, or
+    outside the working folder when there is no repository, is never read (decision D92): the row warns that it is a
+    link out of the repository, and prints nothing of its target."""
+    from . import policy
+    cwd = Path(cwd or os.getcwd())
+    folders = [cwd]
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel")
+    if top:
+        folders.append(Path(top))
+    inside = os.path.realpath(top or cwd)
+    seen, bad, out = {os.path.realpath(CLAUDE_HOME / "settings.json")}, [], []
+    for folder in folders:
+        for name in ("settings.json", "settings.local.json"):
+            f = folder / ".claude" / name
+            real = os.path.realpath(f)
+            if real in seen:
+                continue
+            seen.add(real)
+            if not os.path.lexists(f):
+                continue
+            if not _inside(real, inside):
+                out.append(f)
+                continue
+            text = _regular_text(real)
+            if text is None:
+                continue
+            off = policy.hooks_off(text)
+            if off is not None:
+                bad.append((f, off))
+    detail = "; ".join([f"{tilde(f)} sets disableAllHooks to {v}" for f, v in bad] +
+                       [f"{tilde(f)} is a link out of the repository, not read" for f in out])
+    fixes = []
+    if bad:
+        fixes.append(f"set disableAllHooks to false or remove it in {', '.join(tilde(f) for f, _ in bad)}, then "
+                     f"start a new session")
+    if out:
+        fixes.append(f"put the settings file itself in place of the link: {', '.join(tilde(f) for f in out)}")
+    ok = False if bad else DOCTOR_WARN if out else True
+    return ("Agents", "project settings keep hooks on", ok, detail or "no project settings turn hooks off",
+            "; ".join(fixes))
 
 
 def doctor_job_ran(job: dict, rc) -> bool:
@@ -3391,6 +3513,7 @@ def doctor() -> int:
     check("Agents", "no project switches devkit off", not offs,
           "; ".join(f"{tilde(f)}: {w}" for f, w in offs[:3]) or "no .claude/.codex override disables devkit",
           "remove the override (devkit must stay active), or change devkit's own config")
+    check(*project_hooks_check())
     recent = [core.read_json(f, {}) or {} for f in (STATE / "sessions").glob("*.json")
               if time.time() - f.stat().st_mtime < 7 * 86400] if (STATE / "sessions").exists() else []
     by_agent = {}

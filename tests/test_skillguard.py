@@ -342,6 +342,29 @@ def _scout_rollout(path):
                                               "payload": p}) + "\n" for i, (t, p) in enumerate(recs)))
 
 
+class GoMigrationCommands(unittest.TestCase):
+    # Go's flag package reads -dir and --dir alike: a goose option the rules list with one dash counts with two, with
+    # its value after a space or after '='. Block's goose agent, with its own options written either way, still needs
+    # no rule
+    def test_a_goose_option_written_with_two_dashes_counts_as_its_one_dash_form(self):
+        for cmd in ("goose --dir=db up", "goose --dir db/migrations sqlite3 ./app.db status",
+                    "goose --table=schema_versions postgres \"dbname=orders\" up", "goose --allow-missing up"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("database", [r["id"] for r, _ in sg.rules_for_commands([cmd])])
+        for cmd in ("goose session --resume", "goose run --text \"fix the tests\"", "goose --version"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([r["id"] for r, _ in sg.rules_for_commands([cmd])], [])
+
+    # go run names the tool by its module path with a version after '@': the program is goose all the same. A word
+    # that only starts with '@' (an npm scope) keeps its name
+    def test_goose_run_through_go_run_with_a_version_counts_as_goose(self):
+        for cmd in ("go run github.com/pressly/goose/v3/cmd/goose@latest -dir db up",
+                    "go run github.com/pressly/goose/v3/cmd/goose@v3.24.1 postgres \"dbname=orders\" status"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("database", [r["id"] for r, _ in sg.rules_for_commands([cmd])])
+        self.assertEqual([r["id"] for r, _ in sg.rules_for_commands(["npx @goose up"])], [])
+
+
 class ForkedCodexRollout(unittest.TestCase):
     # a member is credited with its own commands and skills only, never with the parent's history its rollout copies
     def test_a_spawned_agent_is_credited_only_with_its_own_records(self):
@@ -377,6 +400,59 @@ class CodexLoginShell(unittest.TestCase):
             link.symlink_to(fish)
             self.assertEqual(self.receipts(fish, link), [True])
             self.assertEqual(self.receipts(other, link), [False])
+
+
+class ReceiptTimes(unittest.TestCase):
+    # A receipt carries when its call started, from the call's own record, so the crew gates can tell a record a call
+    # left from an earlier one with the same text. The result comes 30 s later and is not the start.
+    def receipts(self, agent, recs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "transcript.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in recs(tmp)))
+            return [r["ts"] for r in sg.executions(agent, str(path), tmp)]
+
+    def test_a_claude_call_starts_at_its_tool_use_record(self):
+        def recs(tmp):
+            return [{"type": "assistant", "timestamp": "2026-11-23T17:49:36.476Z", "message": {
+                        "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash",
+                                                          "input": {"command": "dev grep something"}}]}},
+                    {"type": "user", "timestamp": "2026-11-23T17:50:06.000Z", "toolUseResult": "ok", "message": {
+                        "role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
+                                                     "content": "ok"}]}}]
+        self.assertEqual(self.receipts("claude", recs), [1795456176.476])
+
+    def test_a_codex_call_starts_at_its_function_call_record(self):
+        def recs(tmp):
+            return [{"timestamp": "2026-11-23T17:49:36.476Z", "type": "session_meta",
+                     "payload": {"id": "own", "cwd": tmp}},
+                    {"timestamp": "2026-11-23T17:49:40.250Z", "type": "response_item", "payload": {
+                        "type": "function_call", "name": "exec_command", "call_id": "c1",
+                        "arguments": json.dumps({"cmd": "dev grep something", "workdir": tmp})}},
+                    {"timestamp": "2026-11-23T17:50:10.000Z", "type": "response_item", "payload": {
+                        "type": "function_call_output", "call_id": "c1",
+                        "output": json.dumps({"exit_code": 0, "output": "ok"})}}]
+        self.assertEqual(self.receipts("codex", recs), [1795456180.25])
+
+    def test_a_codex_command_item_has_no_start_to_give(self):
+        # a native command item is written once, when the command ended: its time is the end, never the start
+        def recs(tmp):
+            return [{"timestamp": "2026-11-23T17:49:36.476Z", "type": "session_meta",
+                     "payload": {"id": "own", "cwd": tmp}},
+                    {"timestamp": "2026-11-23T17:50:10.000Z", "type": "event_msg", "payload": {
+                        "type": "item_completed", "thread_id": "own", "item": {
+                            "type": "CommandExecution", "id": "native", "status": "completed", "exit_code": 0,
+                            "command": ["/bin/zsh", "-lc", "dev grep something"], "cwd": tmp}}}]
+        self.assertEqual(self.receipts("codex", recs), [None])
+
+    def test_a_start_time_with_any_number_of_fraction_digits_reads_the_same_on_every_python(self):
+        # Python 3.9 and 3.10 parse only 3- or 6-digit fractions; a record written with 1, 2, 7 or 9 digits must
+        # still give its call a start time there, or the member is sent back for a step it recorded
+        for stamp, want in (("2026-11-23T17:49:36.4Z", 1795456176.4), ("2026-11-23T17:49:36.47Z", 1795456176.47),
+                            ("2026-11-23T17:49:36.476123456Z", 1795456176.476123),
+                            ("2026-11-23T17:49:36.4761234+00:00", 1795456176.476123)):
+            with self.subTest(stamp=stamp):
+                self.assertAlmostEqual(sg._epoch(stamp), want, places=6)
+        self.assertIsNone(sg._epoch("2026-11-23T17:49:36.Z"))
 
 
 if __name__ == "__main__":

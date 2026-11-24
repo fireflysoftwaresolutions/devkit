@@ -25,7 +25,7 @@
 /* the queue: rows on hairlines, no boxes; the first row's bar and glyph are the screen's only amber */
 .now-items{list-style:none;margin:0;padding:0}
 .now-item{position:relative;display:grid;grid-template-columns:16px minmax(0,1fr);column-gap:var(--s3);padding:var(--s4) 0 var(--s4) var(--s4);border-bottom:1px solid var(--line-soft)}
-.now-item.you::before{content:"";position:absolute;left:0;top:var(--s4);bottom:var(--s4);width:3px;border-radius:2px;background:var(--you)}
+.now-item.now-bar::before{content:"";position:absolute;left:0;top:var(--s4);bottom:var(--s4);width:3px;border-radius:2px;background:var(--you)}   /* the screen's first waiting row only (nowBar): the others keep their glyph and word */
 .now-g{padding-top:2px;line-height:0}
 .now-glyph{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;overflow:visible}
 .now-glyph.you{fill:var(--you);stroke:var(--you-text)}
@@ -65,7 +65,8 @@
 .now-rt{margin:0;font-size:var(--fs-body);font-weight:600;line-height:1.45;color:var(--ink-strong);overflow-wrap:anywhere}
 .now-rt a{color:inherit;text-decoration:none}
 .now-run:hover .now-rt a,.now-rt a:hover{text-decoration:underline}
-.now-meta,.now-status{margin:var(--s1) 0 0;font-size:var(--fs-meta);color:var(--ink-2)}
+.now-meta,.now-status,.now-current{margin:var(--s1) 0 0;font-size:var(--fs-meta);color:var(--ink-2)}
+.now-current{overflow-wrap:anywhere}
 .now-lands{margin:var(--s1) 0 0;font-size:var(--fs-body);line-height:1.5;color:var(--ink)}
 .now-strip{display:flex;align-items:center;gap:var(--s2);margin:var(--s3) 0 var(--s2);min-width:0;color:var(--ink-2)}
 .now-track{flex:none;overflow:visible}
@@ -144,6 +145,9 @@
   .now-head{padding-bottom:var(--s5)}
   .now-date{display:none}
   .now-open{margin-left:0}
+  .now-cmd{align-items:flex-start;text-align:left}
+  .now-cmd .i{margin-top:3px}
+  .now-cmd code{white-space:normal;overflow-wrap:anywhere}   /* a phone shows the whole command over lines, never cut */
   .now-strip{flex-wrap:wrap;row-gap:var(--s1)}   /* a long plan's strip and its landing bracket share no phone line */
 }
 @media (pointer:coarse){

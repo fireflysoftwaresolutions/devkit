@@ -47,6 +47,7 @@
     "config-change": "Config change",
     "guard": "Guard",
     "instructions-loaded": "Instructions loaded",
+    "permission-denied": "Permission denied",
     "post-compact": "After-compact",
     "post-tool": "After-tool",
     "post-tool-failure": "Tool failure",

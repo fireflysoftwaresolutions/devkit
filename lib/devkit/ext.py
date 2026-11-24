@@ -41,7 +41,7 @@ STATE_WORD = {"plugin": "installed", "skill": "linked", "mcp": "added"}
 UNPINNED = frozenset({"observed", "url"})
 
 
-class ExtError(ValueError):
+class ExtError(core.Refusal, ValueError):
     """An extension entry that breaks a rule; the message names the entry and the rule."""
 
 
@@ -328,8 +328,11 @@ def skill_applicability(agent: str, groups=None) -> dict:
     return {name: name in on for name in known}
 
 def _read_json(path: Path):
+    """An agent's JSON file (its settings, a repository's .claude/settings.json, its plugin records) -> its value
+    (core.load_json), or None when it cannot be read: a session start reads them, and a repository's are a
+    teammate's."""
     try:
-        return json.loads(path.read_text())
+        return core.load_json(path.read_text())
     except (OSError, ValueError):
         return None
 
@@ -382,8 +385,9 @@ def _toml_value(text: str):
     if m:
         return m.group(1) if _TOML_TAIL.match(m.group(2)) else _UNREAD
     try:
-        v, end = json.JSONDecoder().raw_decode(text)
-    except ValueError:
+        v, end = json.JSONDecoder().raw_decode(text)  # where the value ends: a comment may follow it
+        v = core.load_json(text[:end])  # nested deeper than core.JSON_MAX_DEPTH: a form the reader does not read
+    except (ValueError, RecursionError, MemoryError):
         return _UNREAD
     plain = (lambda x: isinstance(x, (str, bool, int)) or (isinstance(x, float) and x == x and abs(x) != float("inf"))
              or (isinstance(x, list) and all(plain(y) for y in x)))
@@ -516,6 +520,9 @@ def _toml_check(text: str, servers: dict, loose: list):
         real = tomllib.loads(text).get("mcp_servers", {})
     except tomllib.TOMLDecodeError:
         loose.append("the file is not valid TOML")
+        return
+    except (RecursionError, MemoryError):  # a value nested past what tomllib can read: none of the region is read
+        loose.append("the file nests a value too deep to read")
         return
     if not isinstance(real, dict):
         loose.append("mcp_servers is no table")
@@ -998,15 +1005,48 @@ def retired_plugin_keys(agent: str = "claude", t: dict = None, user: dict = None
     return {r.split(":", 2)[2] for r in retired_ids(t) - keep if r.startswith(f"plugin:{agent}:")}
 
 
-def _edit_lock(fn, path: Path = None) -> bool:
+def _edit_lock(fn, path: Path = None, errors: list = None) -> bool:
     """Change the lock under devkit's state lock; `fn` edits the document in place. -> False when the lock is busy or
-    does not parse, so nothing was written."""
+    does not parse, so nothing was written; `errors` gets (the file, the error) for `_list_failure`."""
     from . import state
     try:
         state.update(path or lock_file(), fn, indent=2)
-    except state.StateBusy:
+    except state.StateBusy as e:
+        if errors is not None:
+            errors.append((path or lock_file(), e))
         return False
     return True
+
+
+EX_TEMPFAIL = 75  # sysexits.h: a temporary failure; the same command may work when run again
+_EXIT_RANK = {0: 0, EX_TEMPFAIL: 1, 1: 2, 2: 3}  # what the developer must do, least to most: retry, fix, repair
+
+
+def _worse(rc: int, code: int) -> int:
+    """Of two exit codes, the one that asks more of the developer: a repair (2) outranks a failure (1), and both
+    outrank a retry (EX_TEMPFAIL), so a command whose items failed in several ways says "run it again" only when
+    running it again is all that is needed."""
+    return code if _EXIT_RANK.get(code, 3) > _EXIT_RANK.get(rc, 3) else rc
+
+
+def _list_failure(e, path, again: str) -> tuple:
+    """(exit code, reason, fix) for a lock or acceptance list devkit could not write, shared by `dev ext update
+    --apply` and `dev ext ack`, so the exit code tells a retry from a repair: another devkit process holding its lock
+    is a retry (EX_TEMPFAIL, run `again` in a moment); a file that does not parse, is unsafe, too large or cannot be
+    written needs a repair first (2). The error's class tells them apart (state.StateHeld is the retry), never its
+    words. `again` is the command to run again."""
+    from . import state
+    name, text = core.tilde(path), str(e)
+    if isinstance(e, state.StateHeld):
+        return EX_TEMPFAIL, f"{name} is busy (another dev command writes it)", f"Run {again} again in a moment"
+    if isinstance(e, state.StateCorrupt) or "does not parse" in text:
+        return 2, f"{name} does not parse", (f"Look at it, repair it to a JSON object or move it aside (dev mv "
+                                             f"{name} {name}.unreadable; dev audit --action ext.accept keeps what it "
+                                             f"listed), then run {again}")
+    if isinstance(e, OSError):
+        return 2, f"{name} could not be written ({e.strerror or text})", (f"Free disk space or fix the file's "
+                                                                           f"permissions, then run {again}")
+    return 2, f"{name} is refused ({text})", (f"Make it a regular file you own, or move it aside, then run {again}")
 
 
 
@@ -1020,12 +1060,13 @@ def drift_seen_file() -> Path:
 
 
 def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = None, user: dict = None,
-                path: Path = None, only: set = None, accept: bool = True) -> int:
+                path: Path = None, only: set = None, accept: bool = True, errors: list = None) -> int:
     """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins, and what ships
     with its app, are now (or only the ids in `only`): version, SHA and a digest of their files; for an MCP
     server, a digest of its table. A later change outside devkit shows as drift. With `accept=False`, changes and
     first app records are left as drift. Each acceptance is audited and listed at session start and in `dev status`
-    until `dev ext ack` acknowledges it. -> how many were recorded."""
+    until `dev ext ack` acknowledges it. -> how many were recorded; `errors` gets (the file, the error) of a lock
+    or acceptance list that could not be written (`_list_failure`)."""
     now = int(time.time())
     rows = _lockable(agent, h, t, user, only)
     count, accepted = [0], []
@@ -1048,13 +1089,13 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
         accepted[:] = [(eid, what) for eid, _, what in writes if what]
         # the acceptance list first, while the lock is held: an acceptance it cannot list is no acceptance (fail
         # closed), so the change stays as drift
-        listed = _note_accepted(accepted, now, by, path) if accepted else True
+        listed = _note_accepted(accepted, now, by, path, errors) if accepted else True
         for eid, new, what in writes:
             if what and not listed:
                 continue
             doc[eid] = new
             count[0] += 1
-    if not _edit_lock(put, path):
+    if not _edit_lock(put, path, errors):
         return 0
     return count[0]
 
@@ -1082,27 +1123,29 @@ def _parents(limit: int = 8) -> list:
     return [c if len(c) <= 80 else c[:79] + "…" for c in chain[:limit]]
 
 
-def _note_accepted(items: list, now: int, by: str, lock: Path = None) -> bool:
+def _note_accepted(items: list, now: int, by: str, lock: Path = None, errors: list = None) -> bool:
     """Add each accepted entry to the acceptance list and write one `ext.accept` audit record for it, with the
     terminal and the parent processes it was accepted from. Each entry names its record by an id
     reserved before the list is written, and the records are written only after the list is, so a list that cannot
     be written leaves the refusal alone in the trail. -> False when the list is busy, does not parse or cannot be
-    written: then nothing is accepted, and the refusal is audited."""
+    written: then nothing is accepted, the refusal is audited, and `errors` gets (the list, the error)."""
     from . import audit, state
-    tty, parents = _tty(), _parents()
+    tty, parents, terminal = _tty(), _parents(), core.set_by_developer()
     where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
     if lock and Path(lock) != lock_file():
         where += f"; lock {lock}"
     ids = [audit.reserve_id() for _ in items]
 
     def add(doc):
-        out = [{"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents, "record": rid}
-               for (eid, what), rid in zip(items, ids)]
+        out = [{"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents, "terminal": terminal,
+                "record": rid} for (eid, what), rid in zip(items, ids)]
         # never trimmed: a flood of acceptances must not push an earlier one out of the developer's sight
         doc["pending"] = list(doc.get("pending") or []) + out
     try:
         state.update(accepted_file(lock), add, indent=1)
     except (state.StateBusy, OSError) as e:  # busy, unparsable, or not writable (a full disk): fail closed
+        if errors is not None:
+            errors.append((accepted_file(lock), e))
         for eid, what in items:
             audit.record("ext.accept", eid, f"{what}; not accepted: the acceptance list could not be written ({e}), "
                                             f"so it stays as drift; {where}", "refused")
@@ -1158,13 +1201,22 @@ def accepted_text(items: list, limit: int = 4) -> str:
     return "; ".join(one(p) for p in items[:limit]) + more
 
 
+def made_in_a_terminal(p: dict) -> bool:
+    """Whether an acceptance was made in the developer's terminal (core.set_by_developer when it was listed; a
+    listing written before that was recorded says it by its tty)."""
+    return bool(p["terminal"]) if "terminal" in p else bool(p.get("tty"))
+
+
 def accepted_line(lock: Path = None):
-    """Report acceptances until acknowledged; their audit records stay."""
+    """Report acceptances until acknowledged; their audit records stay. One made outside a terminal (an agent's)
+    stays until `dev ext ack` runs in a terminal, so the agent that made it cannot hide it."""
     items = pending_acceptances(lock)
     if not items:
         return None
+    how = ("`dev ext ack` in a terminal acknowledges them (some were accepted outside one, so an agent's cannot)"
+           if not all(made_in_a_terminal(p) for p in items) else "`dev ext ack` acknowledges them")
     return (f"devkit · extensions accepted since your last session: {accepted_text(items)}. Review unexpected "
-            f"acceptances in the audit trail (`dev audit --action ext.accept`). `dev ext ack` acknowledges them; "
+            f"acceptances in the audit trail (`dev audit --action ext.accept`). {how}; "
             f"the audit trail retains the acceptance and acknowledgment.")
 
 
@@ -1834,7 +1886,7 @@ def _apply_update(a) -> int:
                            audit=lambda *x, **k: audit.record(*x, why=a.why.strip(), **k))
         if not ok:
             ui.err(msg)
-            rc = 1
+            rc = _worse(rc, 1)
             continue
         now = observe().get(e.id) or {}
         row = reviewed.get(e.id) or {}
@@ -1845,13 +1897,15 @@ def _apply_update(a) -> int:
             ui.err(f"{e.name} ({e.agent}) is now {_vs(now)}, which is not what was reviewed above "
                    f"({' '.join(sorted(want)) or 'nothing could be reviewed'}): not recorded as accepted, so it shows "
                    f"as drift. Check it with dev ext outdated {e.name}; dev install accepts it")
-            rc = 1
+            rc = _worse(rc, 1)
             continue
-        if not record_lock(e.agent, by="dev ext update --apply", only={e.id}):
-            ui.err(f"updated {e.name} ({e.agent}): now {_vs(now)}, but not recorded as accepted: the lock or the "
-                   f"acceptance list is busy or does not parse ({core.tilde(accepted_file())}), so it shows as drift. "
-                   f"Run dev install to accept it")
-            rc = 1
+        errors = []
+        if not record_lock(e.agent, by="dev ext update --apply", only={e.id}, errors=errors):
+            code, reason, fix = _list_failure(errors[-1][1], errors[-1][0], f"dev ext update {a.name} --apply") \
+                if errors else (1, "nothing could be recorded for it", "Run dev install to accept it")
+            ui.err(f"updated {e.name} ({e.agent}): now {_vs(now)}, but not recorded as accepted: {reason}, so it "
+                   f"shows as drift. {fix}")
+            rc = _worse(rc, code)
             continue
         print(f"updated {e.name} ({e.agent}): now {_vs(now)}, recorded as accepted"
               + (" · restart the agent to load it" if e.agent == "claude" else ""))
@@ -2248,15 +2302,30 @@ def cmd_ls(a) -> int:
 
 
 def cmd_ack(a) -> int:
-    """Acknowledge the listed acceptances; the audit trail keeps them."""
+    """Acknowledge the listed acceptances; the audit trail keeps them. Outside the developer's terminal (an agent),
+    it leaves the acceptances made outside a terminal listed: only the developer acknowledges what an agent
+    accepted."""
     from . import audit, state, ui
     items = pending_acceptances()
     if not items:
         print("Nothing to acknowledge: no extension was accepted since the last acknowledgement.")
         return 0
-    done = {(p["id"], p.get("at"), p.get("record")) for p in items}
     tty, parents = _tty(), _parents()
     where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
+    held = [] if core.set_by_developer() else [p for p in items if not made_in_a_terminal(p)]
+    for p in held:
+        audit.record("ext.ack", p["id"], f"not acknowledged: {p.get('what') or p['id']} was accepted outside a "
+                                         f"terminal, so only `dev ext ack` in a terminal acknowledges it; {where}",
+                     "refused", id=p.get("record") or "")
+    items = [p for p in items if p not in held]
+    if held:
+        tell = ui.err if not items else ui.warn
+        tell(f"{len(held)} acceptance(s) were made outside a terminal, by an agent, and stay at every session start: "
+             f"{accepted_text(held)}. The developer acknowledges them: run `dev ext ack` in a terminal window, "
+             f"not through an agent.")
+    if not items:
+        return 1
+    done = {(p["id"], p.get("at"), p.get("record")) for p in items}
 
     def drop(doc):
         doc["pending"] = [p for p in doc.get("pending") or [] if isinstance(p, dict) and
@@ -2266,9 +2335,10 @@ def cmd_ack(a) -> int:
         doc["last_ack"] = {"at": int(time.time()), "count": len(items), "tty": tty, "parents": parents}
     try:
         state.update(accepted_file(), drop, indent=1)
-    except state.StateBusy:
-        ui.err("The acceptance list is busy (another dev command writes it). Run `dev ext ack` again in a moment.")
-        return 1
+    except (state.StateBusy, OSError) as e:
+        code, reason, fix = _list_failure(e, accepted_file(), "dev ext ack")
+        ui.err(f"Nothing acknowledged: {reason}. {fix}.")
+        return code
     for p in items:
         audit.record("ext.ack", p["id"], f"acknowledged: {p.get('what') or p['id']}; {where}", "ok",
                      id=p.get("record") or "")

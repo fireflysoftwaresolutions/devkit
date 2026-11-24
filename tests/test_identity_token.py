@@ -116,9 +116,11 @@ class TokenCase(CallerCase):
         self.lines[shell] = self.shell_line(new or cmd)
         self.shells[found.group(1) if found else f"none-{self.n}"] = shell
         self.shell = shell
+        # the shell starts when its call opens, before anything it runs writes a pin (the stamp's printf, or the plain
+        # form's dev command); a start taken at the first look at the process could fall after that write
+        self.starts.setdefault(shell, time.time())
         if found and "set -C; printf" in new:  # the stamp's first action: the shell pins its pid (noclobber)
             pin = identity.pin_path(sid, data["tool_use_id"])
-            self.starts.setdefault(shell, time.time())  # the shell started, then wrote its pin
             if os.path.lexists(pin):  # a pin already there: the stamp moves it onto the contested name
                 os.replace(pin, pin.with_name(pin.name + ".contested"))
             else:

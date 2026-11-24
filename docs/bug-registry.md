@@ -163,7 +163,13 @@ next sync, or you send it alone with `dev bug send <id>`.
 dev bug pending        # how many items wait, each printed exactly as it would be sent
 dev bug send 7         # send reviewed item 7
 dev bug drop 7         # drop it
+dev bug drop --old-format   # drop every item an older devkit queued, and list them
 ```
+
+An item an older devkit queued has no record of where it came from, so no sync ever sends it: `dev bug pending`
+marks it as one that cannot be sent. `dev bug drop --old-format` drops all of them at once and lists each one it drops; the
+items that can be sent stay, with every check before they go. When another devkit process holds an item at that
+moment, the command keeps it, says which, and exits with `1`: run it again.
 
 `dev bug pending` prints the exact text each item posts, rendered the same way the sender renders it:
 
@@ -331,7 +337,7 @@ destination cannot override private or uncertain classification. See
 | `dev bug top [--task]` | Hotfix recommendations | Anyone |
 | `dev bug sync` | Refreshes the cache and sends what waits in the outbox | Anyone |
 | `dev bug pending` | How many items wait for your review, for your consent to a changed consent text, or for the next send the limit allows, and the exact issue title, body, or comment each item for review would post | Anyone |
-| `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item | Anyone; review the exact payload first |
+| `dev bug send <id>` · `dev bug drop <id>` · `dev bug drop --old-format` | Sends or drops a held item; `--old-format` drops every item an older devkit queued, which can never be sent | Anyone; review the exact payload first |
 | `dev bug confirm <bug> <detour>` | Confirms a detour (maintainers) | Anyone; maintainer checks apply |
 | `dev bug share on\|reports\|off` | `off` stops every public post; `on` and `reports` record the legacy channel's consent (see [Turn reporting off](#turn-reporting-off)) | Anyone |
 
@@ -476,6 +482,11 @@ Free text (a reporter's description, an error message template, the free part of
 the reporter's own issue or comment, only after the reporter reviewed it, and only escaped: no mention, issue
 reference, link, HTML tag, table cell, or code fence can start in it. The record keeps the first report without its
 free text, so when a reporter removes that text from the issue's report block, the next rewrite leaves it out.
+The issue's edit history still shows it, because GitHub keeps every earlier body of an issue, the reporter's own
+and each one the workflow wrote, and offers no way to post an issue body anew, as the workflow does with its record
+when an account leaves it.
+The text stays public there until each earlier body that holds it is deleted from the history on GitHub, or the
+issue is deleted; the maintainers do that on request.
 
 **Comments** open with one plain line, and keep their data in a collapsed block:
 
@@ -497,13 +508,15 @@ The registry is public: anyone can read its issues and comments on GitHub.
 | --- | --- | --- |
 | Your GitHub login | On each issue you opened and each comment devkit posted for you | Until you delete the comment; votes, confirmations, and failure marks are deleted by the workflow once it folds them |
 | The devkit facts of a report (see [What is sent, and what never is](#what-is-sent-and-what-never-is)) | Your report comment, or the issue you opened | Until the issue or comment is deleted |
-| Free text you or the agent wrote, cleaned | Escaped, and only in your own issue or your own comment | Until you remove it; the next rewrite of the issue follows |
-| Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change. No edit history keeps an earlier record: each write posts the record anew and deletes the old comment |
+| Free text you or the agent wrote, cleaned | Escaped, and only in your own issue or your own comment | In the issue's text until you remove it, and the next rewrite follows; in the issue's public edit history until the earlier versions or the issue are deleted (the maintainers do it on request). In a comment: until you delete the comment |
+| Your account in the record | A keyed hash of your account id, never your login, inside the record's collapsed block | Every write of the record drops accounts quiet for 90 days: their votes, regression marks, and detour marks. A team member's older confirmation or failure mark stays as a placeholder without the account's hash, so a detour's trust does not change. No edit history keeps an account the record no longer names: a write that drops one, or the next write after a maintainer takes one out by hand, posts the record anew and deletes the old comment with its history |
 
 - **Stop posting.** `dev bug share off` stops every public post from your Mac, automatic reports included, and
   `bugs.sync: false` stops every send (see [Turn reporting off](#turn-reporting-off)).
 - **Remove what you posted.** Delete your own comments on GitHub, or edit the report block of an issue you opened to
-  take out your free text. GitHub's notification e-mails and public archives may keep a copy, as the consent says.
+  take out your free text. An edit leaves the earlier text in the issue's public edit history: ask the maintainers to
+  delete those versions (see below). GitHub's notification e-mails and public archives may keep a copy, as the
+  consent says.
 - **Ask for removal.** The repository's maintainers handle removal requests. Ask in a comment on the issue, or
   through [private vulnerability reporting](../SECURITY.md#report-a-vulnerability) when the request itself names
   something private.
@@ -525,14 +538,22 @@ scoring code as the client (`lib/devkit/bugs.py`), so the two cannot disagree.
   invalid payload is left alone and ignored, and so is a malformed one (a value of the wrong type, or JSON nested
   too deep): any error while checking a payload marks it invalid, and folding goes on. A report counts only when its
   fingerprint is the one its kind, exception class, frames, refusal id, and command word give; the workflow
-  recomputes it. A record a maintainer edited by hand is rewritten on the next fold.
-- **The record is posted anew, never edited:** every earlier body of an edited comment stays in GitHub's public edit
-  history, which goes only with the comment. Each write of a record therefore posts it as a new comment, then deletes
-  the old one, and its history with it. The post comes first, so a run that stops in between leaves two
-  record comments and never none: devkit and the workflow read the newest, and the next write deletes the other.
-  Each write sends the issue's subscribers a notification, as any new comment does, so every change of a record
-  emails them. To get no mail for registry issues you take no part in, watch the repository with **Custom** and
-  leave **Issues** unchecked. On an issue you opened, or one devkit posted to for you, choose **Unsubscribe** on the
+  recomputes it. A record a maintainer edited by hand is posted anew on the next write (next item).
+- **The record is edited in place until an account leaves it.** GitHub emails an issue's subscribers for every new
+  comment but not for an edit, and keeps every earlier body of an edited comment in a public edit history, which
+  goes only with the comment. The workflow therefore edits the record comment while every account the comment ever
+  named is still in the record: a vote, a release that marks the bug fixed, a verdict label, or a rewrite then
+  sends no mail beyond the voter's own comment. A write that drops an account (quiet for 90 days, or rekeyed per
+  bug) posts the record as a new comment instead, then deletes the old one with its history, and the edit history
+  never keeps an account the record no longer names. The first write to a comment anyone but this workflow edited
+  posts anew too, because the earlier bodies the workflow wrote may name an account that edit took out: a
+  maintainer's edit, which the workflow reads from the comment's edit history on GitHub (its token can read who
+  edited it); a text that is not what the workflow writes for the record it holds, which needs no request; and an
+  older workflow's edit, whose record lacks the `edit_history` field this workflow writes. An edit history it cannot
+  read counts as a person's edit. The post comes first, so a run that stops in between leaves
+  two record comments and never none: devkit and the workflow read the newest, and the next write deletes the
+  other. To get no mail for registry issues you take no part in, watch the repository with **Custom** and leave
+  **Issues** unchecked. On an issue you opened, or one devkit posted to for you, choose **Unsubscribe** on the
   issue's page.
 - **Labels:** the workflow applies the labels after it validates the issue's first payload, because GitHub drops
   labels set by people without push access. An issue whose first payload fails validation gets no label, and devkit
@@ -642,13 +663,15 @@ gh workflow run bug-registry.yml --repo fireflysoftwaresolutions/devkit
 
 The run creates the verdict labels the repository lacks, then rewrites the title, body, and record of every registry
 issue, open or closed in the last 90 days, without folding anything: the score and what each bug has seen stay as
-they are, and accounts quiet for 90 days go, as on any write. For a registry issue closed longer ago, it posts the
-record anew only when its comment was ever edited or still names accounts by digests from before they were keyed
-per bug: the same votes and counts, keyed per bug, and the issue's text left as it is. Either way the old comment
-goes, with the earlier bodies its edit history kept. It waits at least a second between requests, tries a request
+they are, and accounts quiet for 90 days go, as on any write. A record is edited in place unless an account leaves
+it, so the run emails nobody for the records it only brings up to date. For a registry issue closed longer ago, it
+posts the record anew only when anyone but this workflow edited its comment (a maintainer or an older workflow) or it
+still names accounts by digests from before they were keyed per bug: the same votes and counts, keyed per bug, and
+the issue's text left as it is; the old comment goes, with the earlier bodies its edit history kept. It waits at least a second between requests, tries a request
 GitHub may answer later up to three times, and stops after 200 issues, printing how many it rewrote, how many it
-posted anew, and how many are left. An issue that is current costs one read, so running it again goes on where it
-stopped, and a run after the last one writes nothing.
+posted anew, and how many are left. An issue that is current costs one read, and one more when its record comment
+was edited (who edited it), so running it again goes on where it stopped, and a run after the last one writes
+nothing.
 
 ### Plan a hotfix
 

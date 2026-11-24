@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,7 +28,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, cli, core, ext, hooks, setup, ui  # noqa: E402
+from devkit import audit, cli, core, ext, hooks, setup, state, ui  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
 
 SHA_A = "414603bf14c7a344edb466bb1f85690c77ce8b7d"
@@ -702,12 +703,83 @@ class DriftWiringTests(unittest.TestCase):
         self.ack(developer=True)
         self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["ref"]["id"], accept["id"])
 
+    # An agent that installs an extension accepts it outside a terminal, and its own `dev ext ack` must not hide that
+    # from the developer: such an acceptance stays at every session start until `dev ext ack` runs in a terminal.
+    def test_an_acceptance_made_outside_a_terminal_stays_listed_until_a_terminal_acknowledges_it(self):
+        self.install(developer=False)
+        rc, out = self.ack(developer=False)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("run `dev ext ack` in a terminal", out)
+        line = ext.accepted_line() or ""
+        self.assertIn("superpowers", line)
+        self.assertIn("`dev ext ack` in a terminal", line)
+        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "blocked")  # the attempt shows
+        rc, out = self.ack(developer=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(ext.accepted_line())
+
+    # dev ext ack shares dev ext update --apply's classifier: a list another process holds is a retry (75), and the
+    # acceptance stays listed
+    def test_an_acknowledgement_of_a_busy_list_exits_75_with_the_retry(self):
+        from devkit import state
+        import fcntl
+        self.install(developer=True)
+        lock = state.lock_file(ext.accepted_file())
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with mock.patch.object(state, "WAIT", 0.2):
+                rc, out = self.ack(developer=True)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        self.assertEqual(rc, 75, out)
+        self.assertIn("ext-accepted.json is busy", out)
+        self.assertIn("Run dev ext ack again in a moment", out)
+        self.assertIn("superpowers", ext.accepted_line() or "")
+
     def test_an_agent_acknowledges_an_acceptance_too(self):
         self.install(developer=True)
         rc, out = self.ack(developer=False)
         self.assertEqual(rc, 0, out)
         self.assertIsNone(ext.accepted_line())
         self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "ok")
+
+    def test_an_acceptance_list_that_does_not_parse_refuses_without_saying_to_run_it_again(self):
+        # another writer cut the list off after dev ext ack read it: running the command again meets the same bytes
+        self.install(developer=True)
+        update = state.update
+
+        def cut_off_then_update(path, fn, **kw):
+            Path(path).write_text('{"pending": [')
+            return update(path, fn, **kw)
+        with mock.patch.object(state, "update", cut_off_then_update), mock.patch.object(state.time, "sleep",
+                                                                                       lambda s: None):
+            rc, out = self.ack(developer=True)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ext-accepted.json does not parse", out)
+        self.assertNotIn("again", out)
+
+    def test_a_busy_acceptance_list_exits_75_and_says_to_run_it_again(self):
+        # another devkit process writes the list: running dev ext ack again in a moment can work
+        self.install(developer=True)
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with state.hold(ext.accepted_file()):
+                held.set()
+                release.wait(10)
+        t = threading.Thread(target=holder)
+        t.start()
+        self.addCleanup(t.join)
+        self.addCleanup(release.set)
+        self.assertTrue(held.wait(5))
+        with mock.patch.object(state, "WAIT", 0.1):
+            rc, out = self.ack(developer=True)
+        self.assertEqual(rc, 75, out)
+        self.assertIn("Run dev ext ack again", out)
+        self.assertIn("superpowers", ext.accepted_line() or "")
 
     def test_the_accepted_line_drops_bidirectional_and_zero_width_characters(self):
         # L2: U+202E and its kin reorder what the developer reads, U+200B splits a name invisibly, and tag characters
@@ -1217,7 +1289,7 @@ class ApplyTests(unittest.TestCase):
         ext.record_lock("claude", self.h, path=self.lock)  # 7.0.0, as devkit installed it
         ext.accepted_file(self.lock).write_text("{not json")
         rc, out = self.run_cli("superpowers", "--agent", "claude", "--apply", "--why", "reviewed 7.0.1")
-        self.assertEqual(rc, 1, out)
+        self.assertEqual(rc, 2, out)  # a repair, not a retry
         self.assertNotIn(", recorded as accepted", out)
         self.assertIn("not recorded as accepted", out)
         self.assertEqual(ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]["version"],
@@ -1228,6 +1300,115 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("--to", out)
         self.assertEqual(self.calls, [])
+
+
+class ApplyListFailureTests(unittest.TestCase):
+    """`dev ext update <name> --apply` when the acceptance list cannot take the update: busy, or not parsing."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.h = make_homes(Path(self.tmp.name))
+        self.lock = Path(self.tmp.name) / "ext-lock.json"
+        self.calls = []
+
+    def apply_two(self, list_text=None, held=False, broken_second=False, failed_first=False):
+        # superpowers from two marketplaces, both recorded at 7.0.0, updated to 7.0.1 while the acceptance list does
+        # not parse (`list_text`) or another process holds its lock (`held`); `broken_second`: that process lets the
+        # lock go before the second update, leaving a list that does not parse; `failed_first`: the agent's own
+        # update command fails for the first plugin
+        from devkit import state
+        import fcntl
+        ids = ("superpowers@claude-plugins-official", "superpowers@acme-tools")
+        team = fixture_team()
+        team["claude"]["marketplaces"]["acme-tools"] = "acme/tools"
+        team["claude"]["plugins"].append(ids[1])
+        team["claude"]["meta"][ids[1]] = {"why": "process skills, a fork", "license": "MIT"}
+        for pid in ids:
+            install_claude_plugin(self.h, pid, "7.0.0", SHA_B)
+        ext.record_lock("claude", self.h, t=team, user={}, path=self.lock)
+        if list_text is not None:
+            ext.accepted_file(self.lock).write_text(list_text)
+
+        def run(argv, timeout=300):
+            self.calls.append(list(argv))
+            if broken_second and len(self.calls) == 2:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                ext.accepted_file(self.lock).write_text("{not json")
+            if failed_first and len(self.calls) == 1:
+                return 1, "", "the marketplace could not be reached"
+            install_claude_plugin(self.h, argv[-1], "7.0.1", SHA_A)
+            return 0, "", ""
+        up = FakeUpstream(latest={f"plugin:claude:{pid}": {"ref": "7.0.1", "sha": SHA_A, "label": "marketplace copy",
+                                                            "link": "https://rel"} for pid in ids})
+        fd = None
+        if held:
+            lock = state.lock_file(ext.accepted_file(self.lock))
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        out = io.StringIO()
+        try:
+            with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(ext, "runner", return_value=run), \
+                    mock.patch.object(ext, "upstream", return_value=up), mock.patch.object(ext, "team", return_value=team), \
+                    mock.patch.object(ext, "user_layer", return_value={}), \
+                    mock.patch.object(ext, "lock_file", return_value=self.lock), \
+                    mock.patch.object(core, "set_by_developer", return_value=True), mock.patch.object(state, "WAIT", 0.2), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = cli.main(["ext", "update", "superpowers", "--agent", "claude", "--apply", "--why", "reviewed 7.0.1"])
+        finally:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+        return rc, plain(out.getvalue())
+
+    # The exit code tells a retry from a repair: a list another process holds is busy (75, run it again); a list that
+    # does not parse needs fixing first (2). Each plugin says so on its own line, and the second one is still applied.
+    def test_a_busy_acceptance_list_exits_75_with_the_retry_and_the_loop_goes_on(self):
+        rc, out = self.apply_two(held=True)
+        self.assertEqual(rc, 75, out)
+        self.assertEqual(len(self.calls), 2)
+        lines = [ln for ln in out.splitlines() if "not recorded as accepted" in ln]
+        self.assertEqual(len(lines), 2, out)
+        for line in lines:
+            self.assertIn("ext-accepted.json is busy", line)
+            self.assertIn("Run dev ext update superpowers --apply again in a moment", line)
+
+    def test_an_acceptance_list_that_does_not_parse_exits_2_with_its_repair_and_the_loop_goes_on(self):
+        rc, out = self.apply_two(list_text="{not json")
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(len(self.calls), 2)
+        lines = [ln for ln in out.splitlines() if "not recorded as accepted" in ln]
+        self.assertEqual(len(lines), 2, out)
+        for line in lines:
+            self.assertIn("ext-accepted.json does not parse", line)
+            self.assertIn("move it aside", line)
+            self.assertNotIn("again in a moment", line)
+
+    def test_a_repair_outranks_a_retry_in_the_exit_code(self):
+        # the first plugin finds the list busy (75), the second finds it broken (2): running it again cannot help
+        rc, out = self.apply_two(held=True, broken_second=True)
+        self.assertEqual(rc, 2, out)
+        lines = [ln for ln in out.splitlines() if "not recorded as accepted" in ln]
+        self.assertEqual(len(lines), 2, out)
+        self.assertIn("ext-accepted.json is busy", lines[0])
+        self.assertIn("ext-accepted.json does not parse", lines[1])
+
+    def test_a_failed_update_outranks_a_busy_list_in_the_exit_code(self):
+        rc, out = self.apply_two(held=True, failed_first=True)
+        self.assertEqual(rc, 1, out)  # running it again only helps the busy list
+        self.assertIn("ext-accepted.json is busy", out)
+
+    def test_the_error_class_tells_a_retry_from_a_repair_not_its_words(self):
+        from devkit import state
+        path = Path(self.tmp.name) / "ext-accepted.json"
+        code, reason, _ = ext._list_failure(state.StateBusy("unsafe state lock: replaced, so the record is busy"),
+                                            path, "dev ext ack")
+        self.assertEqual(code, 2, reason)  # an unsafe lock needs a repair, whatever its message says
+        held = getattr(state, "StateHeld", None)
+        self.assertIsNotNone(held, "state has no error for a lock another process held past the wait")
+        code, _, fix = ext._list_failure(held("another devkit process held the lock for 5 s"), path, "dev ext ack")
+        self.assertEqual((code, fix), (75, "Run dev ext ack again in a moment"))
 
 
 class OverlayValidationTests(unittest.TestCase):

@@ -6,6 +6,7 @@
     "MD033": { "allowed_elements": ["picture", "source", "img", "br", "details", "summary", "sub", "sup", "kbd", "div", "p", "a"] },
     "MD041": false,                      // first line may be a <picture> hero banner
     "MD024": { "siblings_only": true },  // same heading text allowed under different parents
+    "MD025": { "front_matter_title": "" }, // one # title in the text; a front-matter title: is the record's metadata
     "MD046": { "style": "fenced" },
     "MD049": { "style": "underscore" },
     "MD050": { "style": "asterisk" }

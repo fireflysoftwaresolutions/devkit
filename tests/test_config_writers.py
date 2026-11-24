@@ -120,7 +120,7 @@ class ConfigWriterTests(unittest.TestCase):
             records = list(audit.records(1, "dev.config.set"))
         self.assertEqual(len(records), 1)
         self.assertNotIn("private-test-credential", json.dumps(records))
-        self.assertIn("value_digest", json.dumps(records))
+        self.assertEqual(records[0]["detail"], "a list of 1 item")
 
     def test_editor_concurrent_update_is_preserved(self):
         self.path.write_text('{}\n')
@@ -338,3 +338,58 @@ class ConfigCopyTests(unittest.TestCase):
         self.assertIn(f"restore with: cp {newest_valid} {self.path}", err.getvalue())
         self.assertEqual(json.loads(newest_valid.read_text()), {"editor": "nano"})
 
+
+
+class ConfigSetAuditTests(unittest.TestCase):
+    # A key the person chose (a job's or a Codex profile's name) may be a pasted token, and a value may be one: what
+    # `dev config set` records names the key only as the errors do and the value only by its type and length, so
+    # neither reaches the audit log or its export, whatever the log's own redaction knows.
+    JOB = "q7rk2plm9zt4wv8bn3hc6xd5"  # a job name the schema takes, with nothing a secret rule finds in it
+    PROFILE = "Xq7rK2pLm9Zt4Wv8Bn3Hc6Yd"
+    VALUE = "Lp4Rt8Wq2Zm6Yn1Kd5Hs9Jb3"
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_progress import TempState
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.path = Path(self.state.tmp.name) / "config.json"
+        patch = mock.patch.object(core, "CONFIG_FILE", self.path)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def dev(self, *argv):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            os.environ.pop("DEVKIT_FROM_AGENT", None)
+            rc = cli.main(list(argv))
+        return rc, out.getvalue()
+
+    def trail(self) -> str:
+        # every audit file as stored, and every export format of it
+        stored = "".join(p.read_text() for p in sorted(audit.AUDIT.rglob("*")) if p.is_file())
+        return stored + "".join(audit.export(fmt) for fmt in audit.FORMATS)
+
+    def test_a_token_as_a_job_or_profile_name_or_value_leaves_no_trace_in_the_audit_trail(self):
+        sets = [("jobs." + self.JOB, '{"cmd": ["status"], "every": 30}'),
+                (f"codex.profiles.{self.PROFILE}.model", self.VALUE)]
+        for key, value in sets:
+            rc, out = self.dev("config", "set", key, value)
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn(key.split(".")[-1 if key.startswith("jobs") else -2], out)
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved["jobs"][self.JOB]["every"], 30)
+        self.assertEqual(saved["codex"]["profiles"][self.PROFILE]["model"], self.VALUE)
+        trail = self.trail()
+        for secret in (self.JOB, self.PROFILE, self.VALUE):
+            self.assertNotIn(secret, trail)
+        said = [(r["target"], r["detail"]) for r in audit.records(1, action="dev.config.set")]
+        self.assertEqual(said, [("jobs.<key of 24 characters>", "an object of 2 keys"),
+                                ("codex.profiles.<key of 24 characters>.model", "a string of 24 characters")])
+
+    def test_a_declared_key_is_named_and_its_value_said_by_its_type(self):
+        rc, out = self.dev("config", "set", "progress.max_parallel", "6")
+        self.assertEqual(rc, 0, out)
+        said = [(r["target"], r["detail"]) for r in audit.records(1, action="dev.config.set")]
+        self.assertEqual(said, [("progress.max_parallel", "a number")])
+        self.assertIn("progress.max_parallel", self.trail())

@@ -183,10 +183,11 @@ def rules_for_command(command: str) -> list:
 
 def rules_for_commands(commands) -> list:
     """[(rule, [its command words the shell ran])] for shell commands. What a command runs is read the way the crew
-    gates read it: quoted text and heredoc bodies are dropped, each simple command stands alone, and a program is
-    its base name (`bin/dev test` runs `dev test`). The words may follow a wrapper (`uv run pytest`)."""
+    gates read it: quoted text and heredoc bodies are dropped, each simple command stands alone, a program is its
+    base name (`bin/dev test` runs `dev test`), and an option written with its value after `=` is the option alone
+    (`goose -dir=db/migrations up` runs `goose -dir`). The words may follow a wrapper (`uv run pytest`)."""
     from .gates import _invocations
-    runs = [[os.path.basename(w) for w in words] for words in _invocations([str(c) for c in commands or []])]
+    runs = [[_command_word(w) for w in words] for words in _invocations([str(c) for c in commands or []])]
     out = []
     for r in rules():
         ran = [c for c in r.get("commands") or [] if any(_has(words, c.split()) for words in runs)]
@@ -195,8 +196,25 @@ def rules_for_commands(commands) -> list:
     return out
 
 
+def _command_word(word: str) -> str:
+    """A word of a shell command as rules name it: an option with its value after `=` by its flag part, read before
+    the base name so the value's path is not taken for the word (`-dir=db/migrations` is `-dir`, not `migrations`);
+    any other word by its base name without the version `go run` and `npx` put after `@`
+    (`…/cmd/goose@latest` is `goose`; a name that starts with `@`, an npm scope, stays whole)."""
+    if word.startswith("-"):
+        return os.path.basename(word.split("=", 1)[0])
+    return re.sub(r"(?<=.)@[^@/]*\Z", "", os.path.basename(word))
+
+
+def _same_word(word: str, want: str) -> bool:
+    """A command word is the rule's word; an option a rule writes with one dash (`-dir`, as Go's flag package
+    names it) is the same option written with two (`--dir`), which that package reads alike."""
+    return word == want or (want[:1] == "-" and want[:2] != "--" and word == "-" + want)
+
+
 def _has(words, want) -> bool:
-    return bool(want) and any(words[i:i + len(want)] == want for i in range(len(words) - len(want) + 1))
+    return bool(want) and any(all(_same_word(w, x) for w, x in zip(words[i:i + len(want)], want))
+                              for i in range(len(words) - len(want) + 1))
 
 
 DECLARED = re.compile(r"^Kind of work: .*\(`([a-z0-9-]+)`\)\s*$", re.M)  # the line `dev crew brief` writes
@@ -269,16 +287,18 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
         thread, boundary = "", None
 
     def finish(call, code, output, ok=True):
+        # ts: when the call started (its own record's time), None when no record gives it
         receipts.append({"command": call["command"], "cwd": call["cwd"], "ok": code == 0 and ok,
-                         "exit_code": code, "output": output, "context_ok": call.get("context_ok", True)})
+                         "exit_code": code, "output": output, "context_ok": call.get("context_ok", True),
+                         "ts": call.get("ts")})
 
-    def invocation(inp, here):
+    def invocation(inp, here, rec):
         command = _shell_command(inp)
         default = not any(key in inp for key in ("shell", "env", "environment", "PATH"))
         if not default:
             overridden.add(command)
         return {"command": command, "cwd": str(inp.get("workdir") or inp.get("cwd") or here),
-                "context_ok": default}
+                "context_ok": default, "ts": _epoch(rec.get("timestamp"))}
 
     def default_code_context(script):
         # Keep execution context that exec_calls deliberately drops for ordinary attribution. An unreadable
@@ -338,19 +358,19 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
                 code_default = default_code_context(p.get("input"))
             if p.get("type") == "function_call" and use:
                 try:
-                    inp = json.loads(p.get("arguments") or "{}")
+                    inp = core.load_json(p.get("arguments") or "{}")
                 except (TypeError, ValueError):
                     continue
                 if not isinstance(inp, dict):
                     continue
                 if name in SHELL_TOOLS:
-                    calls[use] = invocation(inp, cwd)
+                    calls[use] = invocation(inp, cwd, rec)
                 elif name == "write_stdin" and str(inp.get("session_id")) in sessions:
                     calls[use] = sessions[str(inp["session_id"])]
             elif p.get("type") == "function_call_output" and use in calls:
                 output = p.get("output")
                 try:
-                    result = json.loads(output) if isinstance(output, str) else output
+                    result = core.load_json(output) if isinstance(output, str) else output
                 except ValueError:
                     result = None
                 if isinstance(result, dict):
@@ -382,7 +402,7 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
             if rec.get("type") == "assistant" and c.get("type") == "tool_use":
                 inp = c.get("input") or {}
                 if c.get("name") in SHELL_TOOLS and c.get("id"):
-                    calls[c["id"]] = invocation(inp, cwd)
+                    calls[c["id"]] = invocation(inp, cwd, rec)
                 elif c.get("name") in gates.READ_TOOLS and c.get("id"):
                     reads[c["id"]] = gates._task_of(inp)
             elif rec.get("type") == "user" and c.get("type") == "tool_result":
@@ -415,6 +435,29 @@ def executions(agent: str, transcript: str, cwd: str = "") -> list:
     return receipts
 
 
+_FRACTION = re.compile(r"(?<=T\d\d:\d\d:\d\d)\.(\d*)")
+
+
+def _epoch(stamp):
+    """A transcript record's `timestamp` (ISO 8601 in UTC, as Claude Code and Codex write it) in epoch seconds; None
+    when the record has none or it does not parse."""
+    from datetime import datetime, timezone
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    # Python 3.9 and 3.10 read only a 3- or 6-digit fraction of a second (and take an empty one): write it as 6
+    # digits, so every Python reads the same time, and refuse an empty fraction everywhere
+    frac = _FRACTION.search(stamp)
+    if frac:
+        if not frac.group(1):
+            return None
+        stamp = stamp[:frac.start()] + "." + (frac.group(1) + "000000")[:6] + stamp[frac.end():]
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+
+
 def _default_shells() -> set:
     """The real paths of the shells Codex runs a command with by default: the system's sh, bash and zsh, and the
     developer's login shell ($SHELL, such as fish or Homebrew's bash) when it resolves to a regular executable file."""
@@ -435,7 +478,7 @@ def fork_start(lines: list) -> int:
     session_meta gives (Codex 0.167), past the end of the rollout when it has not started yet. 0 for a rollout that
     is not forked or gives no start."""
     try:
-        first = json.loads(lines[0]) if lines else {}
+        first = core.load_json(lines[0]) if lines else {}
     except ValueError:
         return 0
     meta = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" else None
@@ -447,7 +490,7 @@ def fork_start(lines: list) -> int:
         if '"task_started"' not in ln:
             continue
         try:
-            rec = json.loads(ln)
+            rec = core.load_json(ln)
         except ValueError:
             continue
         p = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "event_msg" else None
@@ -483,7 +526,7 @@ def read(agent: str, transcript: str, offset: int = 0):
             if '"tool_use"' not in ln:
                 continue
             try:
-                d = json.loads(ln)
+                d = core.load_json(ln)
             except ValueError:
                 continue
             for c in (d.get("message") or {}).get("content") or []:
@@ -511,7 +554,7 @@ def read(agent: str, transcript: str, offset: int = 0):
             for m in re.finditer(r"\*\*\* (?:Add|Update) File: ([^\\\n\"]+)", ln):
                 files.append(m.group(1).strip())
             try:
-                rec = json.loads(ln)
+                rec = core.load_json(ln)
             except ValueError:
                 continue
             pl = rec.get("payload") if isinstance(rec, dict) else None
@@ -528,7 +571,7 @@ def read(agent: str, transcript: str, offset: int = 0):
             if isinstance(pl, dict) and pl.get("type") == "function_call" and pl.get("name") in SHELL_TOOLS:
                 args = pl.get("arguments")
                 try:
-                    args = json.loads(args) if isinstance(args, str) else args
+                    args = core.load_json(args) if isinstance(args, str) else args
                 except ValueError:
                     args = {}
                 commands.append(_shell_command(args if isinstance(args, dict) else {}))

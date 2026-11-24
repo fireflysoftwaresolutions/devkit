@@ -426,6 +426,21 @@ class ConfigTests(Sandbox):
         self.assertIn("dev install", out)
         self.assertLessEqual(max(ui.visible_len(ln) for ln in out.splitlines()), 80)
 
+    def test_every_hook_devkit_installs_says_what_it_does(self):
+        settings = json.loads((Path(__file__).resolve().parents[1] / "config/claude/settings.json").read_text())
+        hooks = [(event, h["command"]) for event, groups in settings["hooks"].items() for g in groups
+                 for h in g["hooks"] if " hook " in h.get("command", "")]
+        self.assertIn("PermissionDenied", [e for e, _ in hooks])
+        for event, cmd in hooks:
+            with self.subTest(event=event):
+                conf = {event: [{"matcher": "", "hooks": [{"type": "command", "command": cmd}]}]}
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    cli.config_report([policy.Drift("claude", f"hooks.{event}", policy.MISSING, cmd)], {}, conf,
+                                      cols=80)
+                self.assertIn("A hook: ", out.getvalue())
+                self.assertNotIn("devkit runs a command at this moment", out.getvalue())
+
     def test_check_prints_one_line_and_exits_1(self):
         rc, out = self.report([policy.Drift("claude", "hooks.PostToolUseFailure", policy.MISSING, HOOK)], check=True)
         self.assertEqual(rc, 1)

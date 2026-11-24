@@ -19,6 +19,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, bugs, core, providers, setup, toolchain, tui, ui, wizard  # noqa: E402
 
 UP, DOWN, ENTER, ESC, CTRL_C = b"\x1b[A", b"\x1b[B", b"\r", b"\x1b", b"\x03"
@@ -181,7 +186,7 @@ class Mac:
         with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(wizard, "STATE", state), \
                 mock.patch.object(setup, "STATE", state), mock.patch.object(wizard, "survey", self.survey), \
                 mock.patch.object(wizard, "_exec", self.exec), mock.patch.object(wizard, "_attached", self.attach), \
-                mock.patch.object(wizard, "package_status", lambda groups: self.packages), \
+                mock.patch.object(wizard, "package_status", lambda groups, folder=None: self.packages), \
                 mock.patch.object(wizard, "_npm_globals", lambda groups: list(self.npm)), \
                 mock.patch.object(wizard, "detect_docker", lambda: {"colima": self.docker != "missing",
                                                                     "running": self.docker == "running"}), \

@@ -103,7 +103,7 @@ def _records(path) -> list:
     out = []
     for ln in lines:
         try:
-            rec = json.loads(ln)
+            rec = core.load_json(ln)
         except ValueError:
             continue
         if _well_formed(rec):
@@ -286,6 +286,32 @@ def _uv_command(words) -> list:
         else:
             break
     return words[at:] if at < len(words) else words
+
+
+TIMEOUTS = ("timeout", "gtimeout")  # coreutils' timeout, and Homebrew's name for it
+_DURATION = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+_TIMEOUT_FLAGS = ("--foreground", "--preserve-status", "-v", "--verbose")
+
+
+def _timeout_command(words) -> list:
+    """The command `timeout [options] <duration> <command>` runs, or [] when the words are not that. timeout gives
+    back the command's own exit code, or 124 when the duration ends first (a failure either way), so a proof behind
+    it keeps its own result. An option or duration timeout does not take leaves no command."""
+    if not words or os.path.basename(words[0]) not in TIMEOUTS:
+        return []
+    at = 1
+    while at < len(words) and words[at].startswith("-"):
+        word = words[at]
+        if word in ("-s", "--signal", "-k", "--kill-after"):
+            at += 2
+        elif word in _TIMEOUT_FLAGS or word.startswith(("--signal=", "--kill-after=")) or \
+                re.fullmatch(r"-[sk]\S+", word):
+            at += 1
+        else:
+            return []
+    if at >= len(words) or not _DURATION.fullmatch(words[at]):
+        return []
+    return words[at + 1:]
 
 
 def _invocations(commands, agent: str = "claude") -> list:
@@ -551,7 +577,7 @@ def _ran(command: str, invocations) -> bool:
 def _trusted_runtime(program, cwd, python=False):
     """Resolve a wrapper to an installed tool, never trust its basename in an arbitrary directory."""
     name = os.path.basename(program)
-    if (python and not _PYTHON.fullmatch(name)) or (not python and name != "uv"):
+    if (python and not _PYTHON.fullmatch(name)) or (not python and name not in ("uv",) + TIMEOUTS):
         return False
     path = shutil.which(program) if "/" not in program else os.path.join(cwd or ".", os.path.expanduser(program))
     if not path or not os.path.isfile(path):
@@ -595,7 +621,7 @@ def _execution_receipt_words(words, receipt, cwd, repo=""):
     else:
         normalized = ["dev", "sec", "scan"]
     try:
-        result = json.loads(receipt.get("output") or "")
+        result = core.load_json(receipt.get("output") or "")
     except (TypeError, ValueError):
         result = {}
     target = result.get("top") if isinstance(result, dict) else None
@@ -609,6 +635,38 @@ def _execution_receipt_words(words, receipt, cwd, repo=""):
                    or not cwd or not _in_repository(target, cwd, repo)):
         return []
     return normalized
+
+
+def _step_said(words) -> tuple:
+    """(text, Check) a `dev progress step [options] <text…>` call records, read with the CLI's own grammar, so an
+    option's value is never taken for its text; ('', '') when the words are not such a call."""
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            args = _proof_parser().parse_args(words[1:])
+    except (SystemExit, ValueError):
+        return "", ""
+    text = getattr(args, "text", None)
+    if getattr(args, "cmd", None) != "progress" or getattr(args, "progress_cmd", None) != "step" or \
+            not isinstance(text, list):
+        return "", ""
+    return " ".join(text).strip(), str(getattr(args, "check", "") or "").strip()
+
+
+def _lane_steps(agent, session, lane, positive=False) -> list:
+    """The steps the member's lane recorded in its session's run (`dev progress step` from the lane), with a ✓
+    check when `positive`: devkit's own record of the proof. [] without a run, a lane, or a readable record."""
+    if not session or not lane:
+        return []
+    try:
+        from . import progress
+        run = progress.load_run(agent or "claude", session)
+        updates = (((run or {}).get("agents") or {}).get(lane) or {}).get("updates") or []
+    except Exception:
+        return []
+    return [u for u in updates if isinstance(u, dict) and u.get("kind") == "step"
+            and (not positive or str(u.get("check") or "").lstrip().startswith("✓"))]
 
 
 def _member_checkout(cwd, agent, session) -> str:
@@ -660,6 +718,7 @@ def _names(proof, command) -> bool:
     from . import shellparse
     want = proof.split()
     for words, _ in shellparse.split_commands(command) or []:
+        words = _timeout_command(words) or words
         while words and (_PYTHON.fullmatch(os.path.basename(words[0])) or words[0].startswith("-")):
             words = words[1:]
         if want and words and os.path.basename(words[0]) == want[0] and words[1:len(want)] == want[1:]:
@@ -691,9 +750,12 @@ def _unstamped(command: str) -> str:
 def _receipt_words(receipt, cwd, agent, repo=""):
     """One observed devkit command in the target tree, with a known executable, or no supported proof.
 
-    Compound shells do not reveal which branch ran or each exit status. Only literal `cd ... && command` is
-    unambiguous here, in this repository or one of its worktrees, or in the member's repository `repo` when the stop's
-    folder is outside it (`_in_repository`). Its stderr may join its output
+    Compound shells do not reveal which branch ran or each exit status. Only a literal `cd ... && command` or
+    `cd ...; command` (or the cd on a line of its own) is unambiguous here, in this repository or one of its
+    worktrees, or in the member's repository `repo` when the stop's folder is outside it (`_in_repository`): with `;`
+    a cd that fails leaves the command in the folder it started in, so that folder must be one of them too. A system
+    `timeout <duration>` in front of the command keeps its exit code, so the command behind it counts
+    (_timeout_command); no other wrapper does. Its stderr may join its output
     (`2>&1`); a pipe into read-only filters (`| tail -40`, the read-only classifier) still shows it ran, but
     the receipt then holds the filter's exit code, so it marks the receipt `piped` and it verifies no success. General
     command parsing still serves skill attribution; it grants no execution proof.
@@ -712,7 +774,10 @@ def _receipt_words(receipt, cwd, agent, repo=""):
         return []
     start = 0
     while start < len(parts) - 1 and parts[start][0][:1] == ["cd"] and len(parts[start][0]) == 2 and \
-            parts[start][2] == "&&" and not parts[start][1] and not parts[start][3]:
+            parts[start][2] in ("&&", ";") and not parts[start][1] and not parts[start][3]:
+        if parts[start][2] == ";" and cwd and here and not _in_repository(here, cwd, repo):
+            return _unproven(receipt, f"it ran after a `cd …;` from {core.tilde(here)}, where it goes on when the cd "
+                                      f"fails, outside this repository and its worktrees", "folder")
         here = os.path.realpath(os.path.join(here or ".", os.path.expanduser(parts[start][0][1])))
         start += 1
     for index, (words, redirs, op, inputs) in enumerate(parts[start:start + 1], start):  # the command after the cds
@@ -736,6 +801,11 @@ def _receipt_words(receipt, cwd, agent, repo=""):
         if cwd and here and not _in_repository(here, cwd, repo):
             return _unproven(receipt, f"it ran in {core.tilde(here)}, outside this repository and its worktrees",
                              "folder")
+        if words and os.path.basename(words[0]) in TIMEOUTS:  # `timeout 600 dev test …`: the proof's own exit code
+            inner = _timeout_command(words)
+            if not inner or not _trusted_runtime(words[0], here):
+                return []
+            words = inner
         if agent == "codex" and words and os.path.basename(words[0]) == "uv":
             if not _trusted_runtime(words[0], here) or "--no-project" not in words:
                 return []
@@ -782,7 +852,7 @@ def _verification_eligible(receipt, proof):
         return False  # piped: the exit code is the last filter's, and the output only what the filter let through
     output = receipt.get("output") or ""
     try:
-        data = json.loads(output)
+        data = core.load_json(output)
     except (TypeError, ValueError):
         data = None
     if isinstance(data, dict) and proof.startswith("dev test"):
@@ -805,12 +875,21 @@ def _verification_eligible(receipt, proof):
     return True
 
 
-def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo=""):
-    """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
-    (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
-    member's repository (`_member_checkout`), where a proof counts too."""
+# progress writes a step's time in whole seconds (round), so the step a call recorded can read up to half a second
+# before the call's own start, which the transcript gives in milliseconds
+STEP_TS_SLACK = 1
+
+
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _attempts(proof, receipts, cwd, agent, repo=""):
+    """The receipts that ran `proof`, oldest first, as (receipt, kind, words), and the reason the latest call that
+    names it but proves nothing was not counted (`_unproven`), or None. Help and version output never counts, nor does
+    `dev test audit` for `dev test`."""
     relevant, missed = [], None
-    for receipt in receipts:
+    for receipt in receipts or []:
         words = _receipt_words(receipt, cwd, agent, repo)
         if not words and receipt.get("unproven") and _names(proof, receipt["command"]):
             missed = receipt["unproven"]
@@ -819,9 +898,17 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="")
         if proof == "dev test" and words[:3] == ["dev", "test", "audit"]:
             continue  # an audit proves its own procedure, not that tests executed
         if _ran(proof, [words]):
-            kind = "dev test prove" if words[:3] == ["dev", "test", "prove"] else proof
-            relevant.append((receipt, kind))
-    if relevant and (not successful or _verification_eligible(*relevant[-1])):
+            relevant.append((receipt, "dev test prove" if words[:3] == ["dev", "test", "prove"] else proof, words))
+    return relevant, missed
+
+
+def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo=""):
+    """Whether a receipt meets `proof` (and, `successful`, its latest run verified a success). `why`: a list that gets
+    (evidence, fix) for the latest attempt that did not meet it, so the send-back names the actual reason. `repo`: the
+    member's repository (`_member_checkout`), where a proof counts too. A piped receipt verifies no success: a piped
+    `dev progress step` can still be met by its lane's record (`_step_recorded`), which the audit trail keeps."""
+    relevant, missed = _attempts(proof, receipts, cwd, agent, repo)
+    if relevant and (not successful or _verification_eligible(*relevant[-1][:2])):
         return True
     if why is not None:
         run = f"`{proof}{PROOF_ARGS.get(proof, '')}`"
@@ -840,6 +927,30 @@ def _proof_met(proof, receipts, cwd, agent, successful=False, why=None, repo="")
             why.append((f"`{proof}` {missed[0]}", f"run {run} in this repository or one of its worktrees"
                         if missed[1] == "folder" else f"run {run} alone"))
     return False
+
+
+def _step_recorded(proof, receipts, cwd, agent, repo="", recorded=()) -> str:
+    """How a `dev progress step` piped into a read-only filter (`| tail -3`) still proves itself: the pipe hides the
+    command's exit code, not the step devkit keeps, so the member's lane holding the step that very call recorded is
+    the proof. `recorded`: the lane's steps (`_lane_steps`). As for every proof, the latest call that ran it decides,
+    and only a step with that call's text and Check, recorded since the call started (the receipt's `ts`), is its
+    own: an earlier step of the lane, even one with the same text, never stands in for a later call that recorded
+    nothing (refused, or never ran), and a call whose start no record gives is never proven this way. -> how the proof
+    was met, for the audit trail, with the warning that the pipe hid the exit code; '' otherwise."""
+    if " ".join(str(proof).split()) != "dev progress step":
+        return ""
+    relevant, _ = _attempts(proof, receipts, cwd, agent, repo)
+    if not relevant or not relevant[-1][0].get("piped"):
+        return ""
+    receipt, _, words = relevant[-1]
+    (text, check), since = _step_said(words), receipt.get("ts")
+    if not text or not check or not _number(since):
+        return ""
+    if not any(str(u.get("text") or "").strip() == text and str(u.get("check") or "").strip() == check
+               and _number(u.get("ts")) and u["ts"] >= since - STEP_TS_SLACK for u in recorded or ()):
+        return ""
+    return (f"its lane's record of that `dev progress step`, which ran piped into `{receipt['piped']}`, whose exit "
+            "code hid its own exit code: run it alone next time")
 
 
 # The full local CI run is the one proof the tech lead may meet for a member. A brief can forbid the run (in a shared
@@ -864,7 +975,7 @@ def _brief(path) -> str:
     of a very long transcript. '' for any other first record, such as a Codex rollout's session metadata."""
     try:
         with open(path, "rb") as fh:
-            rec = json.loads(fh.readline().decode("utf-8", "replace"))
+            rec = core.load_json(fh.readline().decode("utf-8", "replace"))
     except (OSError, TypeError, ValueError):
         return ""
     if not isinstance(rec, dict) or rec.get("type") != "user":
@@ -1142,6 +1253,7 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
     edited += list(native_written)
     paths = [str(Path(f) if os.path.isabs(f) else Path(cwd or ".") / f) for f in dict.fromkeys(edited) if f]
     repo = _member_checkout(cwd, agent, session)
+    recorded = _lane_steps(agent, session, lane, successful)
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else ""
     if not top and repo and os.path.isdir(repo):
         # the stop's folder is outside every repository (a session started in ~): the member's changes, the stubs
@@ -1168,7 +1280,8 @@ def crew_gates(member, transcript_path, cwd, roster=None, agent: str = "", sessi
             if proof and _proof_owed(x, proof_kinds, inv) and not _proof_met(proof, receipts, cwd, agent, successful, why,
                                                                         repo):
                 ci = " ".join(str(proof).split()) == CI_PROOF
-                how = _ci_instead(transcript_path, top, by_lead) if ci else ""
+                how = _ci_instead(transcript_path, top, by_lead) if ci else \
+                    _step_recorded(proof, receipts, cwd, agent, repo, recorded)
                 if how:
                     if accepted is not None:
                         accepted.append({"proof": proof, "how": how})

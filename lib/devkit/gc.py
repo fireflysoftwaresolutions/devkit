@@ -230,6 +230,7 @@ def plan(reg: dict, with_sizes=True) -> dict:
                             "reason": f"temp entry untouched for {int(age // 86400)}d"})
     actions += state_records(now)
     actions += visual_pictures(now)
+    actions += vale_configs()
     return {"actions": actions, "notes": notes,
             "reclaimable_kb": sum(a.get("kb") or 0 for a in actions)}
 
@@ -281,14 +282,58 @@ def state_records(now: float | None = None) -> list:
     return actions + _settled_bug_reports(now)
 
 
+def _vale_config_unused(ini: Path) -> str:
+    """Why a Vale config devkit wrote is no longer used, or "" while it is: the config older devkit copies share, one
+    whose copy's folder no longer holds a devkit copy (a removed worktree, an old release), or one that names no copy
+    (docs.vale_copy)."""
+    from . import docs
+    if ini == docs.VALE_DIR / docs.VALE_SHARED_NAME:
+        return ("the Vale config older devkit copies share; each copy now writes its own under configs/, and an older "
+                "copy writes this one again when it runs a docs check")
+    copy = docs.vale_copy(ini)
+    if copy is None:
+        return "a Vale config that names no devkit copy; the copy that wrote it writes it again at its next docs check"
+    if not (Path(copy) / "lib" / "devkit" / "docs.py").is_file():
+        return f"the Vale config of a devkit copy that is gone ({tilde(copy)})"
+    return ""
+
+
+def vale_configs() -> list:
+    """The Vale configs `dev docs check` wrote that no devkit copy uses any more (_vale_config_unused); the style
+    packages and a live copy's config stay. -> actions (purge-record, automatic)."""
+    from . import docs
+    shared = docs.VALE_DIR / docs.VALE_SHARED_NAME
+    found = [shared] if shared.is_file() else []
+    found += sorted((docs.VALE_DIR / "configs").glob("*.vale.ini"))
+    out = []
+    for ini in found:
+        why = "" if ini.is_symlink() else _vale_config_unused(ini)
+        if why:
+            out.append({"kind": "purge-record", "path": str(ini), "kb": 0, "auto": True, "reason": why, "vale": True})
+    return out
+
+
+def _vale_remove(a: dict) -> tuple:
+    """Remove a Vale config the plan found unused, after checking again: a copy may be back at its folder."""
+    path = Path(a["path"])
+    if path.is_symlink() or not _vale_config_unused(path):
+        return False, f"kept {tilde(a['path'])}: a devkit copy uses it again"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return False, f"kept {tilde(a['path'])}: {e}"
+    return True, f"removed {tilde(a['path'])}: {a['reason']}"
+
+
 VISUAL_PICTURE_DAYS = 30  # days a local picture of visual diagnosis that no open finding uses is kept
 VISUAL_OPEN = ("open", "reopened", "fixing", "fixed")  # the finding states that keep their pictures
 
 
 def _visual_json(path: Path):
     try:
-        import json
-        return json.loads(path.read_text(encoding="utf-8"))
+        return core.load_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
@@ -603,6 +648,8 @@ def apply(pl: dict, only_auto=True, *, remote: bool) -> list:
             _log("gc · " + msg)
         elif k == "prune-picture":
             ok, msg = _visual_remove(a)
+        elif k == "purge-record" and a.get("vale"):
+            ok, msg = _vale_remove(a)
         elif k == "purge-record" and "bug_last_ts" in a:
             from . import bugs  # checked again under the lock a new occurrence of the report takes
             why = bugs.purge_settled(a["path"], a["bug_last_ts"], BUG_REPORT_DAYS)

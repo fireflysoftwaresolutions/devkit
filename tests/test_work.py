@@ -16,6 +16,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, core, plans, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
@@ -913,6 +918,65 @@ class ClaimReachesRemoteTests(unittest.TestCase):
             self.assertEqual(m.stopped(), [], m.problem())
 
 
+class ItemGoneByThePullTests(unittest.TestCase):
+    # `dev task done` pulls first and then read the item where it was before the pull: an item the pull moved to
+    # another folder or took away crashed the command (FileNotFoundError in work.load). A moved item is changed where
+    # it is now; one that is gone is a refusal that names it, and nothing is written.
+    def test_an_item_another_mac_moved_to_another_folder_is_closed_where_it_is_now(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            moved = Path("items") / "acme" / "web" / f"{iid}.md"
+            (m.other / moved).parent.mkdir(parents=True)
+            _git(m.other, "mv", str(Path(it["path"]).relative_to(m.here)), str(moved))
+            _git(m.other, "commit", "-qm", "move the item to acme/web")
+            _git(m.other, "push", "-q")
+            done = work.release(it, a=A, why="shipped", status="done")
+            self.assertEqual(Path(done["path"]), m.here / moved)
+            self.assertEqual(work.load(m.here / moved)["meta"]["status"], "done")
+            self.assertFalse(Path(it["path"]).exists())
+
+    def test_an_item_another_mac_moves_while_the_push_runs_is_closed_where_it_is_now(self):
+        # The other Mac moves the item after this Mac's first pull and before its push: the push's own pull brings the
+        # move, so the item is no longer where this Mac committed the change. The next try looks the item up again
+        # and finds the change there, where it used to report the item as gone.
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            moved = Path("items") / "acme" / "web" / f"{iid}.md"
+            real_push, raced = work.push_now, []
+
+            def push_after_the_move(*args, **kw):
+                if not raced:
+                    raced.append(True)
+                    (m.other / moved).parent.mkdir(parents=True)
+                    _git(m.other, "mv", str(Path(it["path"]).relative_to(m.here)), str(moved))
+                    _git(m.other, "commit", "-qm", "move the item to acme/web")
+                    _git(m.other, "push", "-q")
+                return real_push(*args, **kw)
+
+            with mock.patch.object(work, "push_now", push_after_the_move):
+                done = work.release(it, a=A, why="shipped", status="done")
+            self.assertTrue(raced)
+            self.assertEqual(Path(done["path"]), m.here / moved)
+            on_remote = work.parse(_git(m.here, "show", f"origin/main:{moved}") + "\n")
+            self.assertEqual(on_remote["meta"]["status"], "done")
+            self.assertFalse(Path(it["path"]).exists())
+
+    def test_an_item_another_mac_took_away_is_refused_by_its_id_and_nothing_is_written(self):
+        with TwoMacs() as m:
+            iid = m.shared_item("Export invoices")
+            it = m.item(iid)
+            _git(m.other, "rm", "-q", str(Path(it["path"]).relative_to(m.here)))
+            _git(m.other, "commit", "-qm", "remove the item")
+            _git(m.other, "push", "-q")
+            with self.assertRaises(ValueError) as cm:
+                work.release(it, a=A, why="shipped", status="done")
+            self.assertIn(f"{iid} is no longer in the handoff repository", str(cm.exception))
+            self.assertFalse(Path(it["path"]).exists())
+            self.assertEqual(_git(m.here, "status", "--porcelain"), "")
+
+
 class PlanTests(unittest.TestCase):
     def test_versioned_plan(self):
         with TempHandoff():
@@ -982,14 +1046,40 @@ class PlanTests(unittest.TestCase):
 
 
 class TemplateTests(unittest.TestCase):
+    # A new item keeps only the sections it has text for: unfilled template sections ("1. _…_", "_Acceptance
+    # criterion, testable._") made most of the backlog read as empty templates.
     def test_task_bodies_by_type(self):
         body = work.task_body("bug", "Login times out on Safari", ["Safari login works", "regression test added"])
-        self.assertIn("## Symptom\n\nLogin times out on Safari", body)
-        self.assertIn("- [ ] Safari login works\n- [ ] regression test added", body)
-        self.assertIn("## Steps to reproduce", body)
-        for kind, section in (("feature", "## Why"), ("spike", "## Timebox"), ("task", "## Done when")):
+        self.assertEqual(body, "## Symptom\n\nLogin times out on Safari\n\n## Done when\n\n"
+                               "- [ ] Safari login works\n- [ ] regression test added")
+        self.assertEqual(work.task_body("feature", "Finance copies invoices by hand."),
+                         "## Why\n\nFinance copies invoices by hand.")
+        self.assertEqual(work.task_body("task", done=["the export runs nightly"]),
+                         "## Done when\n\n- [ ] the export runs nightly")
+        for kind in ("bug", "feature", "spike", "task"):
             with self.subTest(kind=kind):
-                self.assertIn(section, work.task_body(kind))
+                self.assertEqual(work.task_body(kind), "")
+
+    # Items written before keep their unfilled sections on disk: a reader shows the item without them.
+    def test_a_shown_body_leaves_out_the_sections_that_hold_only_placeholders(self):
+        old = ("## Symptom\n\nLogin times out on Safari\n\n## Steps to reproduce\n\n1. _…_\n\n## Expected vs. actual\n\n"
+               "- Expected: _…_\n- Actual: _…_\n\n## Environment\n\n_Version, browser/OS, data set, logs, or trace id._"
+               "\n\n## Done when\n\n- [ ] _A failing test reproduces it and now passes._\n")
+        self.assertEqual(work.shown_body(old), "## Symptom\n\nLogin times out on Safari")
+        partly = "## Expected vs. actual\n\n- Expected: a session of 8 hours\n- Actual: _…_\n"
+        self.assertEqual(work.shown_body(partly), partly.strip())  # a section with any text of its own stays whole
+        self.assertEqual(work.shown_body("Plain text, _emphasis_ inside.\n"), "Plain text, _emphasis_ inside.")
+
+    # Only the templates' own placeholder lines are left out: a line a person wrote in italics, or a box they
+    # checked, is the item's text.
+    def test_a_shown_body_keeps_lines_a_person_wrote_in_italics(self):
+        for body in ("## Done when\n\n- [x] _shipped_",
+                     "## Done when\n\n- [x] _Acceptance criterion, testable._",
+                     "## Notes\n\n_Do not deploy on Fridays._",
+                     "## Steps to reproduce\n\n1. Run: _dev x_",
+                     "_Do not deploy on Fridays._"):
+            with self.subTest(body=body):
+                self.assertEqual(work.shown_body(body + "\n"), body)
 
     def test_plan_kinds(self):
         for kind, section in (("plan", "## Non-goals"), ("spec", "## Acceptance criteria"),
@@ -1173,11 +1263,14 @@ class MachineIdentityTests(unittest.TestCase):
         work.write_presence([], a=work.actor("human", user="ana"))
         self.assertEqual(after["host"], before["host"])
         self.assertRegex(after["host"], r"^m-[0-9a-z]{8}$")
-        self.assertEqual((before["label"], after["label"]), ("mac-158", "andress-mbp-2"))
+        # the actor names the Mac by its id alone: what reads it (locks, presence, records) never gets a hostname
+        self.assertNotIn("mac-158", json.dumps(before).lower())
+        self.assertNotIn("andress-mbp-2", json.dumps(after))
         files = sorted(f.name for f in self.handoff.root.glob("presence/*.json"))
         self.assertEqual(files, [f"ana@{after['host']}.json"])
         data = json.loads((self.handoff.root / "presence" / files[0]).read_text())
-        self.assertEqual((data["host"], data["label"]), (after["host"], "andress-mbp-2"))
+        self.assertEqual(data["host"], after["host"])
+        self.assertNotIn("label", data)  # the handoff is shared and kept: presence never names the hostname
 
     def test_an_older_session_still_writing_this_macs_old_presence_file_is_hidden_and_never_flaps(self):
         # an older devkit session on this Mac rewrites ana@mac-158.json; deleting it on every write made each sync
@@ -1216,26 +1309,27 @@ class MachineIdentityTests(unittest.TestCase):
             self.assertEqual(len(list((self.handoff.root / "lessons" / "usage").glob("*.json"))), 1)
             self.assertEqual(lessons.usage()["L-1"]["shown"], 2)
 
-    def test_a_person_is_shown_by_the_hostname_label_of_their_machine(self):
+    def test_a_person_is_shown_by_the_machine_id_never_a_hostname(self):
+        # What devkit shows lands in the note, screenshots and shared logs: an id became this Mac's hostname, or the
+        # label an older presence file of another Mac still publishes. Every reader keeps the machine id.
         a = self.me()
         work.PRESENCE.mkdir(parents=True, exist_ok=True)
-        for user, host, label in (("bob", "m-0000beef", "mini"), ("eve", "m-0000dead", "<b>x</b>")):
-            (work.PRESENCE / f"{user}@{host}.json").write_text(json.dumps({"user": user, "host": host, "label": label,
-                                                                          "updated": work.now_iso()}))
-        self.assertEqual(work.display(f"ana@{a['host']}"), "ana@mac-158")  # this Mac: its hostname now
-        self.assertEqual(work.display(f"ana@{a['host']} (codex:s1)"), "ana@mac-158 (codex:s1)")  # a lock holder
-        self.assertEqual(work.display("bob@m-0000beef"), "bob@mini")  # another Mac: the label its presence publishes
+        (work.PRESENCE / "bob@m-0000beef.json").write_text(json.dumps({"user": "bob", "host": "m-0000beef",
+                                                                      "label": "mini", "updated": work.now_iso()}))
+        self.assertEqual(work.display(f"ana@{a['host']}"), f"ana@{a['host']}")
+        self.assertEqual(work.display(f"ana@{a['host']} (codex:s1)"), f"ana@{a['host']} (codex:s1)")
+        self.assertEqual(work.display("bob@m-0000beef"), "bob@m-0000beef")
         self.assertEqual(work.display("bob@m-0000beef", team=[{"user": "bob", "host": "m-0000beef",
-                                                               "label": "studio"}]), "bob@studio")
-        self.assertEqual(work.display("eve@m-0000dead"), "eve@m-0000dead")  # a label that is no hostname: the id
-        self.assertEqual(work.display("cy@m-00000000"), "cy@m-00000000")  # no presence: the id
+                                                               "label": "studio"}]), "bob@m-0000beef")
         self.assertEqual(work.display("ana@mac-55"), "ana@mac-55")  # a record from before the id names its host
         self.assertEqual(work.display(""), "")
 
-    def test_the_notes_task_list_shows_a_lock_by_the_holders_hostname(self):
+    def test_the_notes_task_list_shows_a_lock_by_the_holders_machine_id(self):
         from devkit import registry
         work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())
-        self.assertIn("🔒 ana@mac-158", registry.render_tasks_block("acme/api"))
+        block = registry.render_tasks_block("acme/api")
+        self.assertIn(f"🔒 ana@{self.me()['host']}", block)
+        self.assertNotIn("mac-158", block)
 
     def test_presence_lists_this_macs_locks_across_a_rename(self):
         it = work.claim(work.create("acme/api", "Fix login", a=self.me()), a=self.me())

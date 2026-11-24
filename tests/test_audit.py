@@ -25,7 +25,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, core, progress  # noqa: E402
+from devkit import audit, core, jobs, progress  # noqa: E402
 
 LIB = Path(__file__).resolve().parents[1] / "lib"
 NOV6 = time.mktime((2026, 11, 6, 12, 0, 0, 0, 0, -1))
@@ -225,7 +225,7 @@ class RedactionTests(AuditCase):
 
     def test_extra_patterns_from_the_team_policy_and_the_config(self):
         self.policy({"redact": {"extra": [r"ACME-[0-9]{6}"]}})
-        core.CFG["audit"]["redact"] = {"extra": [r"client-[a-z]{5}", "("]}  # "(" is not a pattern: skipped
+        core.CFG["audit"]["redact"] = {"extra": [r"client-[a-z]{5}"]}  # one that does not compile withholds instead
         out = audit.redact("ticket ACME-123456 for client-zorro")
         self.assertNotIn("ACME-123456", out)
         self.assertNotIn("client-zorro", out)
@@ -269,24 +269,398 @@ class RedactionTests(AuditCase):
         self.assertNotIn(CMD, (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
 
     def test_the_redactor_runs_in_linear_time(self):
-        # 64 KB of text that makes each command rule start a scan at every word; a rule that backtracks takes minutes
-        n = 1 << 16
-        texts = ["curl -u " * (n // 8), "sshpass -P x " * (n // 13), "mysql -u " * (n // 9),
-                 "docker login -u " * (n // 16), "Authorization: token " + "a" * n, "gh secret set X " * (n // 16),
-                 "passphrase credentials " * (n // 23), "https://u:" + "@" * n, "a" * n,
-                 "echo x | sudo " * (n // 14)]
-        start = time.perf_counter()
-        for t in texts:
+        # text that makes each command rule start a scan at every word, at 16 KB, 4 times that and 16 times that: each
+        # step takes a linear redactor about 4 times as long, and a rule that scans to the end from every word about
+        # 16 times. Such a rule can be cheap next to the rest on short text and grow only on long text, so the
+        # growth of each step is checked, not the two ends. A ratio of two CPU times measured the same way holds on
+        # a slow or loaded machine, where a time limit does not; the fastest of two tries leaves out a pause the
+        # process did not cause
+        shapes = [("curl -u ", ""), ("sshpass -P x ", ""), ("mysql -u ", ""), ("docker login -u ", ""),
+                  ("Authorization: token ", "a"), ("gh secret set X ", ""), ("passphrase credentials ", ""),
+                  ("https://u:", "@"), ("", "a"), ("echo x | sudo ", "")]
+
+        def text(head: str, fill: str, n: int) -> str:
+            return head + fill * n if fill else head * (n // len(head))
+
+        def cpu(t: str) -> float:
+            start = time.process_time()
             audit.redact(t, extra=[])
             audit.SECRET.search(t)
-        elapsed = time.perf_counter() - start
-        self.assertLess(elapsed, 2.0, f"{elapsed:.2f}s for {len(texts)} texts of 64 KB")
+            return time.process_time() - start
+
+        growth = {}
+        for head, fill in shapes:
+            times = [max(min(cpu(text(head, fill, n)) for _ in range(2)), 1e-6) for n in (1 << 14, 1 << 16, 1 << 18)]
+            growth[head or fill] = [later / before for before, later in zip(times, times[1:])]
+        worst = max(growth, key=lambda k: max(growth[k]))
+        self.assertLess(max(growth[worst]), 8, f"{worst!r}: each 4 times the text took "
+                        f"{' then '.join(f'{g:.1f}' for g in growth[worst])} times as long")
 
     def test_no_prompt_text_reaches_a_record(self):
         audit.record("canary.miss", "devkit", "final message without the status block", "recorded",
                      prompt="please ship the secret roadmap", text="the secret roadmap")
         raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
         self.assertNotIn("secret roadmap", raw)
+
+
+class TeamPatternsFailClosedTests(AuditCase):
+    # A team policy whose redact.extra patterns cannot load withholds text instead of redacting it with fewer
+    # patterns: a token shape only the team's patterns know is an ordinary word to the built-in rules.
+    TOKEN = "acmetok-" + "7f3k9x2m4q8zr1"
+    PATTERN = r"acmetok-[a-z0-9]{14}"
+    TEXT = "the deploy key " + TOKEN + " was refused"
+    GITHUB = "ghp_" + A36  # a shape the built-in rules know
+
+    def write_policy(self, body: str):
+        f = audit.policy_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(body)
+        return f
+
+    def broken(self) -> dict:
+        # each way a teammate's commit can leave the policy's patterns unloaded -> the body of policy/audit.json
+        return {"cut off": '{"redact": {"extra": ["' + self.PATTERN.replace("\\", "\\\\") + '"]',
+                "extra is a string": json.dumps({"redact": {"extra": self.PATTERN}}),
+                "redact is a list": json.dumps({"redact": [self.PATTERN]}),
+                "not an object": json.dumps([self.PATTERN]),
+                "a bad pattern beside it": json.dumps({"redact": {"extra": ["(", self.PATTERN]}}),
+                "a misspelled key": json.dumps({"redact": {"extras": [self.PATTERN]}}),
+                "empty file": ""}
+
+    def test_a_broken_policy_withholds_the_whole_text_and_names_the_file(self):
+        where = core.tilde(audit.policy_file())
+        for name, body in self.broken().items():
+            with self.subTest(policy=name):
+                self.write_policy(body)
+                self.assertEqual(audit.redact(self.TEXT), f"[text not recorded: {len(self.TEXT)} characters]")
+                cfg = audit.settings()
+                self.assertTrue(any(e.startswith(where) for e in cfg["errors"]), cfg["errors"])
+                self.assertIn(where, audit.redaction_unavailable())
+
+    def test_an_unreadable_policy_withholds_the_whole_text(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads a file of mode 000")
+        f = self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}}))
+        os.chmod(f, 0)  # the temporary folder's cleanup removes it all the same
+        self.assertNotIn(self.TOKEN, audit.redact(self.TEXT))
+        self.assertTrue(any("cannot be read" in e for e in audit.settings()["errors"]))
+        self.assertIn(core.tilde(f), audit.redaction_unavailable())
+
+    def test_callers_that_read_the_patterns_themselves_fail_closed(self):
+        # messaging.secret_shaped asks the compiled patterns whether a text holds a secret; cli asks whether any
+        # extra pattern exists before it trusts the built-in rules alone
+        self.write_policy(json.dumps({"redact": {"extra": self.PATTERN}}))
+        extra = audit.settings()["redact"]["extra"]
+        self.assertTrue(extra)
+        self.assertTrue(any(rx.search("plain words") for rx in audit._extra_rules(extra)))
+        self.assertEqual(audit.redact("plain words", audit._extra_rules(extra)), "[text not recorded: 11 characters]")
+
+    def test_withholding_twice_keeps_the_first_length(self):
+        self.write_policy("{")
+        once = audit.redact(self.TEXT)
+        self.assertEqual(audit.redact(once), once)
+        self.assertEqual(audit.redact(""), "")
+        # each length marker the trail writes, cut (N+) or not, stays as it is
+        for marker in ("[free text: 29 characters]", "[free text: 290+ characters]",
+                       "[message text not recorded: 186+ characters]", "[question not recorded: 300+ characters]",
+                       "[approval line not recorded: 12 characters]", "[text not recorded: 40+ characters]"):
+            with self.subTest(marker=marker):
+                self.assertEqual(audit.redact(marker), marker)
+
+    def test_a_valid_policy_still_redacts_only_the_token(self):
+        self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}}))
+        self.assertEqual(audit.redaction_unavailable(), "")
+        self.assertEqual(audit.settings()["errors"], [])
+        self.assertEqual(audit.redact(self.TEXT), "the deploy key " + audit.MARK + " was refused")
+
+    def test_no_policy_file_is_no_failure(self):
+        self.assertFalse(audit.policy_file().exists())
+        self.assertEqual(audit.redaction_unavailable(), "")
+        self.assertEqual(audit.redact("plain words stay"), "plain words stay")
+
+    def test_a_record_written_meanwhile_keeps_lengths_and_says_why(self):
+        self.write_policy('{"redact": ')
+        rec = audit.record("guard", "deploy " + self.TOKEN, self.TEXT, "blocked", why="push " + self.TOKEN)
+        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        self.assertNotIn(self.TOKEN, raw)
+        stored = [json.loads(ln) for ln in raw.splitlines() if '"guard"' in ln][-1]
+        self.assertEqual(stored["id"], rec["id"])
+        self.assertEqual((stored["action"], stored["outcome"]), ("guard", "blocked"))
+        self.assertEqual(stored["target"], f"[text not recorded: {len('deploy ' + self.TOKEN)} characters]")
+        self.assertEqual(stored["detail"], f"[text not recorded: {len(self.TEXT)} characters]")
+        self.assertIn(core.tilde(audit.policy_file()), stored["ref"]["withheld"])
+        self.assertTrue(audit.verify(team=False)["ok"])
+
+    def test_reading_older_records_meanwhile_shows_no_free_text(self):
+        # written before the team knew the token's shape: stored as it is, cleaned again whenever it is read
+        audit.record("guard", "deploy", self.TEXT, "blocked")
+        self.write_policy(json.dumps({"redact": {"extra": self.PATTERN}}))
+        shown = [r for r in audit.query() if r["action"] == "guard"]
+        self.assertEqual(len(shown), 1)
+        self.assertNotIn(self.TOKEN, json.dumps(shown))
+        self.assertEqual(shown[0]["detail"], f"[text not recorded: {len(self.TEXT)} characters]")
+
+    def test_dev_audit_config_names_the_broken_file(self):
+        import argparse
+        self.write_policy("{")
+        a = audit.add_arguments(argparse.ArgumentParser()).parse_args(["config"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(audit.cmd_audit(a), 0)
+        lines = [ln for ln in out.getvalue().splitlines() if core.tilde(audit.policy_file()) in ln]
+        self.assertTrue(any("not valid JSON" in ln for ln in lines), out.getvalue())
+        self.assertTrue(any("withheld" in ln for ln in lines), out.getvalue())
+
+    def test_a_message_is_refused_with_the_policy_to_repair_not_as_a_secret(self):
+        # every text looks secret while the patterns cannot load, so the refusal names the file instead of the body
+        from devkit import messaging
+        self.write_policy(self.broken()["cut off"])
+        with self.assertRaises(messaging.MessageError) as cm:
+            messaging.validate_body("the build is green")
+        self.assertEqual(cm.exception.code, "secret")
+        self.assertIn(core.tilde(audit.policy_file()), str(cm.exception))
+        self.assertNotIn("appears to contain a secret", str(cm.exception))
+        # a session message's short fields (a question's title, a claim's reason) say the same
+        from devkit import peers
+        with self.assertRaises(peers.PeerError) as cm:
+            peers._text("the build is green", 200, "the title")
+        self.assertIn(core.tilde(audit.policy_file()), str(cm.exception))
+        self.assertNotIn("looks like a secret", str(cm.exception))
+
+    def test_a_withheld_answer_keeps_its_own_length(self):
+        # the answer becomes its length before it is checked against the withheld option labels; that check keeps the
+        # marker instead of measuring the marker itself
+        self.write_policy('{"redact": ')
+        rec = audit.record("crew.decided", "D3", "B", "ok", options=["A: csv", "B: xlsx"], answer="B")
+        self.assertEqual(rec["detail"], "[text not recorded: 1 characters]")
+        self.assertEqual(rec["ref"]["answer"], "[text not recorded: 1 characters]")
+        audit.policy_file().unlink()  # repaired: read again, the record shows the same length
+        shown = [r for r in audit.query() if r["action"] == "crew.decided"]
+        self.assertEqual((shown[0]["detail"], shown[0]["ref"]["answer"]),
+                         ("[text not recorded: 1 characters]", "[text not recorded: 1 characters]"))
+
+    def test_an_answer_shaped_like_a_length_marker_keeps_only_its_length(self):
+        # only the two markers an answer becomes stay; any other bracketed "<words>: N characters" is the person's text
+        typed = "[correct horse battery staple: 4 characters]"
+        hashed = "[approval line not recorded: 1 characters, sha256 " + "9f" * 32 + "]"
+        options = ["A: csv", "B: xlsx"]
+        for answer, kept in ((typed, f"[free text: {len(typed)} characters]"),
+                             (hashed, f"[free text: {len(hashed)} characters]"),
+                             ("[free text: 10 characters]", "[free text: 10 characters]"),
+                             ("[text not recorded: 1 characters]", "[text not recorded: 1 characters]")):
+            with self.subTest(answer=answer):
+                rec = audit.record("crew.decided", "D3", answer, "ok", options=options, answer=answer)
+                self.assertEqual((rec["detail"], rec["ref"]["answer"]), (kept, kept))
+        # while the patterns cannot load, such a text is withheld like any other, not kept as a marker
+        self.write_policy('{"redact": ')
+        rec = audit.record("guard", "deploy", typed, "blocked")
+        self.assertEqual(rec["detail"], f"[text not recorded: {len(typed)} characters]")
+
+    def test_a_record_keeps_devkits_own_ids_and_words_while_text_is_withheld(self):
+        session = "claude:0f8e2c1a-3b4d-4e5f-8a9b-0c1d2e3f4a5b"
+        registry = {"projects": [{"id": "acme/api"}]}
+        self.write_policy('{"redact": ')
+        with mock.patch.object(core, "read_registry", return_value=registry):
+            rec = audit.record("crew.withdrawn", "D3", "no longer applies", "withdrawn", project="acme/api",
+                               by="morpheus", why="no longer applies", was="pending", session=session)
+            other = audit.record("crew.withdrawn", "D3 " + self.TOKEN, "x", "withdrawn",
+                                 project="acme/" + self.TOKEN, by="morpheus-" + self.TOKEN, was="pending " + self.TOKEN,
+                                 session="claude:" + self.TOKEN)
+            # a member's id after a prefix ("devkit:neo" names Neo) is no member when the prefix is a token
+            prefixed = audit.record("crew.withdrawn", self.GITHUB + ":neo", "x", "withdrawn",
+                                    by=self.TOKEN + ":tank", was="pending")
+            members = [audit.record("crew.withdrawn", "D3", "x", "withdrawn", by=name, was="pending")["ref"]["by"]
+                       for name in ("neo", "Neo", "The Keymaker", "devkit:neo")]
+            found = [r["id"] for r in audit.query(project="acme/api")]  # what dev audit show --project finds
+        self.assertEqual((rec["target"], rec["project"]), ("D3", "acme/api"))
+        self.assertEqual(rec["ref"]["by"], "morpheus")
+        self.assertEqual((rec["ref"]["was"], rec["ref"]["session"], rec["ref"]["result"]),
+                         ("pending", session, "withdrawn"))
+        self.assertEqual(rec["detail"], "[text not recorded: 17 characters]")  # free text stays withheld
+        self.assertEqual(rec["why"], "[text not recorded: 17 characters]")
+        # the same fields with anything around the id or word: the whole value is withheld
+        self.assertNotIn(self.TOKEN, json.dumps(other))
+        for value in (other["target"], other["project"], other["ref"]["by"], other["ref"]["was"],
+                      other["ref"]["session"], prefixed["target"], prefixed["ref"]["by"]):
+            self.assertRegex(value, r"^\[text not recorded: \d+ characters\]$")
+        self.assertNotIn(self.GITHUB, json.dumps(prefixed))
+        self.assertEqual(members, ["neo", "Neo", "The Keymaker", "devkit:neo"])
+        self.assertEqual(found, [rec["id"]])
+
+    def test_a_policy_file_is_publishable_only_when_every_mac_could_load_it(self):
+        # what dev sync asks before it commits a team policy file: the reason settings() would give, or ""
+        folder = self.root / "handoff-copy" / "policy"
+        folder.mkdir(parents=True)
+        cases = {("audit.json", '{"redact": '): "is not valid JSON", ("audit.json", ""): "is not valid JSON",
+                 ("audit.json", json.dumps([self.PATTERN])): "is not a JSON object",
+                 ("audit.json", json.dumps({"audit.redact.extra": [self.PATTERN]})): "has an unknown key",
+                 ("audit.json", json.dumps({"redact": {"extra": ["("]}})): "rejected",
+                 ("audit.json", json.dumps({"redact": {"extra": [self.PATTERN]}, "level": "all"})): "",
+                 ("progress.json", "{"): "is not valid JSON", ("progress.json", json.dumps({"max_parallel": 4})): ""}
+        for (name, body), why in cases.items():
+            with self.subTest(file=name, body=body):
+                (folder / name).write_text(body)
+                got = audit.publishable_policy(folder / name)
+                if why:
+                    self.assertIn(why, got)
+                else:
+                    self.assertEqual(got, "")
+        self.assertEqual(audit.publishable_policy(folder / "gone.json"), "")  # a deletion publishes nothing broken
+        self.assertFalse(audit.policy_file().exists())  # it reads the file it is given, not the team's
+
+    def test_a_kept_value_has_an_id_length_devkit_writes_and_no_pattern_that_loaded_names_it(self):
+        # the team's policy has a key this Mac does not know, so its patterns load but text is withheld; this Mac's
+        # pattern names one project, the team's another
+        registry = {"projects": [{"id": "acme/api"}, {"id": "acme/zeus-client"}, {"id": "acme/orion-bid"}]}
+        core.CFG["audit"]["redact"] = {"extra": [r"zeus-client"]}
+        self.write_policy(json.dumps({"redact": {"extra": [r"orion-bid"]}, "archive": True}))
+        values = {"T-ip4k2a7c9x1z": True, "L-fy15osnf0z3": True, "S-ab12cd34": True, "E-ab12cd34": True,
+                  "D12": True, "acme/api": True,
+                  "P-x7k2m9q4w8z1n5v3": False, "T-abcd": False, "E-ab12cd34ef56": False,
+                  "acme/zeus-client": False, "acme/orion-bid": False}
+        with mock.patch.object(core, "read_registry", return_value=registry):
+            self.assertIn("unknown key", audit.redaction_unavailable())
+            got = {v: audit.record("crew.withdrawn", "D3", "x", "withdrawn", project=v if "/" in v else "",
+                                   by=v, was="pending") for v in values}
+        for value, kept in values.items():
+            with self.subTest(value=value):
+                shown = got[value]["ref"]["by"]
+                self.assertEqual(shown, value if kept else f"[text not recorded: {len(value)} characters]")
+                if "/" in value:
+                    self.assertEqual(got[value]["project"], shown)
+
+    def test_the_reason_names_an_unknown_key_only_when_it_is_a_short_word_no_pattern_names(self):
+        # a token pasted as a key: the reason goes into every record (ref.withheld), every refusal and dev sync's
+        # handoff.push record, so a key is named only when it is a short word that neither a built-in rule nor a
+        # pattern that loaded names; any other key is its length
+        team_word = "zuluquebec"
+        cases = {json.dumps({self.GITHUB: True}):
+                     (self.GITHUB, f"an unknown key of {len(self.GITHUB)} characters in audit"),
+                 json.dumps({"retention": {self.GITHUB: 3}}):
+                     (self.GITHUB, f"an unknown key of {len(self.GITHUB)} characters in audit.retention"),
+                 json.dumps({"acmetok7f3k9x2m4q8zr1": True}):
+                     ("acmetok7f3k9x2m4q8zr1", "an unknown key of 21 characters in audit"),
+                 json.dumps({"redact": {"extra": [team_word]}, team_word: True}):
+                     (team_word, f"an unknown key of {len(team_word)} characters in audit"),
+                 json.dumps({"redcat": {"extra": [self.PATTERN]}}): ("", "has an unknown key audit.redcat"),
+                 json.dumps({"retention": {"extra": [self.PATTERN]}}): ("", "has an unknown key audit.retention.extra"),
+                 json.dumps({"audit.redact.extra": [self.PATTERN]}):
+                     ("", 'has an unknown key audit["audit.redact.extra"]')}
+        folder = self.root / "handoff-copy" / "policy"
+        folder.mkdir(parents=True)
+        for body, (secret, said) in cases.items():
+            with self.subTest(policy=body[:30]):
+                self.write_policy(body)
+                (folder / "audit.json").write_text(body)
+                rec = audit.record("guard", "deploy", "x", "blocked")
+                texts = {"withheld": rec["ref"]["withheld"], "refusal": audit.redaction_unavailable(),
+                         "sync": audit.publishable_policy(folder / "audit.json"),
+                         "dev audit config": " ".join(audit.settings()["errors"])}
+                for where, text in texts.items():
+                    if secret:
+                        self.assertNotIn(secret, text, where)
+                    if where != "dev audit config":
+                        self.assertIn(said, text, where)
+                if secret:
+                    self.assertNotIn(secret, json.dumps(rec))
+        # dev audit config quotes a wrong value only when it is a number, true, false or a short word
+        self.write_policy(json.dumps({"publish": self.GITHUB, "level": "everything", "hold": 3}))
+        errors = " ".join(audit.settings()["errors"])
+        self.assertNotIn(self.GITHUB[:12], errors)
+        self.assertIn("audit.publish must be true or false (got a value it does not quote)", errors)
+        self.assertIn('(got "everything")', errors)
+        self.assertIn("(got 3)", errors)
+
+    def test_dev_audit_config_says_a_nested_unknown_key_by_its_own_length_and_group(self):
+        # a token pasted as a key inside retention was said as "of 62 characters in audit": the group's name counted
+        # in its length, and the place one level too high. A top-level key that has a dot is not in a group.
+        dotted = "retention." + self.GITHUB
+        for where, body, said in (("team", {"retention": {self.GITHUB: 3}},
+                                   f"unknown key of {len(self.GITHUB)} characters in audit.retention"),
+                                  ("team", {dotted: 3}, f"unknown key of {len(dotted)} characters in audit"),
+                                  ("machine", {"retention": {self.GITHUB: 3}},
+                                   f"unknown key of {len(self.GITHUB)} characters in audit.retention")):
+            with self.subTest(where=where, body=list(body)[0][:12]):
+                if where == "team":
+                    self.write_policy(json.dumps(body))
+                else:
+                    audit.policy_file().unlink()
+                    core.CFG["audit"] = body
+                errors = audit.settings()["errors"]
+                self.assertTrue(any(e.endswith(said) for e in errors), errors)
+                self.assertNotIn(self.GITHUB, " ".join(errors))
+
+    def test_an_unknown_key_in_the_team_policy_withholds_text(self):
+        # a misspelled or misplaced section may hold the team's patterns: the docs call them audit.redact.extra
+        for name, body in {"misspelled": {"redcat": {"extra": [self.PATTERN]}},
+                           "capitalized": {"Redact": {"extra": [self.PATTERN]}},
+                           "wrapped in audit": {"audit": {"redact": {"extra": [self.PATTERN]}}},
+                           # the docs' own dotted notation as a key, and a dotted or nested key in any case or group
+                           "dotted in full": {"audit.redact.extra": [self.PATTERN]},
+                           "dotted section": {"audit.redact": {"extra": [self.PATTERN]}},
+                           "dotted and capitalized": {"Redact.extra": [self.PATTERN]},
+                           "extra under retention": {"retention": {"extra": [self.PATTERN]}}}.items():
+            with self.subTest(policy=name):
+                self.write_policy(json.dumps(body))
+                self.assertEqual(audit.redact(self.TEXT), f"[text not recorded: {len(self.TEXT)} characters]")
+                self.assertIn("unknown key", audit.redaction_unavailable())
+        # this Mac's own audit section fails the same way, and when it is not an object at all
+        audit.policy_file().unlink()
+        for name, own in {"dotted key": {"redact.extra": [self.PATTERN]}, "a list": [self.PATTERN],
+                          "extra under retention": {"retention": {"extra": [self.PATTERN]}}}.items():
+            with self.subTest(machine=name):
+                core.CFG["audit"] = own
+                self.assertEqual(audit.redact(self.TEXT), f"[text not recorded: {len(self.TEXT)} characters]")
+                self.assertIn(core.tilde(core.CONFIG_FILE), audit.redaction_unavailable())
+        core.CFG["audit"] = json.loads(json.dumps(core.DEFAULTS["audit"]))
+        # a known key with a wrong value outside redact still lets the team's patterns load
+        self.write_policy(json.dumps({"redact": {"extra": [self.PATTERN]}, "retention": "x"}))
+        self.assertEqual(audit.redaction_unavailable(), "")
+        self.assertEqual(audit.redact(self.TEXT), "the deploy key " + audit.MARK + " was refused")
+
+    def screens(self, text: str) -> dict:
+        # every place devkit screens text for secrets with a verdict of its own -> what it said about `text`
+        from devkit import bugs, hooks, lessonlint
+        return {"bug report": bugs._secret_like(text), "lesson": lessonlint.screen({"Prevention": text}),
+                "payload capture": hooks._scrub({"prompt": text}, False)["prompt"]}
+
+    def test_every_secret_screen_uses_the_team_and_machine_patterns(self):
+        # letters only, so no built-in rule and no heuristic of the bug screen (hex, long mixed runs) knows the shape
+        token, pattern = "acme-zulu-quebec-tango", r"acme-zulu-[a-z]+-[a-z]+"
+        text = "deploy with " + token
+        self.assertEqual(self.screens(text), {"bug report": False, "lesson": "", "payload capture": text})
+        for where in ("team", "machine"):
+            with self.subTest(patterns=where):
+                if where == "team":
+                    self.write_policy(json.dumps({"redact": {"extra": [pattern]}}))
+                else:
+                    audit.policy_file().unlink()
+                    core.CFG["audit"]["redact"] = {"extra": [pattern]}
+                got = self.screens(text)
+                self.assertIs(got["bug report"], True)
+                self.assertIn("secret", got["lesson"])
+                self.assertNotIn(token, got["payload capture"])
+                self.assertEqual(self.screens("plain words"),
+                                 {"bug report": False, "lesson": "", "payload capture": "plain words"})
+
+    def test_every_secret_screen_fails_closed_while_patterns_cannot_load(self):
+        cases = {"team policy cut off": ('{"redact": ', None),
+                 "machine extra written as a string": (None, {"extra": r"acme-zulu-[a-z]+-[a-z]+"}),
+                 "machine pattern that does not compile": (None, {"extra": ["(", r"acme-zulu-[a-z]+-[a-z]+"]})}
+        for name, (policy, own) in cases.items():
+            with self.subTest(case=name):
+                if policy is not None:
+                    self.write_policy(policy)
+                elif audit.policy_file().exists():
+                    audit.policy_file().unlink()
+                core.CFG["audit"]["redact"] = own or {"extra": []}
+                reason = audit.redaction_unavailable()
+                self.assertIn(core.tilde(audit.policy_file() if policy else core.CONFIG_FILE), reason)
+                got = self.screens("plain words")
+                self.assertIs(got["bug report"], True)
+                self.assertIn("cannot be checked for secrets", got["lesson"])
+                self.assertEqual(got["payload capture"], "[text not recorded: 11 characters]")
+                self.assertEqual(audit.redact("plain words"), "[text not recorded: 11 characters]")
 
 
 class SchemaTests(AuditCase):
@@ -327,7 +701,7 @@ class SchemaTests(AuditCase):
         self.assertLess(a["id"], b["id"])  # sortable by time, unique
         self.assertEqual(time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(a["ts"])), a["time"][:19])
         self.assertTrue(a["time"].endswith("Z"))
-        self.assertEqual(set(a["actor"]), {"user", "host", "label", "agent", "session"})
+        self.assertEqual(set(a["actor"]), {"user", "host", "agent", "session"})
         self.assertEqual((a["category"], a["severity"], a["outcome"]), ("change", "warning", "failed"))
         self.assertEqual(a["evidence"], {"duration": 1.25, "cwd": "~/Development/acme/app", "exit": 2})
         self.assertEqual(a["why"], "asked")
@@ -1753,18 +2127,25 @@ class ExportTests(AuditCase):
         self.assertIn(r"dev sync \| dev status", lines[0])
         self.assertIn(r"key\=value \\ back", lines[0])
 
-    def test_siem_exports_name_the_host_by_its_label_and_the_machine_id_as_the_device(self):
+    def test_records_never_carry_the_hostname_and_this_macs_siem_export_finds_it_from_the_machine_id(self):
         from devkit import identity
         m = identity.Machine("m-0000aaaa", "andress-mbp-2", {"andress-mbp-2": [[0, NOV6]]})
         with mock.patch.object(identity, "machine", return_value=m):
-            self.assertEqual((audit.actor()["host"], audit.actor()["label"]), ("m-0000aaaa", "andress-mbp-2"))
+            self.assertEqual(audit.actor()["host"], "m-0000aaaa")
+            self.assertNotIn("label", audit.actor())  # records are published: they never carry the hostname
             audit.record("dev.task", "done 9")
-        r = audit.query(action="dev.task")[-1]
-        dev = audit.to_ocsf(r)["device"]
-        self.assertEqual((dev["hostname"], dev["uid"]), ("andress-mbp-2", "m-0000aaaa"))
-        self.assertIn("shost=andress-mbp-2", audit.to_cef(r))
-        self.assertIn("deviceExternalId=m-0000aaaa", audit.to_cef(r))
-        self.assertIn(b" andress-mbp-2 devkit: ", audit._syslog_line(r))
+            r = audit.query(action="dev.task")[-1]
+            self.assertNotIn("andress", json.dumps(r))
+            # this Mac's own export finds the hostname it carried then from the machine id
+            dev = audit.to_ocsf(r)["device"]
+            self.assertEqual((dev["hostname"], dev["uid"]), ("andress-mbp-2", "m-0000aaaa"))
+            self.assertIn("shost=andress-mbp-2", audit.to_cef(r))
+            self.assertIn("deviceExternalId=m-0000aaaa", audit.to_cef(r))
+            self.assertIn(b" andress-mbp-2 devkit: ", audit._syslog_line(r))
+            # another Mac's record is named by its machine id
+            theirs = dict(r, actor={"user": "bob", "host": "m-0000bbbb", "agent": "codex", "session": ""})
+            self.assertEqual(audit.to_ocsf(theirs)["device"], {"hostname": "m-0000bbbb", "uid": "m-0000bbbb",
+                                                                "type_id": 0})
         # a record from before the machine id names the host only: it stays the hostname, with no device id
         old = dict(r, actor={"user": "ana", "host": "mac-158", "agent": "claude", "session": ""})
         self.assertEqual(audit.to_ocsf(old)["device"], {"hostname": "mac-158", "type_id": 0})
@@ -1799,6 +2180,152 @@ class ExportTests(AuditCase):
             data = srv.recv(65536).decode()
         srv.close()
         self.assertIn("CEF:0|Firefly Software Solutions|devkit|", data)
+
+
+class LongConfigDetailTests(unittest.TestCase):
+    # Any teammate can write a dev.config.set line into a handoff copy, and trying every arrow in a long detail made
+    # one team query take seconds: each try parses the text before the arrow. The tries are few, whatever the length
+    def test_the_parses_of_a_detail_do_not_grow_with_its_arrows(self):
+        shapes = {"an open string": lambda n: '"' + "a → " * n, "a list of strings": lambda n: "[" + '"a → ", ' * n}
+        for name, shape in shapes.items():
+            counts = []
+            for n in (100, 32000):
+                with mock.patch.object(audit, "_json", wraps=audit._json) as parse:
+                    self.assertEqual(audit._config_value(shape(n)), "a value it does not quote")
+                counts.append(parse.call_count)
+            self.assertEqual(counts[0], counts[1], name)
+
+    def test_an_old_detail_still_says_its_new_value_however_long_its_old_value(self):
+        # devkit cut no detail before schema v2, so an old record can hold a long value whole
+        self.assertEqual(audit._config_value('null → "x"'), core.say_value("x"))
+        self.assertEqual(audit._config_value('"' + "b" * 5000 + '" → "x"'), core.say_value("x"))
+        self.assertEqual(audit._config_value('"a → b" → "x"'), core.say_value("x"))
+
+
+class NotUtf8RecordTests(AuditCase):
+    # An argument's bytes that are not UTF-8 reach Python as lone surrogates (os.fsdecode), which strict UTF-8 cannot
+    # write: record() dropped the whole record, so one such argument kept a dev rm out of the audit trail
+    def stored(self) -> list:
+        return [json.loads(ln) for f in sorted(audit.AUDIT.glob("*.jsonl"))
+                for ln in f.read_bytes().decode("utf-8").splitlines() if ln.strip()]
+
+    def test_a_record_with_bytes_that_are_not_utf8_is_written_and_its_chain_verifies(self):
+        cases = {"an argument": dict(target=["x\udce9", "secrets.txt"]), "the detail": dict(detail="caf\udce9"),
+                 "the why": dict(why="caf\udce9"), "the folder": dict(cwd="/tmp/caf\udce9")}
+        for name, fields in cases.items():
+            with self.subTest(name):
+                rec = audit.record("dev.rm", **fields)
+                self.assertIsNotNone(rec)
+                self.assertIn(rec["id"], [r.get("id") for r in self.stored()])
+        self.assertTrue(audit.verify()["ok"])
+
+    def test_a_record_with_escapes_reads_and_publishes_as_it_was_written(self):
+        # an escape is six characters for one byte, so a nested value outgrew its cut, and an escape can read as more
+        # than its byte (\udcda then "pi_key=" reads as api_key=): build writes what a reader sees, nothing it cleans
+        audit.record("dev.rm", "", "\udcdapi_key=hunter2", cwd="/tmp/" + "caf\udce9/" * 120)
+        ln = audit.AUDIT.joinpath(f"{audit.months_back(time.time(), 0)}.jsonl").read_bytes().splitlines()[-1]
+        rx = audit._redact_rules()
+        view = audit.lift(json.loads(ln), ln, rx)
+        self.assertNotIn("cleaned", view)
+        self.assertLessEqual(len(view["evidence"]["cwd"]), audit.VALUE_CUT)
+        self.assertNotIn(b"hunter2", ln)
+        self.assertEqual(audit._published_line(ln, rx), ln)
+
+    def test_a_hand_edited_v2_line_holding_a_lone_surrogate_reads_as_cleaned(self):
+        rec = audit.build("dev.task", "t", "", now=time.time())
+        rec["why"] = "x\ud800"
+        ln = json.dumps(rec, separators=(",", ":")).encode()
+        self.assertTrue(audit.lift(json.loads(ln), ln, audit._redact_rules()).get("cleaned"))
+
+    def test_the_bytes_stay_readable_as_their_escape(self):
+        audit.record("dev.rm", "", "caf\udce9")
+        self.assertEqual(self.stored()[-1]["detail"], "caf\\udce9")
+
+
+class OldJobRecordTests(AuditCase):
+    # Records an older devkit wrote kept a typed configuration key or a job's name whole: a dev.config.set target, a
+    # jobs.set target, the jobs.install list and a job.<name> action. A token pasted as a job's or profile's name must
+    # not come back from them: a reader says each one as a new record does (core.say_config_key, jobs.said).
+    TOKEN = "".join(("q7rk2plm", "9zt4wv8b", "n3hc6xd5"))  # in pieces: a fixture, not a credential to scan
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(core, "CONFIG_FILE", self.root / "config.json")  # the key rule reads no real file
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tok = self.TOKEN
+        audit.record("jobs.set", "probe", "{}")
+        f = next(audit.AUDIT.glob("*.jsonl"))
+        base = json.loads(f.read_text().splitlines()[-1])
+        old = [("dev.config.set", f"jobs.{tok}.every", json.dumps({"value_type": "int", "value_digest": "ab" * 32})),
+               ("dev.config.set", f"codex.profiles.{tok}.model", "{}"),
+               ("jobs.set", tok, json.dumps({"cmd": ["status", tok], "about": tok, "every": 30})),
+               ("jobs.install", f"sync,{tok}", f"ok:sync; loaded:{tok}"),
+               (f"job.{tok}", "status", "fine")]
+        lines = [dict(base, action=a, target=t, detail=d, id=f"{base['id']}{i}") for i, (a, t, d) in enumerate(old)]
+        v1 = {"ts": base["ts"], "user": "u", "host": "h", "agent": "", "action": f"job.{tok}", "target": "status",
+              "detail": "", "outcome": "ok"}
+        with f.open("a") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in lines + [v1]))
+        self.assertIn(tok, f.read_text())  # stored as the older devkit wrote it
+
+    def test_no_query_or_export_format_shows_a_token_from_an_old_record(self):
+        recs = audit.query(days=1)
+        self.assertEqual(len(recs), 7)
+        self.assertNotIn(self.TOKEN, json.dumps(recs))
+        for fmt in audit.FORMATS:
+            with self.subTest(fmt=fmt):
+                self.assertNotIn(self.TOKEN, audit.export(fmt, days=1))
+        said = jobs.said(self.TOKEN)
+        self.assertRegex(said, r"\A<key of 24 characters>#[0-9a-f]{8}\Z")
+        got = {(r["action"], r["target"], r["detail"]) for r in recs}
+        self.assertTrue({("dev.config.set", "jobs.<key of 24 characters>.every", "a number"),
+                         ("dev.config.set", "codex.profiles.<key of 24 characters>.model",
+                          "a value it does not quote"),
+                         ("jobs.set", said, json.dumps({"every": 30})),
+                         ("jobs.install", f"sync,{said}", f"ok:sync; loaded:{said}"),
+                         (f"job.{said}", "status", "fine")} <= got, got)
+        self.assertIn(("jobs.set", "probe", "{}"), got)  # a short word stays, as a new record keeps it
+        self.assertNotIn("ab" * 32, json.dumps(recs))  # a value's digest confirms a guessed value
+
+    def test_an_old_value_change_reads_only_as_the_new_values_type(self):
+        # devkit 26.11.3 to 26.11.18 recorded a dev.config.set value as "<old JSON> → <new JSON>", both values whole;
+        # a reader says the new value as a new record does (core.say_value), and a detail it cannot tell is one of
+        # devkit's own shapes as "a value it does not quote"
+        pw = self.TOKEN
+        f = next(audit.AUDIT.glob("*.jsonl"))
+        base = json.loads(f.read_text().splitlines()[0])
+        cases = [(f"null → {json.dumps(['deploy', '--password', pw])}", "a list of 3 items"),
+                 (f'"was → {pw}" → "{pw}"', "a string of 24 characters"),  # an arrow inside a value
+                 ("4 → 6", "a number"),
+                 ('{"a": 1} → null', "null"),
+                 (f'null → "{pw}{"x" * 400}"'[:300], "a value it does not quote"),  # cut at 300 characters
+                 (f"rotated {pw}", "a value it does not quote"),
+                 ("a string of 40 characters", "a string of 40 characters"),
+                 ("an object of 1 key", "an object of 1 key"),
+                 ("a string", "a string"),
+                 ("validated editor candidate", "validated editor candidate"),
+                 ("", "")]
+        lines = [dict(base, action="dev.config.set", target="progress.max_parallel", detail=d, id=f"{base['id']}c{i}")
+                 for i, (d, _) in enumerate(cases)]
+        v1 = json.dumps({"ts": base["ts"], "user": "u", "host": "h", "agent": "", "action": "dev.config.set",
+                         "target": "progress.max_parallel", "detail": cases[0][0], "outcome": "ok"})
+        with f.open("a") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in lines) + v1 + "\n")
+        self.assertIn(pw, f.read_text())  # stored as the older devkit wrote it
+        got = {r["id"]: r["detail"] for r in audit.query(days=1, action="dev.config.set")}
+        self.assertEqual([got[r["id"]] for r in lines], [want for _, want in cases])
+        self.assertEqual(got[audit._v1_id({}, v1.encode())], "a list of 3 items")
+        for fmt in audit.FORMATS:
+            with self.subTest(fmt=fmt):
+                self.assertNotIn(pw, audit.export(fmt, days=1))
+
+    def test_one_id_finds_a_jobs_old_and_new_records(self):
+        audit.record(f"job.{jobs.said(self.TOKEN)}", "status", "new", "ok")
+        said = jobs.said(self.TOKEN)
+        self.assertEqual(len(audit.query(days=1, action=f"job.{said}")), 3)  # v2 and v1 old records, and the new one
+        self.assertEqual(len(audit.query(days=1, grep=re.escape(said))), 5)
+        self.assertEqual(audit.latest(10, days=1, action=f"job.{said}")[0], 3)
 
 
 class QueryTests(AuditCase):
@@ -2214,7 +2741,11 @@ class PublishLimitTests(AuditCase):
         self.grow(45 * self.MB + 1, path=f2)
         held = audit.team_dir() / ym2 / f"{ym2}-14.held.json"
         self.assertEqual(sorted(audit.publish()), sorted([published, held]))
-        self.assertEqual(published.read_bytes(), f.read_bytes())  # byte for byte
+        hole, rec = f.read_bytes().splitlines(keepends=True)
+        stand_in, out = published.read_bytes().splitlines(keepends=True)
+        self.assertEqual(out, rec)  # the record, byte for byte
+        self.assertEqual(json.loads(stand_in), {"v": 1, "id": audit._v1_id({}, hole.rstrip(b"\n")), "cleaned": True,
+                                                "unreadable": True})  # the hole no reader can read: only named
         self.assertEqual(json.loads(held.read_text())["bytes"], 45 * self.MB + 1)
 
     def test_stats_says_a_month_over_the_limit_waits_for_the_audit_job_then_names_the_day_held(self):
@@ -2440,6 +2971,422 @@ class DailyFileTests(AuditCase):
         self.assertEqual(sorted(p.name for p in out["team"]), sorted(names))
         self.assertFalse(gone.exists())
         self.assertTrue(kept.exists())
+
+
+class PublishCleaningTests(AuditCase):
+    # The audit job copies this machine's closed days into the handoff repository, whose git history keeps them for
+    # good. Lines an older devkit wrote can hold what every reader now cleans: a typed configuration key, a job's
+    # name, a whole jobs.set detail, a value's digest, a secret the redactor learned since. Each goes out as a reader
+    # sees it, and a line already clean goes out as it is stored.
+    TOKEN = "".join(("q7rk2plm", "9zt4wv8b", "n3hc6xd5"))  # in pieces: a fixture, not a credential to scan
+    GITHUB = "ghp_" + A36
+    DIGEST = "ab" * 32
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(core, "CONFIG_FILE", self.root / "config.json")  # the key rule reads no real file
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.ym = audit.months_back(time.time(), 1)  # last month: every day is closed, so every day publishes
+        self.month = audit.AUDIT / f"{self.ym}.jsonl"
+        self.noon = calendar.timegm((int(self.ym[:4]), int(self.ym[5:]), 14, 12, 0, 0, 0, 0, 0))
+        self.folder = audit.team_dir() / self.ym
+
+    def old_v1(self, i: int, **fields):
+        audit._private_dir(audit.AUDIT)
+        line = {"ts": self.noon + i, "user": "u", "host": "h", "agent": "", "outcome": "ok", **fields}
+        with self.month.open("a") as fh:
+            fh.write(json.dumps(line) + "\n")
+
+    def old_v2(self, i: int, action: str, target: str, detail: str, **more):
+        rec = audit.build("jobs.set", "probe", "{}", now=self.noon + i)
+        rec.update(action=action, target=target, detail=detail, **more)
+        audit._append(rec)  # sealed as an older devkit sealed it: its hash covers the token
+
+    def write_old_day(self):
+        tok, gh = self.TOKEN, self.GITHUB
+        self.old_v1(0, action=f"job.{tok}", target="status", detail="")
+        self.old_v1(1, action="dev.config.set", target=f"jobs.{tok}.every", detail=f"rotated {gh}")
+        with self.month.open("a") as fh:  # a line cut short, which no reader can read
+            fh.write('{"ts": %d, "action": "jobs.set", "target": "%s\n' % (self.noon + 2, tok))
+        self.old_v2(3, "dev.config.set", f"jobs.{tok}.every",
+                    json.dumps({"value_type": "int", "value_digest": self.DIGEST}))
+        self.old_v2(4, "dev.config.set", f"codex.profiles.{tok}.model", "{}")
+        self.old_v2(5, "jobs.set", tok, json.dumps({"cmd": ["status", tok], "about": tok, "every": 30}))
+        self.old_v2(6, "jobs.install", f"sync,{tok}", f"ok:sync; loaded:{tok}")
+        self.old_v2(7, f"job.{tok}", "status", "fine", why=f"rotated {gh}")
+        for d in (15, 16):  # records written today: already clean
+            audit._append(audit.build("dev.task", f"add {d}", "fine", now=self.noon + (d - 14) * 86400))
+        text = self.month.read_text()
+        for secret in (tok, gh, self.DIGEST):
+            self.assertIn(secret, text)  # stored as the older devkit wrote it
+
+    def day(self, d: int) -> Path:
+        return self.folder / f"{self.ym}-{d:02d}.jsonl"
+
+    def published_records(self) -> list:
+        out = []
+        for f in audit.publish():
+            out += [json.loads(ln) for ln in f.read_bytes().decode("utf-8").splitlines() if ln.strip()]
+        return out
+
+    def test_an_old_line_holding_a_lone_surrogate_publishes_as_a_reader_reads_it(self):
+        # an older devkit wrote an argument's bytes that were not UTF-8 (a Latin-1 "café") as the escape \udce9, which
+        # reads back as a lone surrogate that strict UTF-8 cannot write: the daily job stopped there
+        self.old_v1(0, action="dev.task", target="t", detail="", why="caf\udce9")
+        audit._append(audit.build("dev.task", "next", "", now=self.noon + 86400))
+        whys = [r.get("why") for r in self.published_records()]
+        self.assertIn("caf\\udce9", whys)  # its escape, as a reader reads it
+        self.assertTrue(audit.verify()["ok"])
+
+    def test_every_reader_of_an_old_line_holding_a_lone_surrogate_gives_text_utf8_can_write(self):
+        # dev audit show, export and --format json|csv printed it to a UTF-8 terminal or file and stopped there
+        self.old_v1(0, action="dev.task", target="t", detail="", why="caf\udce9")
+        recs = audit.query(days=400)
+        self.assertEqual(recs[0].get("why"), "caf\\udce9")  # its escape, as a new record stores it
+        outs = {"show": json.dumps(audit.show(recs[0]["id"]), ensure_ascii=False),
+                "table": json.dumps(audit.latest(5, days=400)[1], ensure_ascii=False)}
+        outs.update({fmt: audit.export(fmt, days=400) for fmt in audit.FORMATS})
+        for name, text in outs.items():
+            with self.subTest(name):
+                self.assertIn("udce9", text.encode("utf-8").decode("utf-8"))
+
+    def test_a_v2_line_holding_a_lone_surrogate_does_not_stop_publish(self):
+        # devkit never writes one (build writes its escape), so only a hand edit puts it there: it goes out as a reader
+        # reads it, and the local chain reports the edit (its hash was sealed without it)
+        rec = audit.build("dev.task", "t", "", now=self.noon)
+        rec["why"] = "x\ud800"
+        audit._private_dir(audit.AUDIT)
+        with self.month.open("a") as fh:
+            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        audit._append(audit.build("dev.task", "next", "", now=self.noon + 86400))
+        out = [r for r in self.published_records() if r.get("id") == rec["id"]]
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].get("why"), "x\\ud800")
+        self.assertFalse(audit.verify()["ok"])
+
+    def commit_handoff(self) -> str:
+        # the handoff repository as dev sync commits it -> every version git keeps of every file
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        git = ["git", "-C", str(core.HANDOFF), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+               "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + os.devnull]
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "audit"]):
+            subprocess.run(git + args, check=True, env=env, capture_output=True, timeout=60)
+        return subprocess.run(git + ["log", "-p", "--all", "--format=%H"], check=True, env=env, capture_output=True,
+                              text=True, timeout=60).stdout
+
+    def views(self, team: bool) -> list:
+        # what a reader sees of each record, oldest first; `cleaned` says only whether the stored line differed
+        return [{k: v for k, v in r.items() if k != "cleaned"} for r in audit.query(team=team)]
+
+    def test_old_lines_reach_the_team_repository_only_as_a_reader_sees_them(self):
+        self.write_old_day()
+        changed = audit.publish()
+        self.assertEqual(changed, [self.day(14), self.day(15), self.day(16)])
+        history = self.commit_handoff()
+        files = "".join(p.read_text() for p in sorted(core.HANDOFF.rglob("*.jsonl")))
+        self.assertIn("jobs.<key of 24 characters>.every", files)  # the records went out, cleaned
+        for secret in (self.TOKEN, self.GITHUB, self.DIGEST):
+            self.assertNotIn(secret, files)
+            self.assertNotIn(secret, history)
+        local = self.month.read_bytes().splitlines(keepends=True)
+        self.assertEqual([self.day(15).read_bytes(), self.day(16).read_bytes()], local[-2:])  # clean: as stored
+        self.assertEqual(self.views(team=True), self.views(team=False))  # each record once, read the same
+        self.assertEqual(audit.publish(), [])  # a published day is written once
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["unpublished"], 0)
+        here = self.views(team=False)
+        audit.AUDIT = self.root / "elsewhere"  # a machine that holds none of these records
+        self.assertEqual(self.views(team=True), here)
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["records"], 7)
+        notes = [n["note"] for n in res["notes"]]
+        self.assertEqual(sum(n.startswith("cleaned before it was published") for n in notes), 5, notes)  # the old v2 records
+        self.assertEqual(sum("line before it was cleaned" in n for n in notes), 1, notes)  # the first, after v1 lines
+
+    def test_an_old_value_change_reaches_the_team_repository_only_as_its_type(self):
+        # devkit 26.11.3 to 26.11.18 recorded a dev.config.set value whole: "<old JSON> → <new JSON>"
+        pw = self.TOKEN
+        change = f"null → {json.dumps(['deploy', '--password', pw])}"
+        self.old_v1(0, action="dev.config.set", target="progress.max_parallel", detail=f'null → "{pw}"')
+        self.old_v2(1, "dev.config.set", "progress.max_parallel", change)
+        audit._append(audit.build("dev.task", "next day", "fine", now=self.noon + 86400))
+        self.assertIn(pw, self.month.read_text())
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15)])
+        history = self.commit_handoff()
+        files = "".join(p.read_text() for p in sorted(core.HANDOFF.rglob("*.jsonl")))
+        self.assertNotIn(pw, files)
+        self.assertNotIn(pw, history)
+        self.assertEqual([r["detail"] for r in audit.query(team=True, action="dev.config.set")],
+                         ["a string of 24 characters", "a list of 3 items"])
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+    def text_notes(self, res: dict) -> list:
+        # verify's notes on published lines that read differently from their local lines -> [(file, line)]
+        return [(Path(n["path"]).name, n["line"]) for n in res["notes"] if "reads differently" in n["note"]]
+
+    def test_the_anchor_tells_a_changed_line_from_a_redaction_pattern_added_since(self):
+        self.write_old_day()
+        audit.publish()
+        core.CFG["audit"]["redact"]["extra"] = [r"rotated", r"status"]  # cleans the published lines further today
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(self.text_notes(res), [])
+        self.assertEqual(audit.publish(), [])
+        self.assertEqual(audit.query(action="audit.publish"), [])  # nothing blocked
+        published = self.day(14).read_text().splitlines(keepends=True)
+        n = next(i for i, ln in enumerate(published) if '"jobs.install"' in ln)
+        rec = json.loads(published[n])
+        self.assertTrue(rec["cleaned"])
+        edits = {"outcome": dict(rec, outcome="failed"), "severity": dict(rec, severity="info"),
+                 "ts": dict(rec, ts=rec["ts"] + 1), "actor": dict(rec, actor={**rec["actor"], "user": "eve"}),
+                 "a key added": dict(rec, why="approved"), "a key removed": {k: v for k, v in rec.items()
+                                                                              if k != "detail"}}
+        for name, edit in edits.items():
+            with self.subTest(edit=name):  # a cleaned record changed in the handoff repository, where cleaning never
+                self.day(14).write_text("".join(published[:n] + [json.dumps(edit) + "\n"] + published[n + 1:]))
+                res = audit.verify()
+                self.assertFalse(res["ok"])
+                self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("diverged", n + 1))
+        # its text changed: anchored by id, prev and hash, and noted, since a pattern changed since reads the same way
+        self.day(14).write_text("".join(published[:n] + [json.dumps(dict(rec, target="sync")) + "\n"]
+                                        + published[n + 1:]))
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(self.text_notes(res), [(self.day(14).name, n + 1)])
+        self.day(14).write_text("".join(published))
+        clean = json.loads(self.day(15).read_text())
+        self.day(15).write_text(json.dumps(dict(clean, detail="other", cleaned=True)) + "\n")  # marked to pass
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(self.text_notes(res), [(self.day(15).name, 1)])
+        self.day(15).write_bytes(self.month.read_bytes().splitlines(keepends=True)[-2])
+        self.assertTrue(audit.verify()["ok"])
+        lines = self.month.read_text().splitlines(keepends=True)
+        n = next(i for i, ln in enumerate(lines) if '"jobs.install"' in ln)
+        lines[n] = json.dumps(dict(json.loads(lines[n]), detail="ok:sync", cleaned=True)) + "\n"
+        self.month.write_text("".join(lines))  # a local record, changed and marked: the local chain still checks it
+        res = audit.verify(team=False)
+        self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("edited", n + 1))
+
+    def test_a_v1_number_or_boolean_a_reader_hides_is_not_published(self):
+        pin, phone = 48213579, 15551234567
+        self.old_v1(0, action="dev.task", target=phone, detail=True)  # a reader says both as text, one by length
+        self.old_v1(1, action="watch.wait", target="before", detail="", pin=pin)  # a key a reader drops
+        self.old_v1(2, action="watch.wait", target="after", detail="")  # clean: as stored
+        audit._append(audit.build("dev.task", "next day", "fine", now=self.noon + 86400))
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15)])
+        published = self.day(14).read_bytes().splitlines(keepends=True)
+        for n in (0, 1):
+            self.assertTrue(json.loads(published[n])["cleaned"])
+        self.assertNotIn(str(pin), published[1].decode())
+        self.assertNotIn(str(phone), published[0].decode())
+        self.assertEqual(json.loads(published[0])["detail"], "True")
+        self.assertEqual(published[2], self.month.read_bytes().splitlines(keepends=True)[2])
+        self.assertEqual(self.views(team=True), self.views(team=False))
+        self.assertTrue(audit.verify()["ok"])
+
+    def test_a_line_with_a_duplicate_key_is_published_as_its_record(self):
+        # json.loads keeps a duplicate key's last value, so the stored bytes hold more than any reader sees
+        gh = self.GITHUB
+        audit._append(audit.build("watch.wait", "before", "", now=self.noon))
+        self.old_v1(1, action="watch.wait", target="after", detail="")
+        self.month.write_text("".join('{"target": "' + gh + '", ' + ln[1:]
+                                      for ln in self.month.read_text().splitlines(keepends=True)))
+        self.assertTrue(audit.verify(team=False)["ok"])  # the record parsed and hashed is the one sealed
+        audit._append(audit.build("dev.task", "next day", "fine", now=self.noon + 86400))
+        audit.publish()
+        self.assertNotIn(gh, self.day(14).read_text())
+        self.assertEqual(self.views(team=True), self.views(team=False))
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+
+    def test_a_stand_in_matches_only_an_unreadable_local_line_and_holds_nothing_else(self):
+        self.write_old_day()
+        audit.publish()
+        last, d14 = self.day(16).read_bytes(), self.day(14).read_bytes()
+        empty = json.dumps({"v": 1, "id": audit._v1_id({}, b""), "cleaned": True, "unreadable": True})
+        for name, tail in (("after the last line", empty), ("with its line end", empty + "\n")):
+            with self.subTest(extra=name):  # a stand-in for a line past the local file's end
+                self.day(16).write_bytes(last + tail.encode())
+                res = audit.verify()
+                self.assertFalse(res["ok"])
+                self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("diverged", 11))  # the local file has 10 lines
+        self.day(16).write_bytes(last)
+        lines = d14.splitlines(keepends=True)
+        stand_in = json.loads(lines[2])
+        self.assertEqual(set(stand_in), {"v", "id", "cleaned", "unreadable"})  # the line cut short
+        self.day(14).write_bytes(b"".join(lines[:2] + [json.dumps(dict(stand_in, detail="it was fine")).encode()
+                                                       + b"\n"] + lines[3:]))
+        res = audit.verify()
+        self.assertFalse(res["ok"])
+        self.assertEqual((res["first"]["kind"], res["first"]["line"]), ("diverged", 3))
+        self.day(14).write_bytes(d14)
+        self.assertTrue(audit.verify()["ok"])
+
+    def test_a_redaction_pattern_removed_after_publish_blocks_nothing(self):
+        # this Mac's pattern hid text in old lines when they were published; removed since, today's reading of the
+        # local line shows that text, which the published line does not: noted, never a divergence
+        self.write_old_day()
+        core.CFG["audit"]["redact"]["extra"] = [r"fine"]
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15), self.day(16)])
+        core.CFG["audit"]["redact"]["extra"] = []
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(sorted(self.text_notes(res)), [(self.day(14).name, 8), (self.day(15).name, 1),
+                                                        (self.day(16).name, 1)])
+        audit._append(audit.build("dev.task", "a later day", "", now=self.noon + 3 * 86400))
+        self.assertEqual(audit.publish(), [self.day(17)])  # the next day goes out
+        self.assertEqual(audit.query(action="audit.publish"), [])  # nothing blocked
+
+    def test_a_team_policy_broken_after_publish_blocks_nothing_and_names_the_file(self):
+        self.write_old_day()
+        f = audit.policy_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text('{"redact": {"extra": ["fine"]}}')
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15), self.day(16)])
+        f.write_text('{"redact": {"extra": ["("]}}')  # a teammate's commit breaks it
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(self.text_notes(res), [])
+        unchecked = [n["note"] for n in res["notes"] if "not compared" in n["note"]]
+        self.assertEqual(len(unchecked), 1, res["notes"])
+        self.assertIn(core.tilde(f), unchecked[0])
+        f.write_text('{"redact": {"extra": ["fine"]}}')  # repaired
+        audit._append(audit.build("dev.task", "a later day", "", now=self.noon + 3 * 86400))
+        self.assertEqual(audit.publish(), [self.day(17)])
+        self.assertEqual(audit.query(action="audit.publish"), [])
+        self.assertTrue(audit.verify()["ok"])
+
+    def test_nothing_is_published_while_the_redaction_patterns_cannot_load(self):
+        self.write_old_day()
+        f = audit.policy_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text('{"redact": {"extra": ["("]}}')  # a pattern that does not compile
+        self.assertEqual(audit.publish(), [])
+        self.assertFalse(self.folder.exists())
+        refused = audit.query(action="audit.publish")
+        self.assertEqual([(r["outcome"], r["severity"]) for r in refused], [("blocked", "critical")])
+        f.unlink()
+        self.assertEqual(audit.publish(), [self.day(14), self.day(15), self.day(16)])
+
+
+class DeepNestingTests(AuditCase):
+    # Any teammate can write a line into the handoff repository's audit copies. A line nested 100,000 levels deep
+    # must read as one no reader can read, as a line cut short does, instead of exhausting the stack: `dev audit
+    # --team` lists the other records and `dev audit verify` names the line. Python 3.15 parses 100,000 levels and
+    # then fails in what reads the value (repr, dumps); a million is past the parser's own limit on every Python.
+    DEPTHS = (100_000, 1_000_000)
+
+    @staticmethod
+    def shapes(d: int, now: float = None) -> dict:
+        now, deep_obj, deep_list = now or time.time(), '{"a":' * d + "1" + "}" * d, "[" * d + "]" * d
+        v2 = json.dumps({"v": 2, "id": "01JDEEPNESTEDRECORD0000000", "ts": now, "action": "watch.wait",
+                         "hash": "0" * 64, "actor": {"user": "mate", "host": "mini", "agent": "", "session": ""}})
+        v1 = json.dumps({"ts": now, "action": "watch.wait", "user": "mate", "host": "mini", "target": "deep"})
+        return {"a bare array": deep_list,
+                "a v2 record's evidence": v2[:-1] + ', "evidence": ' + deep_obj + "}",
+                "a v1 record's why": v1[:-1] + ', "why": ' + deep_list + "}"}
+
+    @staticmethod
+    def v1(target: str, **more) -> str:
+        return json.dumps({"ts": time.time(), "action": "watch.wait", "user": "mate", "host": "mini", "target": target,
+                           "detail": "", "outcome": "ok", **more})
+
+    def team_copy(self, *lines) -> Path:
+        f = core.HANDOFF / "audit" / "mate@mini" / f"{time.strftime('%Y-%m')}.jsonl"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("".join(ln + "\n" for ln in lines))
+        return f
+
+    def team_view(self) -> tuple:
+        # `dev audit --team` -> (exit code, output)
+        import argparse
+        a = audit.add_arguments(argparse.ArgumentParser()).parse_args(["--team"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = audit.cmd_audit(a)
+        return rc, out.getvalue()
+
+    def test_a_deeply_nested_line_in_a_team_copy_reads_as_unreadable_and_stops_no_reader(self):
+        for d in self.DEPTHS:
+            for shape, deep in self.shapes(d).items():
+                with self.subTest(depth=d, shape=shape):
+                    f = self.team_copy(self.v1("before"), deep, self.v1("after"))
+                    rc, text = self.team_view()
+                    self.assertEqual(rc, 0)
+                    self.assertIn("· team · 2 record(s)", text)
+                    self.assertEqual(re.findall(r"watch\.wait\s+(before|after|deep)\b", text), ["before", "after"])
+                    res = audit.verify()
+                    self.assertTrue(res["ok"], res["first"])  # v1 lines: no chain for the line to break
+                    noted = [n for n in res["notes"] if n["path"] == str(f)]
+                    self.assertEqual([(n["line"], n["id"], n["kind"]) for n in noted],
+                                     [(2, audit._v1_id({}, deep.encode()), "note")])
+                    self.assertIn("cannot be read", noted[0]["note"])
+
+    def test_a_deeply_nested_line_in_a_chain_breaks_only_the_link_it_was_sealed_into(self):
+        # a teammate's v2 record replaced with a deep line: the record after it no longer links, and verify says so
+        audit._append(audit.build("dev.task", "one", now=time.time()))
+        audit._append(audit.build("dev.task", "two", now=time.time()))
+        local = sorted(audit.AUDIT.glob("*.jsonl"))[0].read_text().splitlines()
+        f = self.team_copy(local[0], self.shapes(100_000)["a v2 record's evidence"], local[1])
+        res = audit.verify()
+        self.assertFalse(res["ok"])
+        self.assertEqual((res["first"]["path"], res["first"]["line"], res["first"]["kind"]), (str(f), 3, "unlinked"))
+        self.assertEqual([n["line"] for n in res["notes"] if n["path"] == str(f)], [2])
+
+    def test_a_deeply_nested_detail_in_an_old_record_leaves_the_record_readable(self):
+        # an older devkit's jobs.set detail is JSON a reader parses again: past any depth, the detail stays text
+        for d in self.DEPTHS:
+            with self.subTest(depth=d):
+                self.team_copy(self.v1("before"), json.dumps({"ts": time.time(), "action": "jobs.set", "user": "mate",
+                                                              "host": "mini", "target": "nightly",
+                                                              "detail": '{"every":' * d + "1" + "}" * d}))
+                rc, text = self.team_view()
+                self.assertEqual(rc, 0)
+                self.assertIn("· team · 2 record(s)", text)
+                self.assertEqual([r["target"] for r in audit.query(team=True)], ["before", "nightly"])
+
+    def test_a_deeply_nested_local_line_is_published_as_a_stand_in_and_the_anchor_holds(self):
+        ym = audit.months_back(time.time(), 1)  # last month: every day is closed
+        noon = calendar.timegm((int(ym[:4]), int(ym[5:]), 14, 12, 0, 0, 0, 0, 0))
+        audit._append(audit.build("watch.wait", "before", now=noon))
+        month = audit.AUDIT / f"{ym}.jsonl"
+        deep = self.shapes(100_000, now=noon + 1)["a v1 record's why"]
+        with month.open("a") as fh:
+            fh.write(deep + "\n")
+        audit._append(audit.build("watch.wait", "after", now=noon + 2))
+        self.assertEqual(audit.publish(), [audit.team_dir() / ym / f"{ym}-14.jsonl"])
+        published = (audit.team_dir() / ym / f"{ym}-14.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(published[1]), {"v": 1, "id": audit._v1_id({}, deep.encode()), "cleaned": True,
+                                                    "unreadable": True})
+        res = audit.verify()
+        self.assertTrue(res["ok"], res["first"])
+        self.assertEqual(res["unpublished"], 0)
+        self.assertEqual([r["target"] for r in audit.query(team=True, since=ym + "-01")], ["before", "after"])
+
+    def test_a_deeply_nested_held_day_record_reads_as_one_that_cannot_be_read(self):
+        ym = time.strftime("%Y-%m")
+        held = core.HANDOFF / "audit" / "mate@mini" / ym / f"{ym}-01.held.json"
+        held.parent.mkdir(parents=True)
+        held.write_text('{"bytes": 1, "sha256": "x", "day": ' + "[" * 1_000_000 + "]" * 1_000_000 + "}")
+        res = audit.verify()
+        self.assertEqual((res["first"]["path"], res["first"]["kind"]), (str(held), "unreadable"))
+
+    def test_a_deeply_nested_team_policy_fails_closed_as_one_that_is_not_json(self):
+        f = audit.policy_file()
+        f.parent.mkdir(parents=True)
+        for d in self.DEPTHS:
+            body = '{"redact": {"extra": ' + "[" * d + "]" * d + "}}"
+            with self.subTest(depth=d):
+                f.write_text(body)
+                cfg = audit.settings()
+                self.assertIn("is not valid JSON", audit.redaction_unavailable(cfg))
+                self.assertEqual(audit.publishable_policy(f), "is not valid JSON")
+                self.assertEqual(audit.publishable_text("audit.json", body.encode()), "is not valid JSON")
 
 
 class CliWiringTests(unittest.TestCase):

@@ -56,7 +56,7 @@ class Sandbox(unittest.TestCase):
         stack.enter_context(mock.patch.object(core, "STATE", tmp / "state"))
         self.tmp, self.root = tmp, tmp / "npm"
         self.root.mkdir()
-        stack.enter_context(mock.patch.object(wizard, "_NPM_ROOT", [self.root]))
+        stack.enter_context(mock.patch.object(wizard, "_npm_root", return_value=self.root))
         self.stack = stack
 
     def kit(self, npm_lines: str) -> Path:

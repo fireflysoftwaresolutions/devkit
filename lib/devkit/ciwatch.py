@@ -1022,7 +1022,10 @@ def _devkit_or_gh(prog: str, args: list, cwd: str) -> list:
         return [_branch(top, base, f"refs/remotes/origin/{base}")] if base else []
     if prog == "dev" and args[:1] == ["release"]:
         version = next((args[k + 1] for k, a in enumerate(args[:-1]) if a == "--version"), "")
-        return [_tag(top, "v" + version.lstrip("v") if version else _newest_tag(top, at="HEAD"))]
+        if not version:
+            return [_tag(top, _newest_tag(top, at="HEAD"))]
+        from . import delivery  # the tag spelled as dev release created it
+        return [_tag(top, delivery.release_tag(top, version.lstrip("v")))]
     return []
 
 
@@ -1719,8 +1722,8 @@ def _shell_calls(path, now: float) -> tuple:
             args = p.get("arguments") if p.get("type") == "function_call" else p.get("input")
             if isinstance(args, str):
                 try:
-                    args = json.loads(args)
-                except ValueError:
+                    args = core.load_json(args)
+                except ValueError:  # not JSON, or nested too deep: the text is the command
                     args = {"command": args}
             args = args if isinstance(args, dict) else {}
             calls.append(call(args.get("command") or args.get("cmd") or "", args.get("workdir") or "",

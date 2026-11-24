@@ -48,7 +48,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from . import lessons, state
+from . import core, lessons, state
 from .core import STATE
 
 VERSION = 1
@@ -261,8 +261,8 @@ def _read_file(path: Path):
             return None, "not a regular file"
         if path.stat().st_size > MAX_FILE_BYTES:
             return None, f"larger than {MAX_FILE_BYTES} bytes"
-        doc = json.loads(path.read_bytes()[:MAX_FILE_BYTES])
-    except (OSError, ValueError, RecursionError) as e:
+        doc = core.load_json(path.read_bytes()[:MAX_FILE_BYTES])  # a teammate's push: depth-bounded
+    except (OSError, ValueError) as e:
         return None, f"cannot be read ({type(e).__name__})"
     if not isinstance(doc, dict) or not isinstance(doc.get("rules"), list):
         return None, "not {\"version\": 1, \"rules\": [...]}"

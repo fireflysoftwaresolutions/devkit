@@ -64,7 +64,7 @@ failure (`ruff check . || true`):
   Speed ────────────────────────────────────────────────────────────────────────
   MEDIUM   .github/workflows/ci.yml:7  no-job-timeout  [--fix]
            job `test` has no `timeout-minutes` (GitHub's default is 6 hours)
-           fix: add `timeout-minutes: 30`
+           fix: add `timeout-minutes:` at 1.5 times the job's longest successful run, at least 30 (--fix reads its runs on GitHub)
   …
   Next ─────────────────────────────────────────────────────────────────────────
   dev ci audit --fix   applies the [--fix] items to the working tree
@@ -197,12 +197,12 @@ indentation, and audits again afterward. Four fixes are safe enough to apply wit
 | --- | --- |
 | `permissions-missing` | `permissions: contents: read` at the top; a job that needs more asks for it |
 | `no-auto-cancel` | A `concurrency` group with `cancel-in-progress: true` for a pull-request-only workflow, otherwise `${{ github.event_name == 'pull_request' }}`, so runs on the default branch finish |
-| `no-job-timeout` | `timeout-minutes` on each job, after `runs-on`, from the policy's `job_timeout_minutes` (default 30); jobs that call a reusable workflow are left alone |
+| `no-job-timeout` | `timeout-minutes` on each job, after `runs-on`, from the job's recent successful runs on GitHub (see [Job timeouts](#job-timeouts-and-the-delivery-policy)); a job without them, and a job that calls a reusable workflow, are left alone |
 | `action-not-pinned` | The tag's commit SHA, with the most precise version in a comment (`@v6` becomes `@<sha> # v6.8.0`) |
 
-Pinning asks GitHub for each tag's commit through `gh api`, so `gh` must be signed in. A reference that is not a tag
-(a branch) is skipped, and the report says to pin it to a release by hand. When GitHub cannot be reached, the pins are
-skipped and the other fixes still apply.
+Pinning asks GitHub for each tag's commit, and the timeouts for each job's runs, through `gh api`, so `gh` must be
+signed in. A reference that is not a tag (a branch) is skipped, and the report says to pin it to a release by hand.
+When GitHub cannot be reached, the pins and the timeouts are skipped and the other fixes still apply.
 
 The same project after `--fix`:
 
@@ -212,7 +212,7 @@ The same project after `--fix`:
   Fixed (working tree, not committed) ──────────────────────────────────────────
   ✓ .github/workflows/ci.yml: permissions: contents: read
   ✓ .github/workflows/ci.yml: concurrency with cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-  ✓ .github/workflows/ci.yml: timeout-minutes: 30 on job `test`
+  ✓ .github/workflows/ci.yml: timeout-minutes: 30 on job `test` (the longest of its 20 recent green run(s) took 9 min)
   ✓ .github/workflows/ci.yml: astral-sh/setup-uv@v6 → d0cc045d04cc… # v6.8.0
   ✓ .github/workflows/ci.yml: actions/checkout@v4 → 11d5960a3267… # v4.4.0
 ```
@@ -228,7 +228,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 30 # longest recent green run: 9 min
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
@@ -259,13 +259,23 @@ From a real GitLab audit:
 
 ### Job timeouts and the delivery policy
 
-The timeout that `dev ci audit` suggests and `--fix` writes comes from the optional delivery-policy field
-`job_timeout_minutes` (default 30), a whole number of minutes from 5 to 360. Set it when the project's slowest job
-needs more:
+`--fix` sizes each job's timeout from how long the job really takes. It reads the job's last 20 successful runs on
+GitHub, takes 1.5 times the longest one, and rounds it up to a multiple of 5 minutes: a job whose slowest green run
+took 46 minutes gets `timeout-minutes: 70`, so a slow run that still passes is never cancelled. Each leg of a matrix
+counts, and the slowest leg decides. A comment on the line says which run it was based on.
+
+The result is never under the optional delivery-policy field `job_timeout_minutes` (default 30), a whole number of
+minutes from 5 to 360. Raise it when every job of the project needs a longer minimum:
 
 ```bash
 dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35 minutes"
 ```
+
+When `--fix` cannot read the runs (the repository has no `github.com` remote, `gh` is not signed in, or one of the
+runs cannot be read), or cannot tell which runs are the job's (it has no successful run yet, or its `name:` is only an
+expression, which GitHub shows by its value), it writes no number: the finding stays, and the report says why and to
+set the timeout by hand at 1.5 times the job's longest successful run. One unreadable run is enough: a history
+without it could miss the slowest run.
 
 `dev ci init` uses the same field: when the policy sets it, every generated job gets that timeout. Without it, each
 job keeps its own limit (15 minutes for lint, 20 for builds, 30 for tests and integration tests); the security and
@@ -305,7 +315,8 @@ it, and `0` otherwise.
 Every generated pipeline:
 
 - runs on pull requests (merge requests), on pushes to the default branch, and on release tags in the policy's
-  format (`vYY.MM.PATCH` by default);
+  format (`vYY.MM.PATCH` by default), SemVer and PEP 440 pre-releases included (see
+  [Delivery › What the policy does](delivery.md#what-the-policy-does));
 - cancels runs that a newer push makes redundant (Bitbucket cannot);
 - caches dependencies and installs them from the lockfile when the project has one;
 - runs lint, the type checker the project configures, unit tests with a JUnit report, integration tests when the

@@ -3,6 +3,7 @@
 """Plan records keep their whole body: only the record's own changelog, at the end, is read as the changelog."""
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -220,6 +221,87 @@ class NewPlanMarkdownTests(unittest.TestCase):
             log = plans._split(path.read_text())[2]
         self.assertRegex(log[0], r"^v2 · .* · revised\S*—why: customer asked for XLSX too$")
         self.assertNotRegex(log[0], r"\s—|—\s")
+
+
+class FrontMatterYamlTests(unittest.TestCase):
+    # Vale and GitHub read a plan's front matter as YAML. A title written bare with ": " in it ("Bug sweep 26.11.28:
+    # the bugs") is not YAML (mapping values are not allowed there), so Vale stopped on the file (E201) and checked none
+    # of its prose. A value YAML cannot read bare is written quoted, and devkit reads the title back whole.
+    TITLES = ("Bug sweep 26.11.28: the bugs", "#1 priority", "C# notes # and signs", '"Quoted" at the start',
+              "[draft] export", "Ends with a colon:", "- a dash first", "Plain title")
+    UNSAFE_BARE = r"""^[-?:,\[\]{}#&*!|>'"%@`]|: | #|:$"""  # what a YAML plain scalar cannot hold
+
+    def test_a_title_is_written_as_a_yaml_scalar_and_read_back_whole(self):
+        for title in self.TITLES:
+            with self.subTest(title=title), TempPlans():
+                path = plans.new("acme/api", title, a=A)
+                text = path.read_text()
+                line = next(ln for ln in work.split_frontmatter(text)[0].splitlines() if ln.startswith("title:"))
+                value = line[len("title:"):].strip()
+                if value.startswith('"'):
+                    self.assertEqual(json.loads(value), title)
+                else:
+                    self.assertEqual(value, title)
+                    self.assertNotRegex(value, self.UNSAFE_BARE)
+                self.assertEqual(plans.title_of(text, "fallback"), title)
+                self.assertEqual([p["title"] for p in plans.list_plans()], [title])
+                plans.revise(path, "a revision", a=A)
+                self.assertEqual(plans.title_of(path.read_text(), "fallback"), title)
+                self.assertFalse(plans.needs_revision(path))
+
+    # Any title reads back exactly, from a plan devkit writes and from one it revises, and the line it is written on
+    # is one YAML scalar: a tab after ':' or before '#' counts as a space does (Ruby's YAML refused "x:<tab>y", and
+    # read "x<tab>#y" as "x"), and every character str.splitlines breaks a line on (\r, \x0b, \x0c, \x1c-\x1e, U+0085,
+    # U+2028, U+2029) is escaped, since a bare one cut the title at devkit's own reader. So are U+FFFE and U+FFFF,
+    # which libyaml refuses bare and raw inside quotes (Ruby's YAML stopped on the file), and the byte order mark
+    # U+FEFF, which YAML 1.2 keeps out of a scalar's text. The titles come from a fixed seed, so a failure names the
+    # same title on every run.
+    ALPHABET = list("ab Z9 \t:#-?,[]{}&*!|>'\"%@`\\") + ["\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85",
+                                                       "\u2028", "\u2029", "\x00", "\x7f", "\x9f", "\ufeff", "\ufffe",
+                                                       "\uffff", "é", "漢", "😀"]
+    REVIEWED = ("x:\ty", "x\t#y", "a\rb", "a\x85b", "a\u2028b", "a\u2029b", "Plan\r\n2", "\ttabbed", "ends with a tab\t",
+                "a\ufeffb", "\ufeffstarts with a byte order mark", "a\ufffeb", "a\uffffb")
+    # what a bare YAML scalar cannot hold: an indicator or a blank first, ':' or '#' next to a blank, ':' or a blank
+    # last, or a character YAML or devkit's reader takes as a line break or does not print
+    NOT_BARE = r"""^[-?:,\[\]{}#&*!|>'"%@`\s]|:[ \t]|[ \t]#|:$|\s$|[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]"""
+    RAW_IN_QUOTES = r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff\ufffe\uffff]"  # must be an escape inside a YAML "…" scalar
+
+    def test_every_title_reads_back_exactly_from_one_yaml_scalar(self):
+        import random
+        rng = random.Random(20261123)
+        generated = ["".join(rng.choice(self.ALPHABET) for _ in range(rng.randint(1, 12))) for _ in range(200)]
+        with TempPlans():
+            for title in (*self.REVIEWED, *generated):
+                with self.subTest(title=title):
+                    for old in plans.PLANS.rglob("*.md"):  # a failed title's plan: the next one may take its name
+                        old.unlink()
+                    path = plans.new("acme/api", title, a=A)
+                    front = work.split_frontmatter(path.read_text())[0]
+                    self.assertEqual(len(front.splitlines()), len(plans.FIELDS), front)
+                    value = next(ln for ln in front.splitlines() if ln.startswith("title:"))[len("title:"):].strip()
+                    if value.startswith('"'):
+                        self.assertEqual(json.loads(value), title)
+                        self.assertNotRegex(value, self.RAW_IN_QUOTES)
+                    else:
+                        self.assertEqual(value, title)
+                        self.assertNotRegex(value, self.NOT_BARE)
+                    self.assertEqual(plans.title_of(path.read_text(), "fallback"), title)
+                    plans.revise(path, "a revision", a=A)
+                    self.assertEqual(plans.title_of(path.read_text(), "fallback"), title)
+
+    # A shell argument with a byte that is not UTF-8 reaches Python as a lone surrogate (U+DC80-U+DCFF), which no
+    # UTF-8 file can hold: the plan's write failed with the codec's own message. The title, or a revision's reason, is
+    # refused with what to do, and nothing is written.
+    def test_text_with_a_byte_that_is_not_utf8_is_refused_with_how_to_recover(self):
+        with TempPlans():
+            with self.assertRaisesRegex(ValueError, r"plan title .*not UTF-8.*retype it"):
+                plans.new("acme/api", "Bug sweep \udcff notes", a=A)
+            self.assertEqual([p for p in plans.PLANS.rglob("*") if p.is_file()], [])
+            path = plans.new("acme/api", "Bug sweep notes", a=A)
+            before = path.read_bytes()
+            with self.assertRaisesRegex(ValueError, r"reason .*not UTF-8.*retype it"):
+                plans.revise(path, "caf\udce9 changed", a=A)
+            self.assertEqual(path.read_bytes(), before)
 
 
 class ChangelogEntryTests(unittest.TestCase):

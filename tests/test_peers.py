@@ -23,6 +23,11 @@ sys.path.insert(0, str(LIB))
 sys.path.insert(0, str(TESTS))
 
 import _sandbox  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, core, peers, state, watch  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
@@ -784,6 +789,28 @@ class SweepTests(PeerCase):
         r = peers.send(sender(CLAUDE_A), "@7be0a41d", "after the sweep", now=self.now + 1)
         self.assertEqual(r["to"], [f"claude:{CLAUDE_B}"])
         self.assertEqual([m["text"] for m in peers.inbox("claude", CLAUDE_B)], ["after the sweep"])
+
+    def test_a_box_set_aside_does_not_bring_back_the_mail_its_legacy_box_held(self):
+        # the session's box began in an older devkit's store and moved to the new one at its first read; once read,
+        # its mail is told. When the sweep sets the new box aside, the old one must not move back in: its mail would
+        # show as unread a second time
+        self.three_sessions()
+        message = {"id": "M-0ld0ld0l", "from": {"agent": "claude", "session": CLAUDE_A}, "text": "read once",
+                   "ts": self.now - 60}
+        legacy = legacy_box(self.now, "claude", CLAUDE_B, raw=json.dumps({
+            "v": 1, "agent": "claude", "session": CLAUDE_B, "inbox": [message], "sent": [], "rate": []}).encode())
+        self.assertEqual([m["text"] for m in peers.inbox("claude", CLAUDE_B)], ["read once"])  # moved, unread
+        peers._marker("claude", CLAUDE_B).touch()  # the older devkit's delivery left it waiting
+        self.assertEqual([m["text"] for m in peers.take("claude", CLAUDE_B)], ["read once"])
+        self.assertEqual(peers.inbox("claude", CLAUDE_B), [])
+        canonical = peers.box_path("claude", CLAUDE_B)
+        canonical.write_bytes(b'{"agent": "claude", "inbox": [')  # cut off halfway
+        self.assertEqual(peers.sweep(now=self.now)["aside"], 1)
+        self.assertEqual(peers.inbox("claude", CLAUDE_B), [])
+        self.assertTrue(legacy.exists())  # the older devkit's bytes stay as they were
+        r = peers.send(sender(CLAUDE_A), "@7be0a41d", "after the sweep", now=self.now + 1)
+        self.assertEqual(r["to"], [f"claude:{CLAUDE_B}"])
+        self.assertEqual([m["text"] for m in peers.take("claude", CLAUDE_B)], ["after the sweep"])
 
     def test_sweep_leaves_a_box_of_a_newer_devkit_in_place_and_goes_on(self):
         # a newer devkit marks a box format this copy does not know with messaging_schema: the box is that copy's,

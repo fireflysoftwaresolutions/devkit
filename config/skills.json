@@ -100,6 +100,24 @@
       }
     },
     {
+      "repo": "vuejs-ai/skills",
+      "ref": "198f0cd8f7f9c0a3d9b566ccc16de6677519ee78",
+      "license": "MIT",
+      "why": "Vue 3 with the Composition API: reactivity, component boundaries and data flow; a community project that plans to move to the Vue organization",
+      "skills": {
+        "vue-best-practices": "skills/vue-best-practices"
+      }
+    },
+    {
+      "repo": "sveltejs/ai-tools",
+      "ref": "f9d22f2f7f7cd5e4596eef5d108a69ac8f0dd48d",
+      "license": "MIT",
+      "why": "Svelte 5 runes, events, snippets and modern syntax, from the Svelte team; its svelte-code-writer skill is left out because it runs an unversioned npx package",
+      "skills": {
+        "svelte-core-bestpractices": "tools/skills/svelte-core-bestpractices"
+      }
+    },
+    {
       "repo": "github/awesome-copilot",
       "ref": "3f6e39551b5782bbc6ba683074bb29f92ef982ab",
       "license": "MIT",
@@ -114,6 +132,34 @@
         "threat-model-analyst": "skills/threat-model-analyst",
         "spring-security": "skills/spring-security",
         "spring-observability": "skills/spring-observability"
+      }
+    },
+    {
+      "repo": "dotnet/skills",
+      "ref": "c227688ed14de4467e3e45f95dc69a94e905e219",
+      "license": "MIT",
+      "why": "ASP.NET Core Web API endpoints from the .NET team: HTTP semantics, OpenAPI, Problem Details and cancellation",
+      "skills": {
+        "dotnet-webapi": "plugins/dotnet-aspnetcore/skills/dotnet-webapi"
+      }
+    },
+    {
+      "repo": "twostraws/SwiftUI-Agent-Skill",
+      "ref": "f2920b63995263f57b3e198674e89a602efba6d2",
+      "license": "MIT",
+      "why": "SwiftUI reviews for modern API, data flow, navigation, accessibility and performance (Paul Hudson, tag 2.0.0 and later fixes)",
+      "skills": {
+        "swiftui-pro": "swiftui-pro"
+      }
+    },
+    {
+      "repo": "android/skills",
+      "ref": "c72942584fff970dac86ced78b367fce0c441e52",
+      "license": "Apache-2.0 (LICENSE.txt, Google LLC)",
+      "why": "Google's Android skills (tag v1.0.23): permissions and IPC security, Jetpack Compose performance",
+      "skills": {
+        "android-permissions-security": "security/android-permissions-security",
+        "jetpack-compose-performance": "jetpack-compose/jetpack-compose-performance"
       }
     },
     {

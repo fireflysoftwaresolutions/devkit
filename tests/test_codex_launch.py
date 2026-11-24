@@ -325,7 +325,7 @@ class CodexLaunchRecord(CodexCrew):
         launch = self.launch_of(s, TANK)
         owner = self.step(s, "api")["owner"]
         again = self.subagent_start(s, TANK, "tank")  # the tech lead sent it a follow-up: a new turn starts
-        scratch = self.home / "Development/.tmp/codex" / LEAD / "scratchpad/tank"
+        scratch = self.home / "Development/.tmp/codex" / LEAD / "scratchpad/tank-api"  # its lane's, for its step
         self.assertTrue(scratch.is_dir())
         self.assertIn(str(scratch), self.context(again))
         self.assertEqual(self.launch_of(s, TANK)["key"], launch["key"])
@@ -420,6 +420,17 @@ class CodexMemberContext(CodexCrew):
             self.assertIn(f"- `{name}` — ", told)
         self.assertIn("## devkit · your report", told)
         self.assertIn("**[Firefly> DevKit · Backend engineer (Tank)]**", told)
+
+    def test_a_reviewer_launched_for_one_review_gets_the_context_of_that_review(self):
+        # the Code reviewer's lane also takes an older waiting review (reviews share a lane), which comes first in the
+        # plan: the child's start context is the step its launch names, never the first one its lane holds
+        s = self.lead(plan="review-api=20m; review-ui=20m")
+        s.ok("progress", "assign", "review-api", "--to", "Seraph", "--activity", "security", "--why", "a second look")
+        s.ok("progress", "assign", "review-ui", "--to", "Seraph", "--activity", "review")
+        told = self.context(self.spawn(s, REVIEWER, "seraph", "review_ui"))
+        self.assertEqual(self.step(s, "review-ui")["owner"], REVIEWER)
+        self.assertIn("- `testing` — ", told)
+        self.assertNotIn("`devsecops`", told)  # the security review's, which this launch did not name
 
     def test_a_helper_no_crew_member_runs_gets_only_the_report_format(self):
         s = self.lead()

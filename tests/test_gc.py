@@ -14,6 +14,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import time
 import unittest
@@ -372,6 +373,71 @@ class GcStateRecordTests(unittest.TestCase):
                 mock.patch.object(cli, "cmd_sync", return_value=0), contextlib.redirect_stdout(out):
             cli._gc_unattended(SimpleNamespace(apply=False, yes=False, verbose=False, auto_only=False))
         self.assertIn("remove record", out.getvalue())  # the plan is listed before anything is decided
+
+
+class GcValeConfigTests(unittest.TestCase):
+    # Each devkit copy writes its own Vale config under vale/configs/ when it runs `dev docs check`, and older copies
+    # shared vale/.vale.ini: a config piles up for every worktree and release that is gone. The cleanup removes the
+    # configs of copies that are gone, the ones that name no copy and the shared one, which an older copy writes again
+    # when it runs; a live copy's config and the style packages stay.
+    def setUp(self):
+        import tempfile
+        from devkit import docs
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.vale = self.root / "vale"
+        self.styles = self.vale / "styles"
+        for package in ("Google", "write-good"):  # already downloaded: ensure_vale syncs nothing
+            (self.styles / package).mkdir(parents=True)
+        for patch in (mock.patch.object(docs, "VALE_DIR", self.vale), mock.patch.object(docs, "VALE_STYLES", self.styles),
+                      mock.patch.object(core, "have", lambda tool: tool == "vale"),
+                      mock.patch.object(gc, "_temp_entries", return_value=iter(())),
+                      mock.patch.object(core, "active_cwds", return_value=[]),
+                      mock.patch.dict(core.CFG["gc"], {"docker": False})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def copy_with_config(self, rel: str) -> tuple:
+        # a devkit copy in its own folder, and the Vale config its `dev docs check` writes -> (folder, config)
+        from devkit import docs
+        copy = self.root / rel
+        (copy / "lib" / "devkit").mkdir(parents=True)
+        (copy / "lib" / "devkit" / "docs.py").write_text("")
+        (copy / "config" / "docs").mkdir(parents=True)
+        (copy / "config" / "docs" / "vale.ini").write_text((core.DEVKIT_HOME / "config" / "docs" / "vale.ini").read_text())
+        with mock.patch.object(docs, "DEVKIT_HOME", copy), mock.patch.object(docs, "VALE_INI", docs.vale_ini_of(copy)):
+            self.assertTrue(docs.ensure_vale())
+            return copy, docs.VALE_INI
+
+    def planned(self) -> list:
+        return [a for a in gc.plan({"projects": []}, with_sizes=False)["actions"] if a["path"].startswith(str(self.vale))]
+
+    def test_configs_of_copies_that_are_gone_go_and_a_live_copys_config_stays(self):
+        _, live = self.copy_with_config("worktrees/feat-x")
+        gone_copy, gone = self.copy_with_config("releases/26.11.20-abc1234")
+        shutil.rmtree(gone_copy)
+        unnamed = self.vale / "configs" / "old-0123456789.vale.ini"
+        unnamed.write_text("StylesPath = styles\n")
+        shared = self.vale / ".vale.ini"
+        shared.write_text("StylesPath = styles\n")
+        planned = self.planned()
+        self.assertEqual(sorted(a["path"] for a in planned), sorted(map(str, (gone, unnamed, shared))))
+        self.assertTrue(all(a["auto"] and a["kind"] == "purge-record" for a in planned), planned)
+        gc.apply({"actions": planned}, only_auto=True, remote=False)
+        self.assertEqual([p.exists() for p in (live, gone, unnamed, shared, self.styles / "Google")],
+                         [True, False, False, False, True])
+
+    def test_a_config_whose_copy_is_back_by_the_cleanup_stays(self):
+        # the worktree is created again at the same folder between the plan and its apply: its config is in use again
+        copy, ini = self.copy_with_config("worktrees/fix-y")
+        shutil.rmtree(copy)
+        plan = {"actions": self.planned()}
+        self.assertEqual([a["path"] for a in plan["actions"]], [str(ini)])
+        self.copy_with_config("worktrees/fix-y")
+        results = gc.apply(plan, only_auto=True, remote=False)
+        self.assertTrue(ini.exists())
+        self.assertEqual([ok for ok, _ in results], [False])
 
 
 class GcVisualMarksTests(unittest.TestCase):

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .. import core, ui
 from . import map as vmap
-from . import store
+from . import npmroot, store
 
 PROJECT_HELP = "the project, owner/repo (default: the one you are in)"
 AXE_VERSION = "4.14.0"  # the axe-core of config/npm-globals.txt, as axe.cjs checks it
@@ -66,15 +66,6 @@ def _reading():
             f"A visual record could not be read ({type(e).__name__}: {e}). One synced from another Mac may be "
             f"damaged: find it with git -C {core.tilde(core.HANDOFF)} log --stat -- visual/, and restore it from "
             "there.") from None
-
-
-def _npm_root() -> Path:
-    """npm's global folder, where axe.cjs reads axe-core from (`npm root -g`)."""
-    try:
-        out = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=60).stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        out = ""
-    return Path(out or "<npm root -g>")
 
 
 def _size(c: dict) -> str:
@@ -124,8 +115,12 @@ def _print_captures(caps: list, audit_id: str, next_line: str) -> None:
                         "there.")
         changed = [c["id"] for c in web if ((c.get("checks") or {}).get("skipped") or {}).get("axe") == "hash mismatch"]
         if changed:
-            ui.warn(f"axe.min.js in {_npm_root() / 'axe-core'} does not match axe-core {AXE_VERSION}. The "
-                    f"accessibility rules did not run on {', '.join(changed)}. Reinstall it: dev install --only tools.")
+            try:  # the folder axe.cjs read axe-core from
+                where, why = npmroot.global_root() / "axe-core", ""
+            except npmroot.NoFolder as e:
+                where, why = "npm's global folder", f" {e}, so devkit cannot name the folder."
+            ui.warn(f"axe.min.js in {where} does not match axe-core {AXE_VERSION}. The accessibility rules did not run "
+                    f"on {', '.join(changed)}. Reinstall it: dev install --only tools.{why}")
         skipped = sorted({f"{k} ({v})" for c in web for k, v in ((c.get("checks") or {}).get("skipped") or {}).items()
                           if (k, v) != ("axe", "hash mismatch")})
         if skipped:

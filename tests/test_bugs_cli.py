@@ -47,6 +47,14 @@ def voters(*impacts):
     return {f"v{i}": {"impact": imp, "ts": NOW} for i, imp in enumerate(impacts)}
 
 
+def _old_format_copy(item, new_id, fp):
+    # a copy of the outbox item `item` as an older devkit queued it: no legacy_version, so no sync ever sends it
+    old = {k: v for k, v in item.items() if k != "legacy_version"}
+    old.update(id=str(new_id), payload=dict(item["payload"], fingerprint=fp))
+    (bugs.BUGS / "outbox" / f"{new_id}.json").write_text(json.dumps(old))
+    return str(new_id)
+
+
 class BugCLI(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -419,6 +427,65 @@ class ReviewTests(BugCLI):
         self.assertEqual(len(self.client.created), 2)
         self.assertEqual(self.outbox(), [])
 
+    # An older devkit queued items without the record of where they came from: none can ever be sent, and `dev bug
+    # drop <id>` removed one at a time (55 on one Mac). `dev bug drop --old-format` drops all of them and names each;
+    # an item that can be sent stays in the outbox, waiting for its review.
+    def test_drop_old_format_drops_every_item_an_older_devkit_queued_and_keeps_the_sendable_one(self):
+        kept = self.held()
+        olds = [_old_format_copy(kept, int(kept["id"]) + n, fp) for n, fp in ((1, FP_B), (2, FP_C))]
+        rc, out = self.dev("drop", "--old-format", person=True)
+        self.assertEqual(rc, 0, out)
+        for iid, fp in zip(olds, (FP_B, FP_C)):
+            self.assertIn(f"{iid} · report · {fp}", out)
+        self.assertIn("2 old-format items dropped", out)
+        self.assertEqual([it["id"] for it in self.outbox()], [kept["id"]])
+        self.assertEqual([(it["id"], it["sendable"]) for it in bugs.pending()], [(kept["id"], True)])
+        rc, out = self.dev("drop", "--old-format", person=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("no old-format item", out)
+
+    # Another devkit process holds one old-format item while `dev bug drop --old-format` runs: that item stays and is
+    # named, the others go, and the command exits 1, so a script sees the drop did not finish; run again once the
+    # other process is done, it drops the rest.
+    def test_drop_old_format_keeps_an_item_another_process_holds_and_exits_1(self):
+        import threading
+        kept = self.held()
+        free, busy = (_old_format_copy(kept, int(kept["id"]) + n, fp) for n, fp in ((1, FP_B), (2, FP_C)))
+        taken, finished = threading.Event(), threading.Event()
+
+        def other_process():  # a flock from another thread's descriptor holds off this thread as a process would
+            with core.file_lock(bugs.BUGS / "outbox" / f"{busy}.json", 5) as got:
+                if got:
+                    taken.set()
+                    finished.wait(10)
+
+        holder = threading.Thread(target=other_process)
+        holder.start()
+        try:
+            self.assertTrue(taken.wait(5))
+            with mock.patch.object(bugs, "COMMAND_WAIT", 0.2):
+                rc, out = self.dev("drop", "--old-format", person=True)
+        finally:
+            finished.set()
+            holder.join(10)
+        self.assertEqual(rc, 1, out)
+        self.assertIn(f"{free} · report · {FP_B}", out)
+        self.assertIn(f"1 kept: another devkit process held {busy}; run the command again", out)
+        self.assertEqual(sorted(it["id"] for it in self.outbox()), sorted([kept["id"], busy]))
+        rc, out = self.dev("drop", "--old-format", person=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"{busy} · report · {FP_C}", out)
+        self.assertEqual([it["id"] for it in self.outbox()], [kept["id"]])
+
+    def test_drop_takes_an_id_or_old_format_and_not_both(self):
+        item = self.held()
+        for argv in (("drop",), ("drop", item["id"], "--old-format")):
+            rc, out = self.dev(*argv, person=True)
+            self.assertEqual(rc, 2, out)
+            self.assertIn("dev bug drop <id>", out)
+            self.assertIn("dev bug drop --old-format", out)
+        self.assertEqual([it["id"] for it in self.outbox()], [item["id"]])
+
     def test_drop_removes_a_held_item(self):
         item = self.held()
         self.assertEqual(self.dev("drop", item["id"], person=True)[0], 0)
@@ -541,7 +608,7 @@ class HelpTests(unittest.TestCase):
         helps = {a.dest: a.help for a in bug._choices_actions}
         self.assertEqual([v for v in ("send", "drop", "confirm", "share") if "developer only" in helps[v]], [])
         self.assertEqual(helps["send"], "send a held item (exactly as dev bug pending prints it)")
-        self.assertEqual(helps["drop"], "drop an item (it never goes out)")
+        self.assertEqual(helps["drop"], "drop an item (it never goes out), or every old-format item at once")
         self.assertEqual(helps["confirm"], "confirm a detour (counts from maintainers other than its author)")
         self.assertEqual(helps["share"], "consent to post: on, reports (no votes) or off")
 

@@ -39,10 +39,11 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, gc, identity  # noqa: E402
+from devkit import core, gc, identity, work  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
 from devkit.visual import report  # noqa: E402
 from devkit.visual import store  # noqa: E402
+from test_visual_map import presence  # noqa: E402
 
 P = "acme/billing"
 NODE = shutil.which("node")
@@ -50,6 +51,8 @@ GITLEAKS = shutil.which("gitleaks")
 CWEBP, DWEBP = shutil.which("cwebp"), shutil.which("dwebp")
 ID = re.compile(r"^V[ACF]-[0-9a-z]{7,40}$")
 ISO = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+HOST = "ana-macbook-pro"  # this Mac's hostname in these tests: a record never holds it
+MAC = identity.Machine("m-test0001", HOST, {HOST: [[0, 4e9]]})  # this Mac's machine id, which records name it by
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Invoices</title>
@@ -126,7 +129,8 @@ class StoreCase(unittest.TestCase):
                    mock.patch.object(core, "STATE", self.tmp / "state"),
                    mock.patch.object(core, "CONFIG_FILE", self.tmp / "config.json"),
                    mock.patch.dict(core.CFG, {"github_user": "devuser"}),
-                   mock.patch.object(identity, "hostname", return_value="mac-test"),
+                   mock.patch.object(identity, "hostname", return_value=HOST),
+                   mock.patch.object(identity, "machine", lambda now=None: MAC),
                    mock.patch.object(store, "_session", return_value="claude-s1"),
                    mock.patch.object(store, "_member", return_value=None),
                    mock.patch.object(tempfile, "tempdir", str(self.scratch))]
@@ -207,7 +211,7 @@ class IdsAndAuditsTest(StoreCase):
                                          "states": ["empty"]})
         self.assertEqual(rec["map_version"], 1)
         self.assertEqual(rec["journeys"], ["J:export-month"])
-        self.assertEqual(rec["by"], {"member": None, "user": "devuser", "host": "mac-test", "session": "claude-s1"})
+        self.assertEqual(rec["by"], {"member": None, "user": "devuser", "host": "m-test0001", "session": "claude-s1"})
         self.assertTrue(ISO.match(rec["taken"]))
         self.assertEqual((rec["passes"], rec["signals"], rec["include"]), ({}, [], []))
         self.assertEqual(store.open_audit(P), audit["id"])
@@ -288,11 +292,29 @@ class CaptureTest(StoreCase):
                          (head, "feat/invoice-export", False))
         self.assertEqual(rec["env"]["devkit"], core.VERSION)
         self.assertTrue(rec["env"]["browser"].startswith("chromium"))
-        self.assertEqual(rec["image"]["where"], "local:mac-test")
+        self.assertEqual(rec["image"]["where"], "local:m-test0001")
         blob = (self.local / "blobs" / f"{rec['image']['sha256']}.png").read_bytes()
         self.assertEqual(hashlib.sha256(blob).hexdigest(), rec["image"]["sha256"])
         self.assertEqual(rec["by"]["user"], "devuser")
         self.assertEqual((rec["marks"], rec["judgment"], rec["passes"]), (None, [], {}))
+
+    # records sync to the handoff repository: they name this Mac by its machine id, never by its hostname, which tells
+    # whose Mac it is (macOS names it after its owner) and changes with the network
+    def test_the_audit_and_the_capture_name_this_mac_by_its_machine_id_and_hold_no_hostname(self):
+        c = self.shot(check=False)
+        self.assertEqual((c["by"]["host"], c["image"]["where"]), ("m-test0001", "local:m-test0001"))
+        self.assertEqual(self.record(c["audit"])["by"]["host"], "m-test0001")
+        for path in self.records.rglob("*.json"):
+            self.assertNotIn(HOST, path.read_text(), path.name)
+
+    # without a machine id (devkit cannot write its state folder), identity.machine names this Mac by its hostname;
+    # a record then names no Mac at all
+    def test_a_capture_names_no_mac_when_this_mac_has_no_machine_id(self):
+        self.patched(identity, "machine", new=lambda now=None: identity.Machine(HOST, HOST, {HOST: [[0, 4e9]]}))
+        c = self.shot(check=False)
+        self.assertEqual((c["by"]["host"], c["image"]["where"]), (None, None))
+        for path in self.records.rglob("*.json"):
+            self.assertNotIn(HOST, path.read_text(), path.name)
 
     def test_a_capture_takes_every_viewport_and_theme_of_the_audits_matrix(self):
         store.start(P, "screen", "Q?", viewports=["1440x900", "390x844"], themes=["light", "dark"])
@@ -625,6 +647,70 @@ class BulkDismissTest(RecordsCase):
         self.assertIsNone(self.triage("VC-g33z0c1a1a#1"))
 
 
+@unittest.skipUnless(NODE and GITLEAKS, "node and gitleaks redact the text a record holds")
+class LaneAuditTest(RecordsCase):
+    # the crew members of one agent session share its session id: each lane keeps its own open audit, so a capture
+    # or a bulk dismissal without --audit never reaches the audit another member's lane opened
+    def as_lane(self, lane):
+        return mock.patch.object(store, "_lane", return_value=lane)
+
+    def test_a_lane_without_an_audit_of_its_own_has_none_while_another_lane_of_the_session_has_one(self):
+        with self.as_lane("a1sati"):
+            sati = store.start(P, "screen", "Is the invoice list usable?")["id"]
+        with self.as_lane("a2trinity"):
+            self.assertIsNone(store.open_audit(P))
+            with self.assertRaises(store.VisualError) as e:
+                store.capture(P, self.url)
+            self.assertIn("No audit is open", str(e.exception))
+            trinity = store.start(P, "screen", "Is the tile readable at 390 px?")["id"]
+            self.assertEqual(store.open_audit(P), trinity)
+        with self.as_lane("a1sati"):
+            self.assertEqual(store.open_audit(P), sati)
+        self.assertIsNone(store.open_audit(P))  # the tech lead opened none in its own lane
+
+    def test_a_bulk_dismissal_without_audit_dismisses_only_the_signals_of_its_own_lanes_audit(self):
+        with self.as_lane("a1sati"):
+            sati = store.start(P, "screen", "Is the invoice list usable?")["id"]
+        with self.as_lane("a2trinity"):
+            trinity = store.start(P, "screen", "Is the tile readable at 390 px?")["id"]
+        self.put({"id": "VC-g33z0c4d4d", "audit": sati, "checks": {"signals": [self.signal(1, "tap-target")]}})
+        self.put({"id": "VC-g33z0c5e5e", "audit": trinity, "checks": {"signals": [self.signal(1, "tap-target")]}})
+        with self.as_lane("a1sati"):
+            self.assertEqual(store.dismiss_all(P, "tap-target", why="advice under 44 px at 390 px"),
+                             ["VC-g33z0c4d4d#1"])
+        self.assertIsNone(store._signal(P, "VC-g33z0c5e5e#1")[1]["triage"])
+
+    # a start that cannot tell which lane runs it refuses before it writes: no audit record is left that no lane has
+    # open, however often it is tried, and the refusal names no --audit, an option start does not take
+    def test_a_start_that_cannot_tell_its_lane_writes_no_audit_and_names_no_audit_option(self):
+        from devkit import progress
+        refusal = identity.IdentityError("the open calls of 2 crew members run this same command")
+        with mock.patch.object(progress, "_as_lane", side_effect=refusal):
+            for _ in range(2):
+                with self.assertRaises(store.VisualError) as e:
+                    store.start(P, "screen", "Is the invoice list usable?")
+        self.assertIn("2 crew members", str(e.exception))
+        self.assertNotIn("--audit", str(e.exception))
+        self.assertEqual(sorted(p.name for p in self.records.rglob("VA-*.json")), [])
+
+
+class LaneLookupTest(unittest.TestCase):
+    # the lane a session audit belongs to comes from devkit's identity; when devkit cannot tell which of several
+    # members runs the command, the lookup refuses instead of taking the tech lead's audit
+    def test_the_lane_is_the_members_agent_id_none_for_the_tech_lead_and_refused_when_devkit_cannot_tell(self):
+        from devkit import progress
+        with mock.patch.object(progress, "_as_lane", return_value="a1b2/c3"):
+            self.assertEqual(store._lane(), "a1b2_c3")
+        with mock.patch.object(progress, "_as_lane", return_value=None):
+            self.assertIsNone(store._lane())
+        refusal = identity.IdentityError("the open calls of 2 crew members run this same command")
+        with mock.patch.object(progress, "_as_lane", side_effect=refusal):
+            with self.assertRaises(store.VisualError) as e:
+                store._lane()
+        self.assertIn("2 crew members", str(e.exception))
+        self.assertIn("--audit VA-", str(e.exception))
+
+
 class CoveredPassTest(RecordsCase):
     URL = "http://127.0.0.1:4200/invoices"
 
@@ -710,7 +796,8 @@ class ShareTest(StoreCase):
                  for i in range(3)]
         self.assertLess(max(inner), 40)
         last = self.record(f["id"])["history"][-1]
-        self.assertEqual((last["change"], last["by"], last["pictures"]), ("shared", "devuser", [sha]))
+        self.assertEqual((last["change"], last["by"], last["pictures"], last["host"]),
+                         ("shared", "devuser", [sha], "m-test0001"))
 
     def test_share_refuses_a_changed_picture_and_a_remote_capture(self):
         c = self.shot(check=False)
@@ -731,6 +818,97 @@ class ShareTest(StoreCase):
             store.share(P, f["id"])
         self.assertIn("remote", str(e.exception))
         self.assertFalse((self.records / "media").exists())
+
+    # a picture taken on another Mac is not here to share: the refusal names that Mac as the dashboard does, its
+    # name with its machine id, never the record's bare local:<id>
+    def test_share_names_the_mac_a_missing_picture_is_on(self):
+        c = self.shot(check=False)
+        f = store.add_finding(P, c["id"], region=[0, 0, 100, 40], pass_="layout", rules=["nielsen:8"],
+                              severity="P2", title="t", impact="i", evidence="e", fix="x")
+        rec = self.record(c["id"])
+        rec["image"]["where"] = "local:m-studio01"
+        store.save(P, rec)
+        (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+        self.patched(work, "PRESENCE", new=self.tmp / "presence")
+        presence(self.tmp / "presence", "bob@m-studio01", "studio")
+        with self.assertRaises(store.VisualError) as e:
+            store.share(P, f["id"])
+        self.assertEqual(str(e.exception), f"The picture of {c['id']} is not on this Mac: it was taken on another Mac "
+                                           f"(m-studio01). Share it from there, or capture it here: dev visual capture "
+                                           f"--again {c['id']}")
+
+
+@unittest.skipUnless(BROWSERS, NO_BROWSER or "")
+class SharePrunedHereTest(StoreCase):
+    # This Mac took the capture and later pruned its picture from its store: the record names this Mac, by its
+    # machine id or, from before the machine id, by the hostname it carried then. share says the picture is no
+    # longer in this Mac's store, never that it was taken on <this Mac> and is not on this Mac, and that nothing was
+    # shared; a new capture would be another picture, so it names none
+    def test_share_says_a_picture_this_mac_pruned_is_no_longer_in_its_store(self):
+        c = self.shot(check=False)
+        f = store.add_finding(P, c["id"], region=[0, 0, 100, 40], pass_="layout", rules=["nielsen:8"],
+                              severity="P2", title="t", impact="i", evidence="e", fix="x")
+        (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+        for where in ("local:m-test0001", f"local:{HOST}"):
+            with self.subTest(where=where):
+                rec = self.record(c["id"])
+                rec["image"]["where"] = where
+                store.save(P, rec)
+                with self.assertRaises(store.VisualError) as e:
+                    store.share(P, f["id"])
+                self.assertEqual(str(e.exception), f"The picture of {c['id']} is no longer in this Mac's store. "
+                                                   "Nothing was shared.")
+        self.assertFalse((self.records / "media").exists())
+
+
+class TakenHereByUserTest(StoreCase):
+    # A record from before the machine id, or written while this Mac had none (identity.machine falls back to the
+    # hostname), names its Mac by a hostname, and two Macs can carry one short hostname at the same time (a default
+    # or a DHCP name). Such a capture is this Mac's only when its user is this user too, as work.mine reads an older
+    # record: another person's capture in the same period reads as taken on that Mac, never as pruned from this
+    # Mac's store. A machine id names one Mac, whoever took the capture on it
+    def test_a_hostname_names_this_mac_only_for_this_user_and_a_machine_id_for_anyone(self):
+        renamed = calendar.timegm((2026, 6, 1, 0, 0, 0))
+        renamed_mac = identity.Machine("m-test0001", "ana-studio", {
+            "mac-55": [[calendar.timegm((2026, 1, 1, 0, 0, 0)), renamed]], "ana-studio": [[renamed, 4e9]]})
+        no_id = identity.Machine("mac-55", "mac-55", {"mac-55": [[0, 4e9]]})
+        said = {}
+        for mac, where in ((renamed_mac, "mac-55"), (no_id, "mac-55"), (renamed_mac, "m-test0001")):
+            self.patched(identity, "machine", new=lambda now=None, m=mac: m)
+            for user in ("devuser", "bob"):
+                c = {"id": "VC-g33z1a8k0e", "image": {"where": f"local:{where}"}, "taken": "2026-03-01T00:00:00Z",
+                     "by": {"member": None, "user": user, "host": where, "session": None}}
+                said[(mac.id, where, user)] = (store.taken_here(c), store.not_here(c, "picture"))
+        here = (True, "The picture of VC-g33z1a8k0e is no longer in this Mac's store")
+        away = (False, "The picture of VC-g33z1a8k0e is not on this Mac: it was taken on mac-55")
+        self.assertEqual(said, {("m-test0001", "mac-55", "devuser"): here, ("m-test0001", "mac-55", "bob"): away,
+                                ("mac-55", "mac-55", "devuser"): here, ("mac-55", "mac-55", "bob"): away,
+                                ("m-test0001", "m-test0001", "devuser"): here,
+                                ("m-test0001", "m-test0001", "bob"): here})
+
+
+@unittest.skipUnless(BROWSERS, NO_BROWSER or "")
+class FindingOnADescriptionNotHereTest(StoreCase):
+    # A finding on an element needs the capture's description: when it is not in this Mac's store, the refusal names
+    # where it is as every other command does (not_here), gone from this Mac's store or on the Mac that took it
+    def test_a_finding_on_an_element_names_where_the_description_is(self):
+        c = self.shot(check=False)
+        (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+        self.patched(work, "PRESENCE", new=self.tmp / "presence")
+        presence(self.tmp / "presence", "bob@m-studio01", "studio")
+        said = {}
+        for where in ("m-test0001", "m-studio01"):
+            rec = self.record(c["id"])
+            rec["image"]["where"] = f"local:{where}"
+            store.save(P, rec)
+            with self.assertRaises(store.VisualError) as e:
+                store.add_finding(P, c["id"], element="E4", pass_="layout", rules=["nielsen:8"], severity="P2",
+                                  title="t", impact="i", evidence="e", fix="x")
+            said[where] = str(e.exception)
+        then = f"so its elements cannot be read. Capture it here: dev visual capture --again {c['id']}"
+        self.assertEqual(said, {
+            "m-test0001": f"The description of {c['id']} is no longer in this Mac's store, {then}",
+            "m-studio01": f"The description of {c['id']} is not on this Mac: it was taken on another Mac (m-studio01), {then}"})
 
 
 # --------------------------------------------------------------------------- records read, replays, the driver
@@ -994,7 +1172,8 @@ setInterval(() => {}, 1000);
 
     def test_a_stopped_capture_leaves_a_process_whose_folder_only_starts_like_its_own(self):
         # the capture's folder is found on a command line as a path, as noderun.stop finds it: a process of another
-        # run whose folder's name only starts with it keeps running
+        # run whose folder's name only starts with it keeps running. The driver starts that process through a shell
+        # that exits at once, so it is no child of the driver: noderun.stop also stops the driver's own children
         driver = self.tmp / "driver.cjs"
         pids = self.tmp / "pids.json"
         driver.write_text(r"""
@@ -1004,10 +1183,10 @@ const path = require('path');
 const forever = ['-e', 'setInterval(() => {}, 1000)', '--'];
 const browser = spawn(process.execPath, [...forever, '--user-data-dir=' + path.join(process.env.TMPDIR, 'profile')],
   { stdio: 'ignore', detached: true });
-const other = spawn(process.execPath, ['-e', "require('fs').writeFileSync(process.env.OTHER_UP, '1'); " +
-  'setInterval(() => {}, 1000)', '--', '--user-data-dir=' + process.env.TMPDIR + '-other/profile'],
-  { stdio: 'ignore', detached: true });
-fs.writeFileSync(process.env.PIDS_FILE, JSON.stringify([browser.pid, other.pid]));
+spawn('/bin/sh', ['-c', '"$@" &', 'sh', process.execPath, '-e',
+  "require('fs').writeFileSync(process.env.OTHER_UP, String(process.pid)); setInterval(() => {}, 1000)", '--',
+  '--user-data-dir=' + process.env.TMPDIR + '-other/profile'], { stdio: 'ignore', detached: true });
+fs.writeFileSync(process.env.PIDS_FILE, JSON.stringify([browser.pid]));
 setInterval(() => {}, 1000);
 """)
         up = self.tmp / "other-up"  # the other run's process writes it once it runs
@@ -1016,8 +1195,9 @@ setInterval(() => {}, 1000);
                 mock.patch.dict(os.environ, {"PIDS_FILE": str(pids), "OTHER_UP": str(up)}):
             with self.assertRaises(store.VisualError):
                 store._run_capture({"id": "VC-x"}, self.tmp)
-        browser, other = json.loads(pids.read_text())
         self.assertTrue(up.exists(), "the other run's process never started, so this proves nothing")
+        browser, other = json.loads(pids.read_text())[0], int(up.read_text())
+        pids.write_text(json.dumps([browser, other]))  # the cleanup stops both
         for _ in range(50):
             if not _running(browser):
                 break

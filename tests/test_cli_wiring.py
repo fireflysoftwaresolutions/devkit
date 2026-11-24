@@ -161,6 +161,32 @@ class ParserReadsFlagsAsTheGuardDoesTests(unittest.TestCase):
         self.assertEqual(sorted(flags & shellparse._DEV_VALUES), [])  # a flag it reads as a value hides the next word
 
 
+class CalverTagTests(unittest.TestCase):
+    # `dev calver` named the next tag v<next> in every repository, though dev release tags without the v where the
+    # repository's tags have none
+
+    def test_dev_calver_names_the_next_tag_as_the_repository_spells_its_tags(self):
+        from devkit import delivery
+        for tags, prefix in ((("v26.10.4",), "v"), (("26.10.4", "26.10.5"), "")):
+            with self.subTest(tags=tags), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(delivery, "POLICIES", Path(d) / "policies"):
+                repo = Path(d) / "repo"
+                subprocess.run(["git", "init", "-q", str(repo)], check=True)
+                subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                                "--allow-empty", "-m", "x"], check=True)
+                for t in tags:
+                    subprocess.run(["git", "-C", str(repo), "tag", t], check=True)
+                nxt = cli.calver(str(repo))[1]
+                cwd = os.getcwd()
+                os.chdir(repo)
+                try:
+                    rc, out = dev("calver")
+                finally:
+                    os.chdir(cwd)
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"(tag {prefix}{nxt}, branch release/{nxt})", out)
+
+
 class ClosedPipeTests(unittest.TestCase):
     # `dev audit --json | head -c 100`: the reader closes the pipe before dev has written everything. dev stops
     # quietly with the exit code of a program that a closed pipe stopped (128 + SIGPIPE, as `yes | head` reports it)
@@ -282,11 +308,12 @@ class MachineIdentityLineTests(unittest.TestCase):
         self.assertIn("Run forever", out)
         self.assertNotIn("ETA", out)
 
-    def test_dev_team_names_each_machine_by_its_hostname_and_its_id(self):
+    def test_dev_team_names_each_machine_by_its_id(self):
         work.write_presence([], a=self.me)
         rc, out = dev("team")
         self.assertEqual(rc, 0, out)
-        self.assertIn(f"ana@andress-mbp-2 ({self.me['host']})", out)
+        self.assertIn(f"ana@{self.me['host']}", out)
+        self.assertNotIn("andress-mbp-2", out)
 
     # presence is another machine's text: a label that is not a plain hostname (here terminal escapes) never reaches
     # the terminal, and that machine shows by its id
@@ -335,7 +362,7 @@ class MachineIdentityLineTests(unittest.TestCase):
                 for w in words:
                     self.assertIn(w, out)
 
-    def test_another_macs_lock_shows_by_its_hostname(self):
+    def test_another_macs_lock_shows_by_its_machine_id(self):
         work.PRESENCE.mkdir(parents=True)
         (work.PRESENCE / "bob@m-0b0b0b0b.json").write_text(json.dumps(
             {"user": "bob", "host": "m-0b0b0b0b", "label": "studio", "updated": work.now_iso(self.t0), "locks": [],
@@ -344,9 +371,10 @@ class MachineIdentityLineTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli._print_items("acme/api", "acme/api", rebind=False)
-        self.assertIn("🔒 bob@studio", out.getvalue())
+        self.assertIn("🔒 bob@m-0b0b0b0b", out.getvalue())
+        self.assertNotIn("studio", out.getvalue())  # the label an older presence file still publishes
 
-    def test_the_handoff_sync_commit_names_the_mac_by_its_label_and_id(self):
+    def test_the_handoff_sync_commit_names_the_mac_by_its_id(self):
         git = ["git", "-C", str(self.handoff.root), "-c", "user.email=t@example.com", "-c", "user.name=t"]
         subprocess.run(git + ["init", "-q"], check=True)
         (self.handoff.root / "note.md").write_text("x\n")
@@ -354,7 +382,8 @@ class MachineIdentityLineTests(unittest.TestCase):
                                           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}):
             cli.commit_push(push=False, quiet=True)
         subject = subprocess.run(git + ["log", "-1", "--format=%s"], capture_output=True, text=True).stdout.strip()
-        self.assertEqual(subject, f"sync: 1 file(s) from andress-mbp-2 ({self.me['host']})")
+        self.assertEqual(subject, f"sync: 1 file(s) from {self.me['host']}")
+        self.assertNotIn("andress-mbp-2", subject)
 
 
 if __name__ == "__main__":

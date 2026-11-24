@@ -55,21 +55,21 @@ def _stdin_json() -> dict:
     global _PAYLOAD
     try:
         data = sys.stdin.read()
-        parsed = json.loads(data) if data.strip() else {}
-    except (ValueError, OSError):
+        parsed = core.load_json(data) if data.strip() else {}
+    except (ValueError, OSError):  # not JSON, or nested too deep: the hook goes on with no payload, failing open
         parsed = {}
     _PAYLOAD = parsed if isinstance(parsed, dict) else {}
     return parsed
 
 
-def _swallowed(component: str, exc: BaseException):
-    """An error a hook handler goes on without, recorded as a minor devkit bug once an hour per component (its hook
-    event): bugs.swallowed, which never raises."""
+def _swallowed(component: str, exc: BaseException, impact: str = "minor"):
+    """An error a hook handler goes on without, recorded as a devkit bug of `impact` (bugs.IMPACT; minor unless it
+    stopped the developer's work) once an hour per component (its hook event): bugs.swallowed, which never raises."""
     try:
         from . import bugs
     except Exception:  # the recorder cannot load: the handler goes on as it always did
         return
-    bugs.swallowed(component, exc)
+    bugs.swallowed(component, exc, impact)
 
 
 def _session_file(agent: str, sid: str) -> Path:
@@ -143,7 +143,7 @@ def sessions_to_restart(sessions_dir=None, alive=None) -> list:
     out = []
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
-            s = json.loads(f.read_text())
+            s = core.load_json(f.read_text())
         except (OSError, ValueError):
             continue
         if not isinstance(s, dict) or s.get("agent") not in AGENT_NAMES or not s.get("pid"):
@@ -207,21 +207,22 @@ def _clone_node_modules(wt: Path, main: Path):
 
 
 _SEEN = {}  # cwd -> what context_for inspected there last ("top", "repo"): the welcome reuses that one inspection
-# the shapes a field of another Mac's presence must have to reach the model as written: a user name and a hostname
-# (or machine id), an agent's name, a git branch name. None holds a space, a quote or a control character.
+# the shapes a field of another Mac's presence must have to reach the model as written: a user name and a machine id
+# (or the hostname a presence from before the machine id was written under), an agent's name, a git branch name.
+# None holds a space, a quote or a control character.
 _PLAIN_WHO = re.compile(r"[A-Za-z0-9._-]{1,40}@[A-Za-z0-9._-]{1,80}")
 _PLAIN_AGENT = re.compile(r"[a-z][a-z0-9-]{0,19}")
 _PLAIN_BRANCH = re.compile(r"[A-Za-z0-9._/+-]{1,100}")
 
 
 def _presence_words(t: dict, s_: dict, team: list) -> str:
-    """Another Mac's presence as the session-start context names it, `user@hostname (agent, branch)`. Presence is
-    another person's text and the model reads this context, so each field shows only in its plain shape (its label
-    only when it looks like a hostname, work.display's rule, else its host), else a neutral word: no sentence or
-    escape code from a presence file reaches the model."""
+    """Another Mac's presence as the session-start context names it, `user@<machine id> (agent, branch)`, as
+    work.display names it: never by the hostname an older devkit still publishes as `label`, which often names the
+    person and would land in the transcript. Presence is another person's text and the model reads this context, so
+    each field shows only in its plain shape, else a neutral word: no sentence or escape code from a presence file
+    reaches the model."""
     from . import work
-    label, host = str(t.get("label") or ""), str(t.get("host") or "")
-    who = work.display(f"{t.get('user')}@{label if work._LABEL.fullmatch(label) else host}", team)
+    who = work.display(f"{t.get('user')}@{t.get('host') or ''}", team)
     agent, branch = str(s_.get("agent") or ""), str(s_.get("branch") or "")
     return (f"{who if _PLAIN_WHO.fullmatch(who) else 'someone on another Mac'} "
             f"({agent if _PLAIN_AGENT.fullmatch(agent) else 'an agent'}, "
@@ -542,6 +543,11 @@ def session_start(agent: str):
         progress.resume_orphaned(agent, sid)
     except Exception:
         _log(f"session-start pid {agent}: {traceback.format_exc()[-300:]}")
+    try:  # the calls a killed session left open end now, with the audit its SessionEnd would have made
+        from . import identity
+        identity.sweep_gone()
+    except Exception as e:
+        _swallowed("session-start", e)
     try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
         from . import progress
         rec = state.read(f) or {}
@@ -580,8 +586,9 @@ def session_start(agent: str):
     told = [older] if older else []  # the notices the model reads, before the workspace context: a cut keeps them
     said = set()  # the notices this start has: the welcome turns them into need lines
     try:  # devkit notices from files only, no network; the daily update line is the welcome's
-        from . import ext
-        notices = (("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
+        from . import ext, work
+        notices = (("policy_held", lambda: work.held_policy_line(), True),  # a policy text held here
+                   ("ext_changed", lambda: ext.session_line(cwd), False),  # changed outside devkit, audited once
                    ("ext_accepted", lambda: ext.accepted_line(), True),  # accepted since the developer's last ack
                    # that last ack with its terminal, at every session start for a day after it (ext.ACK_SHOWN_FOR)
                    ("ext_ack", lambda: ext.last_ack_line(), True))
@@ -637,6 +644,7 @@ def _welcome(agent: str, data: dict, cwd: str, seen: dict, older: bool, said: se
         return True, welcome.text(agent, str(data.get("source") or "startup"), cwd, data=data,
                                   repo=seen.get("repo"), top=seen["top"], older=older,
                                   ext_changed="ext_changed" in said, ext_ack="ext_ack" in said,
+                                  policy_held="policy_held" in said,
                                   mode=welcome.mode_for(surface(agent, data)))
     except Exception:
         _log(f"session-start welcome {agent}: {traceback.format_exc()[-300:]}")
@@ -1261,6 +1269,9 @@ def stop(agent: str):
         why = canary.language_gate(agent, data, sess) if dev_turn else ""  # the reply language, once per turn
         if why:
             notes.append(("language", why))
+        why = canary.you_gate(agent, data, sess) if dev_turn else ""  # a decision asked of the developer in auto
+        if why:
+            notes.append(("you", why))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
@@ -1372,31 +1383,97 @@ def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list, notes: li
         _log(f"stop audit {agent}: {traceback.format_exc()[-300:]}")
 
 
+_UNREAD = object()  # config_change: a settings file core.read_json could not read
+
+
+def _quietly(component: str, fn, *args):
+    """fn(*args) for a step a refusal goes on without (a log line, the background repair): its error recorded
+    (_swallowed), never raised. -> its value, or None when it failed."""
+    try:
+        return fn(*args)
+    except Exception as e:
+        _swallowed(component, e)
+        return None
+
+
+def _not_settings(value) -> str:
+    """What JSON that is not an object is, in the words of a refusal (config_change)."""
+    kind = ("JSON null" if value is None else "JSON true or false" if isinstance(value, bool) else
+            "a JSON number" if isinstance(value, (int, float)) else "a JSON string" if isinstance(value, str) else
+            "a JSON array")
+    return f"it is {kind}, not a settings object"
+
+
 def config_change(agent: str):
     """Claude ConfigChange. The user settings: refuse changes to devkit-managed keys, then restore the file. The
-    project and local settings: refuse a DEVKIT_* variable in their env block and remove it; devkit
-    manages nothing else there."""
+    project and local settings: refuse a DEVKIT_* variable in their env block and remove it, and refuse a
+    disableAllHooks that is not false, left in the file (the repository's; dev doctor names it); devkit manages
+    nothing else there. Exit 2 refuses; hooks.run turns any exception into exit 0, which would let the change pass, so
+    an error of the check itself refuses the change too, recorded as a devkit bug that blocked the developer."""
+    try:
+        _config_change(agent)
+    except SystemExit:
+        raise
+    except Exception as e:
+        _swallowed("config-change", e, "blocked")
+        what = str(_PAYLOAD.get("file_path") or "settings")
+        _quietly("config-change", _log, f"config-change blocked, its check failed: {type(e).__name__}")
+        _quietly("config-change", _audit_blocked, what, f"failed: {type(e).__name__}")
+        print(f"devkit's check of this settings change failed ({type(e).__name__}), so it cannot tell whether the "
+              f"change turns off what devkit manages: refused the change. The file still holds the change, and a new "
+              f"session reads it: undo the change if you did not mean it, and run dev bug report so devkit's failure "
+              f"gets fixed.", file=sys.stderr)
+        sys.exit(2)
+
+
+def _audit_blocked(target: str, detail: str):
+    from . import audit
+    audit.record("config.blocked", target, detail, "blocked")
+
+
+def _config_change(agent: str):
     data = _stdin_json()
     from . import policy
     path = data.get("file_path") or str(core.CLAUDE_HOME / "settings.json")
-    settings = core.read_json(path, None)
-    if settings is None:
-        return
     project = data.get("source") in ("project_settings", "local_settings")
-    drift = [] if project else [d for d in policy.diff_claude(settings)
-                                if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
-    env_keys = _devkit_env_change(path, settings, managed=not project)
-    if not drift and not env_keys:
+    # Claude Code reads its settings with Node's JSON.parse, which refuses NaN and Infinity: read as Python reads them,
+    # they would pass a check of a file Claude Code then reads differently
+    settings = core.read_json(path, _UNREAD, allow_nan=False)
+    if settings is _UNREAD and not project and not os.path.lexists(path):
+        settings = {}  # no user settings: none of devkit's managed keys, checked as an empty file is
+    if settings is _UNREAD:
+        _refuse_unreadable(path, project)
         return
+    if not project and not isinstance(settings, dict):
+        _refuse_unchecked(path, project, _not_settings(settings))
+    try:
+        drift = [] if project else [d for d in policy.diff_claude(settings)
+                                    if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
+        env_keys, fixed = _devkit_env_fix(path, settings, managed=not project)
+        # project and local settings: every hook off, devkit's too (the user settings' is drift, policy.diff_claude)
+        off = settings.get("disableAllHooks", False) if project and isinstance(settings, dict) else False
+    except Exception as e:  # a hook that crashed exits without blocking: the change would pass unchecked
+        _refuse_unchecked(path, project, type(e).__name__)
+    if not drift and not env_keys and off is False:
+        return
+    unwritten = ""
+    if fixed is not None:
+        try:
+            core.replace_text(path, fixed)  # its own temporary name: sessions start at once
+        except OSError as e:  # still refused: the refusal says the values stay as the change left them
+            unwritten = f"{type(e).__name__}: {e.strerror or e}"
     ks = sorted({d.key for d in drift} | {f"env.{k}" for k in env_keys})
+    if off is not False:
+        ks = sorted(ks + ["disableAllHooks"])
     keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
     if not project and core.older_copy():
         # The user settings differ from what this older copy would write, most likely because a newer release was
         # installed. It writes nothing; the pinned release's repair (_spawn runs it) puts back what really drifted
         # from the installed configuration, a tampered DEVKIT_* variable included.
-        notice = _older_copy_notice(agent, data.get("session_id") or "", f"{tilde(path)} ({keys})")
+        notice = _quietly("config-change", _older_copy_notice, agent, data.get("session_id") or "",
+                          f"{tilde(path)} ({keys})") or ""
         _log(f"config-change left to the pinned release ({agent}): {keys}")
-        _spawn(["config", "repair", "--quiet"])
+        _quietly("config-change", _spawn, ["config", "repair", "--quiet"])
         if env_keys:
             print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so they change "
                   f"only with devkit's configuration: refused {', '.join(f'env.{k}' for k in env_keys)}. "
@@ -1409,24 +1486,172 @@ def config_change(agent: str):
     from . import audit
     audit.record("config.blocked", path, keys, "blocked")
     if project:
-        print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings file "
-              f"sets them: removed {keys} from {path}. Change devkit's configuration with dev config.",
-              file=sys.stderr)
+        said = []
+        if env_keys:
+            env = ", ".join(f"env.{k}" for k in env_keys)
+            done = (f"refused {env} in {tilde(path)}, and could not remove them ({unwritten}): remove them from the "
+                    f"file" if unwritten else f"removed {env} from {tilde(path)}")
+            said.append(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings "
+                        f"file sets them: {done}. Change devkit's configuration with dev config.")
+        if off is not False:
+            said.append(_hooks_off_refusal(path, json.dumps(off)))
+        print(" ".join(said), file=sys.stderr)
         sys.exit(2)
-    policy._log(f"blocked change to devkit-managed keys: {keys}")
-    _spawn(["config", "repair", "--quiet"])
+    _quietly("config-change", policy._log, f"blocked change to devkit-managed keys: {keys}")
+    _quietly("config-change", _spawn, ["config", "repair", "--quiet"])
+    more = (f" It could not put devkit's values back ({unwritten}) in {tilde(path)}: make the file writable, then run "
+            f"dev config repair." if unwritten else "")
     print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
-          f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`.",
+          f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`."
+          f"{more}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _hooks_off_refusal(path: str, value: str) -> str:
+    """The refusal of a disableAllHooks that is not false in a project's or local settings (config_change), its value
+    (JSON text) cut to policy.SHOWN characters."""
+    from .policy import shown
+    return (f"disableAllHooks turns every hook off, devkit's too: refused disableAllHooks {shown(value)} in "
+            f"{tilde(path)}, left in the file as written. In that file, set it to false or remove it: a new session "
+            f"reads it, and would start without devkit's hooks.")
+
+
+def _refuse_unchecked(path: str, project: bool, why: str):
+    """Refuse a change to a settings file devkit read but could not check (config_change): user settings that are not
+    a JSON object, or checks that raised (`why`: the error's name), on JSON whose shape they do not take (a hooks
+    event that is not a list) or on devkit's own configuration (policy.claude_desired). Exit 2, recorded, and the file
+    never rewritten: devkit names what to fix."""
+    from . import audit, policy
+    own = None
+    if not project:  # the project's and local settings are checked against no configuration of devkit's
+        try:
+            policy.claude_desired()
+        except Exception as e:
+            own = e
+    if own is not None:
+        _log(f"config-change blocked, devkit's configuration failed: {type(own).__name__}")
+        audit.record("config.blocked", path, "unchecked: devkit's configuration", "blocked")
+        print(f"devkit's own configuration failed to load ({type(own).__name__}), so it cannot check the settings it "
+              f"manages in {tilde(path)}: refused the change, the file left as it is. Run dev doctor.", file=sys.stderr)
+        sys.exit(2)
+    what = (f"{tilde(path)} for devkit's DEVKIT_* variables" if project else
+            f"the settings it manages in {tilde(path)}")
+    _log(f"config-change blocked, settings devkit could not check: {why}")
+    audit.record("config.blocked", path, "unchecked", "blocked")
+    print(f"devkit could not check {what} ({why}): refused the change, the file left "
+          f"as it is. Make it a settings object as Claude Code documents it (hooks and env as objects); if it is one, "
+          f"run dev doctor.", file=sys.stderr)
+    sys.exit(2)
+
+
+def _unreadable_why(raw: bytes) -> str:
+    """Why devkit cannot read a settings file's bytes, in the words of a refusal: a byte order mark, a byte that is not
+    UTF-8 (Claude Code reads it replaced), not JSON, nested deeper than core.JSON_MAX_DEPTH (Claude Code reads it all
+    the same), NaN or Infinity (Node refuses them, Python reads them), or a value Python's parser refuses (an integer
+    of more digits than it converts), named as the parser names it."""
+    why = []
+    if raw.startswith(b"\xef\xbb\xbf"):  # Python's parser refuses it; what follows it is checked as well
+        why.append("it starts with a byte order mark")
+        raw = raw[3:]
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        why.append("it holds a byte that is not UTF-8")
+    try:
+        core.load_json(raw.decode("utf-8", "replace"), allow_nan=False)
+    except json.JSONDecodeError:
+        why.append("it is not JSON")
+    except core.JSONDepthError:
+        why.append(f"it nests deeper than {core.JSON_MAX_DEPTH} levels")
+    except core.JSONNonFiniteError as e:
+        why.append(f"it holds {e}")
+    except ValueError as e:
+        why.append(f"it holds a value devkit's JSON reader cannot take: {str(e).split(';')[0][:160]}")
+    return ", and ".join(why) or "it changed while devkit read it"
+
+
+def _refuse_unreadable(path: str, project: bool):
+    """A settings file devkit cannot read (core.read_json gave nothing: a byte that is not UTF-8, not JSON, or nested
+    deeper than core.JSON_MAX_DEPTH, all of which Claude Code may still read), recorded and refused with exit 2 as
+    config_change refuses a file it can read, and never rewritten: devkit names what to fix. The user settings are
+    refused whole, since devkit cannot check the keys it manages there (policy.diff_claude), naming the DEVKIT_*
+    variables they set (policy.devkit_env) that differ from devkit's. A project's or local settings are refused when
+    their text sets any DEVKIT_* variable, or a disableAllHooks that is not false (policy.hooks_off). The text is read
+    as Claude Code reads it, a byte that is not UTF-8 replaced; a file whose text devkit then fails to read, or a
+    failure of devkit's own configuration, is refused too: a hook that crashed would let the change pass."""
+    from . import audit, policy
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        if project:  # gone or unreadable: no agent reads it either
+            return
+        _refuse_unread_user(path, f"it does not open: {type(e).__name__}", "")
+    why = _unreadable_why(raw)
+    try:
+        have = policy.devkit_env(raw.decode("utf-8", "replace"))
+    except Exception as e:  # what it sets is unknown: a hook that crashed would let the change pass
+        _log(f"config-change blocked, settings devkit cannot read: {type(e).__name__}")
+        audit.record("config.blocked", path, "unreadable", "blocked")
+        print(f"devkit cannot read {tilde(path)} ({why}), so it cannot tell whether it sets devkit's DEVKIT_* "
+              f"variables, which say who calls devkit and where its state lives: refused the change. Make the file "
+              f"plain JSON.", file=sys.stderr)
+        sys.exit(2)
+    if not project:
+        try:
+            want = {p[1]: json.dumps(v) for p, v in policy.claude_desired()[0].items()
+                    if len(p) == 2 and p[0] == "env" and str(p[1]).startswith("DEVKIT_")}
+        except Exception as e:  # devkit's own configuration, not the file: still refused, the keys left unnamed
+            _log(f"config-change blocked, devkit's configuration failed: {type(e).__name__}")
+            _refuse_unread_user(path, why, f" devkit's own configuration also failed to load ({type(e).__name__}): "
+                                           f"run dev doctor.")
+        keys = ", ".join(f"env.{k}" for k in sorted(k for k, v in have.items() if want.get(k) != v))
+        _refuse_unread_user(path, why, f" It sets devkit's DEVKIT_* variables {keys}: remove them." if keys else "",
+                            keys)
+    keys = ", ".join(f"env.{k}" for k in sorted(have))
+    off = policy.hooks_off(raw.decode("utf-8", "replace"))
+    if not keys and off is None:
+        return
+    _log(f"config-change blocked, settings devkit cannot parse: {keys or 'disableAllHooks'}")
+    audit.record("config.blocked", path, ", ".join(k for k in ("disableAllHooks" if off is not None else "", keys) if k),
+                 "blocked")
+    said = [f"devkit cannot parse {tilde(path)} ({why})."]
+    if keys:
+        said.append(f"It sets devkit's DEVKIT_* variables, which say who calls devkit and where its state lives: "
+                    f"refused {keys}. Remove them from the file; change devkit's configuration with dev config.")
+    if off is not None:
+        said.append(_hooks_off_refusal(path, off))
+    print(" ".join(said), file=sys.stderr)
+    sys.exit(2)
+
+
+def _refuse_unread_user(path: str, why: str, more: str, keys: str = ""):
+    """Refuse a change to the user settings devkit cannot read (_refuse_unreadable): exit 2, recorded with the DEVKIT_*
+    keys it names, or as unreadable."""
+    from . import audit
+    _log(f"config-change blocked, user settings devkit cannot read: {keys or why}")
+    audit.record("config.blocked", path, keys or "unreadable", "blocked")
+    print(f"devkit cannot read {tilde(path)} ({why}), so it cannot check the settings devkit manages there: refused "
+          f"the change. Make the file plain JSON (UTF-8, nested at most {core.JSON_MAX_DEPTH} levels).{more}",
           file=sys.stderr)
     sys.exit(2)
 
 
 def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (set,
-    changed or removed), put back to devkit's values in the file. [] when none differ. `managed`: the user
-    settings, where devkit manages some; a project's settings get none. A copy older than the pinned release reports
-    the user settings' variables but writes nothing: its values may be the older ones (the pinned release repairs).
-    A project's settings get every DEVKIT_* variable removed by any copy: that holds in every release."""
+    changed or removed), put back to devkit's values in the file (_devkit_env_fix). [] when none differ."""
+    changed, fixed = _devkit_env_fix(path, settings, managed)
+    if fixed is not None:
+        core.replace_text(path, fixed)  # its own temporary name: sessions start at once
+    return changed
+
+
+def _devkit_env_fix(path: str, settings: dict, managed: bool = True) -> tuple:
+    """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (set, changed or
+    removed), and the file's text with devkit's values put back, or None when it is not to be written. `managed`: the
+    user settings, where devkit manages some; a project's settings get none. A copy older than the pinned release
+    reports the user settings' variables but writes nothing: its values may be the older ones (the pinned release
+    repairs). A project's settings get every DEVKIT_* variable removed by any copy: that holds in every release.
+    -> (variables, text or None)."""
     from . import policy
     flat = policy.claude_desired()[0] if managed else {}
     want = {p[1]: json.dumps(v) for p, v in flat.items() if len(p) == 2 and p[0] == "env"
@@ -1434,15 +1659,15 @@ def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     try:
         have = policy.devkit_env(Path(path).read_text())
     except OSError:
-        return []
+        return [], None
     changed = sorted(k for k in set(want) | set(have) if want.get(k) != have.get(k))
-    if changed and (not managed or not core.older_copy()):
-        env = {k: v for k, v in (settings.get("env") or {}).items() if not str(k).startswith("DEVKIT_")}
-        settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
-        if not settings["env"]:
-            settings.pop("env")
-        core.replace_text(path, json.dumps(settings, indent=2) + "\n")  # its own temporary name: sessions start at once
-    return changed
+    if not changed or (managed and core.older_copy()):
+        return changed, None
+    env = {k: v for k, v in (settings.get("env") or {}).items() if not str(k).startswith("DEVKIT_")}
+    settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
+    if not settings["env"]:
+        settings.pop("env")
+    return changed, json.dumps(settings, indent=2, allow_nan=False) + "\n"  # Node reads no NaN or Infinity
 
 
 def instructions_loaded(agent: str):
@@ -1462,6 +1687,11 @@ def session_end(agent: str):
     _continuity("on_session_end", agent, data)  # /clear: the clear link, and the old checkpoint's prompts go
     _lessons_end(data, "main")  # what the session was shown and did not hit again was heeded, in any of its turns
     if sid:
+        try:  # its open calls end with it, before the sync removes the session's record
+            from . import identity
+            identity.end_session(agent, str(sid))
+        except Exception as e:
+            _swallowed("session-end", e)
         _spawn_sync(["--session", f"{agent}:{sid}", "--finish"])
 
 
@@ -1519,10 +1749,11 @@ def _reconcile(agent: str, data: dict):
         _log(f"reconcile {agent}: {traceback.format_exc()[-300:]}")
 
 
-def _close_call(data: dict):
+def _close_call(data: dict, failed: bool = False):
     """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused). An edit
     call in flight that failed or was refused writes nothing, so its record goes; one that ran gives way to the
-    record of its result at the end of its PostToolUse (progress.note_edit)."""
+    record of its result at the end of its PostToolUse (progress.note_edit). `failed`: the call failed though its
+    event is PostToolUse (a Codex command, which has no PostToolUseFailure)."""
     if data.get("tool_name") in ("Write", "Edit", "MultiEdit") and data.get("hook_event_name") != "PostToolUse":
         try:
             from . import progress
@@ -1533,12 +1764,24 @@ def _close_call(data: dict):
         try:
             from . import identity, progress
             entry = progress.call_entry(data)
+            # a call that got no result (refused, failed) is told apart for the text pin's audit and order rule
+            ended = "failed" if failed else {"PostToolUse": "", "PreToolUse": "refused",
+                                             "PermissionDenied": "denied"}.get(str(data.get("hook_event_name")), "failed")
+            if data.get("tool_name") in SHELL_TOOLS and data.get("hook_event_name") not in ("PreToolUse",
+                                                                                          "PermissionDenied"):
+                identity.keep_background(entry)  # a background call closes as it starts: kept for its reads
+            # its contest mark, read while its ledger entry still keeps a sweep off the flag: a call refused or denied
+            # leaves no record of closed calls, so a sweep after the close may take a flag past its grace period
+            mark = identity._contest_mark(entry) if data.get("tool_name") in SHELL_TOOLS else ""
             if data.get("tool_name") in SHELL_TOOLS or entry.get("agent") == "codex":
-                progress.call_closed(data)
+                progress.call_closed(data, ended=ended)
+            if data.get("tool_name") in SHELL_TOOLS:  # again: a contest made while the close waited on its record
+                mark = mark or identity._contest_mark(entry)
             if data.get("tool_name") in SHELL_TOOLS and entry.get("agent") and data.get("tool_use_id"):
-                _pin_audits(entry, data)
+                _pin_audits(entry, data, mark)
                 # its token dies with it: its pin and use mark go, and the session record lists the call as closed
-                identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]))
+                identity.note_closed(entry["agent"], str(data.get("session_id") or ""), str(data["tool_use_id"]),
+                                     entry=entry, ended=ended)
         except Exception:
             _log(f"ledger close: {traceback.format_exc()[-300:]}")
 
@@ -1546,20 +1789,20 @@ def _close_call(data: dict):
 PIN_LATE_S = 30  # seconds after its call opened past which a pin's birth means someone wrote it again
 
 
-def _pin_audits(entry: dict, data: dict):
+def _pin_audits(entry: dict, data: dict, mark: str):
     """When a stamped call ends: what its pin shows, as audit records (flagged; the uses themselves were judged when
-    they happened). calls.pin-contested: another process wrote the pin first. calls.pin-late: the pin was born more
-    than PIN_LATE_S after the call opened. calls.pin-replaced: its inode is not the one its first verified use saw.
-    caller.token-unexplained-use: the tech lead's call runs no dev command, yet a dev command resolved its token
-    (a script run by path may explain it)."""
+    they happened). calls.pin-contested: another process wrote the pin first, or the call is marked contested in the
+    ledger (`mark`, identity._contest_mark read before the call left the ledger and again after;
+    identity.audit_contested). calls.pin-late: the pin was born more than PIN_LATE_S after the call opened.
+    calls.pin-replaced: its inode is not the one its first verified use saw. caller.token-unexplained-use: the tech
+    lead's call runs no dev command, yet a dev command resolved its token (a script run by path may explain it)."""
     from . import identity, shellparse
     if data.get("hook_event_name") == "PreToolUse" or not entry.get("pin"):
         return
     pin, tid, sid = Path(str(entry["pin"])), str(data.get("tool_use_id") or ""), str(data.get("session_id") or "")
     used = identity._read_used(sid, tid)
     found = []
-    if os.path.lexists(f"{pin}.contested"):
-        found.append(("calls.pin-contested", "another process wrote this call's pin before its shell did"))
+    identity.audit_contested(entry, sid, tid, mark)  # its pin's marker, or its contest flag in the ledger
     try:
         st = os.stat(pin)
         born = getattr(st, "st_birthtime", st.st_ctime)
@@ -1570,7 +1813,9 @@ def _pin_audits(entry: dict, data: dict):
             found.append(("calls.pin-replaced", "its pin is not the file its first verified use saw"))
     except OSError:
         pass
-    if identity.used_path(sid, tid).exists() and str(entry.get("caller") or "main") == "main":
+    # the use mark is looked up in the session's folder opened without following a link (identity._in_ledger): a
+    # folder that is a link never answers for a mark where it points
+    if identity._in_ledger(sid, identity.used_path("-", tid).name) and str(entry.get("caller") or "main") == "main":
         try:
             runs = [shellparse.dev_args(a) for a, _ in shellparse.shell_calls(str(entry.get("cmd") or ""), None) or []]
         except Exception:
@@ -1722,19 +1967,90 @@ def _stamped_token(agent: str, data: dict, new, token: str, digest: str):
     except OSError:
         _token_skipped(agent, data, "its pin folder could not be made")
         return None
-    # the call's pin, who writes it, and the process that starts the agent's calls (the agent, or its launcher)
-    progress.call_note(data, pin=pin, pin_by=by, **({"launcher_pid": os.getppid()} if launched else {}))
+    # the call's pin, who writes it, the process that starts the agent's calls (the agent, or its launcher), and a
+    # background call as such (its record is kept for its reads and waits once it closes, identity.keep_background)
+    background = _background_call(data)
+    progress.call_note(data, pin=pin, pin_by=by, **({"launcher_pid": os.getppid()} if launched else {}),
+                       **({"background": True} if background else {}))
     entry = progress.call_entry(data)
     ttl = identity.codex_ttl(data.get("tool_input")) if agent == "codex" else None
     if not hmac.compare_digest(str(entry.get("token_sha256") or ""), digest) or \
             ttl is not None and entry.get("ttl") != ttl or agent == "claude" and entry.get("host_thread", "") != host \
-            or entry.get("pin") != pin or entry.get("pin_by") != by:
+            or entry.get("pin") != pin or entry.get("pin_by") != by or bool(entry.get("background")) != background:
         _token_skipped(agent, data, "its call ledger entry does not hold the token")
         return None
     if not identity.note_opened(agent, sid, tid, every=_unasked(agent, data) and _sh_family(agent, data)):
         _token_skipped(agent, data, "the session record is busy")
         return None
     return tokened
+
+
+def _text_pinnable(agent: str, data: dict) -> bool:
+    """Does this shell call go out exactly as the agent wrote it, its dev command named by the text pin
+    (identity._text_verdict)? Where the agent checks the developer's permission rules on the command it runs (not
+    _unasked), on sh, bash or zsh, for one dev call of plain words with nothing in front (_bare_dev_call): the host
+    then judges that very text, so an allow rule such as Bash(dev progress:*) matches it, and devkit changes nothing
+    the host judges. On Codex, only when Codex would not apply devkit's rewrite (_pre_tool)."""
+    if data.get("tool_name") not in SHELL_TOOLS or _unasked(agent, data) or not _sh_family(agent, data):
+        return False
+    cmds = _shell_inputs(data)
+    return len(cmds) == 1 and bool(cmds[0][0]) and _bare_dev_call(cmds[0][1])
+
+
+def _bare_dev_call(cmd: str) -> bool:
+    """One dev call made only of plain words (_PLAIN_WORD), `dev` first as the shell finds it on PATH, unquoted, and
+    nothing in front: no variable, no path, no separator, redirection, newline or word a shell expands."""
+    if not isinstance(cmd, str):
+        return False
+    words, at = [], 0
+    while True:
+        m = _PLAIN_WORD.match(cmd, at)
+        if not m:
+            break
+        words.append(m.group(1))
+        at = m.end()
+    return not cmd[at:].strip(" \t") and len(words) > 1 and words[0] == "dev"
+
+
+def _background_call(data: dict) -> bool:
+    """Does this shell call run in the background (Bash's run_in_background, or a Monitor), so its call closes as soon
+    as it starts?"""
+    inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    return inp.get("run_in_background") is True or data.get("tool_name") == "Monitor"
+
+
+def _text_call(agent: str, data: dict):
+    """Record a call that goes out as written for the text pin: its entry names its pin (pin_by "text"), the loop
+    that launches the agent's calls when the agent's hook runs below one, a background call as such, and on Claude
+    Code the Codex thread it carries; the session record lists it as opened. A failure is audited
+    (calls.token-skipped) and still marks the session as one whose calls are named by kernel facts
+    (identity.note_opened): its dev command then falls to the ledger's rules, and a state change is refused."""
+    from . import identity, progress
+    sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
+    owner = progress.call_entry(data).get("agent_pid")
+    launched = isinstance(owner, int) and _hook_launched_by(owner)
+    if isinstance(owner, int) and not launched:
+        progress.call_note(data, agent_pid=None)  # an agent further up started what runs this hook, not the hook
+    try:
+        identity.make_pin_folder(sid)
+    except OSError:
+        _token_skipped(agent, data, "its pin folder could not be made")
+        identity.note_opened(agent, sid)  # still a session whose calls are named by kernel facts, never by text alone
+        return
+    background = _background_call(data)
+    host = (os.environ.get(identity.THREAD_VAR) or "").strip()[:80] if agent == "claude" else ""
+    fields = {"pin": str(identity.pin_path(sid, tid)), "pin_by": "text",
+              **({"launcher_pid": os.getppid()} if launched else {}), **({"background": True} if background else {}),
+              **({"host_thread": host} if host else {})}
+    progress.call_note(data, **fields)
+    entry = progress.call_entry(data)
+    if any(entry.get(k) != v for k, v in fields.items()):
+        _token_skipped(agent, data, "its call ledger entry does not hold its pin")
+        identity.note_opened(agent, sid)
+        return
+    if not identity.note_opened(agent, sid, tid):
+        _token_skipped(agent, data, "the session record is busy")
+        identity.note_opened(agent, sid)
 
 
 def _identity_strip_advice(agent: str, data: dict) -> list:
@@ -1827,8 +2143,8 @@ def _codex_may_rewrite(data: dict, updated: dict) -> bool:
 
 
 def _member_folder(run: dict, aid: str) -> str:
-    """The id of the crew member whose scratch folder (scratchpad/<id>/) a lane writes in: its member's, for a helper
-    the member that launched it; the agent id when the lane names no member."""
+    """The id of the crew member a lane writes scratch files for (its folders are progress.lane_scratch's): its
+    member's, for a helper the member that launched it; the agent id when the lane names no member."""
     try:
         from . import crew, progress
         chain = progress.lane_chain(run, aid) or [aid]
@@ -2240,7 +2556,7 @@ def codex_rollout(transcript) -> tuple:
         if b'"CommandExecution"' not in ln:
             continue
         try:
-            rec = json.loads(ln)
+            rec = core.load_json(ln)
         except ValueError:
             continue
         p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
@@ -2256,7 +2572,7 @@ def codex_rollout(transcript) -> tuple:
 def _item_record(line: bytes) -> bool:
     """Is a rollout line an item record (event_msg item_completed) that Codex wrote itself?"""
     try:
-        rec = json.loads(line)
+        rec = core.load_json(line)
     except ValueError:
         return False
     p = rec.get("payload") if isinstance(rec, dict) and isinstance(rec.get("payload"), dict) else {}
@@ -2266,7 +2582,7 @@ def _item_record(line: bytes) -> bool:
 def _codex_version(line: bytes) -> tuple:
     """The Codex CLI version a rollout's first record (its session_meta) names, as numbers; () when it names none."""
     try:
-        rec = json.loads(line)
+        rec = core.load_json(line)
     except ValueError:
         return ()
     meta = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "session_meta" else None
@@ -2431,7 +2747,8 @@ def _codex_thread_mismatch(agent: str, data: dict, item):
     from . import identity, progress
     sid, tid = str(data.get("session_id") or ""), str(data.get("tool_use_id") or "")
     thread = str((item or {}).get("thread_id") or "") if isinstance(item, dict) else ""
-    if agent != "codex" or not thread or not sid or not tid or not identity.used_path(sid, tid).exists():
+    if (agent != "codex" or not thread or not sid or not tid
+            or not identity._in_ledger(sid, identity.used_path("-", tid).name)):  # never through a linked folder
         return
     caller = str(progress.call_entry(data).get("caller") or "main")[:80]
     if thread in ((sid,) if caller == "main" else (caller, sid)):
@@ -3311,7 +3628,7 @@ def _pre_tool(agent: str, data: dict):
                     if launch.get("why"):
                         from . import codexlaunch
                         codexlaunch.mark_over_limit(agent, data, launch)
-            progress.bind(agent, data)
+            _bind_member(agent, data)
         except Exception:
             _log(f"pre-tool bind {agent}: {traceback.format_exc()[-300:]}")
     token = digest = ""  # the call token this shell call gets, and its nonce's hash in the ledger entry
@@ -3353,16 +3670,33 @@ def _pre_tool(agent: str, data: dict):
         except Exception:
             _log(f"pre-tool edit ledger {agent}: {traceback.format_exc()[-300:]}")
     held = []  # the routing steps whose rewrite Codex's gate turned down (_routed)
-    routed = _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent), held)
-    stamped = None if routed else _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
-    unroutable = [] if routed or stamped else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
+    # a plain dev call where the agent checks the developer's rules goes out as written (_text_pinnable): Claude Code
+    # judges the text the agent wrote, and Codex applies no rewrite it would ask about
+    text = bool(token) and _text_pinnable(agent, data)
+    routed = None if text and agent != "codex" else \
+        _routed(agent, "lane", data, lambda: _route_subagent_progress(data, agent), held)
+    stamped = None if routed or text and agent != "codex" else \
+        _routed(agent, "speaker", data, lambda: _speaker_route(data, agent), held)
+    text = text and not (routed or stamped)
+    unroutable = [] if routed or stamped or text else [UNROUTED_LANE_CALL] if held and data.get("agent_id") else \
         _advice(agent, "crew-lane", lambda: _unroutable_lane_advice(agent, data))
     advice += unroutable + _advice(agent, "identity", lambda: _identity_strip_advice(agent, data))
     for line in advice:
         _log(f"pre-tool {agent} advice: {line[:160]}")
     _post_codex_advice(agent, data, advice, bool(unroutable))
     final = None
-    if tool in SHELL_TOOLS:
+    if tool in SHELL_TOOLS and text:
+        try:
+            _text_call(agent, data)
+        except Exception as e:  # the call goes out as written; its dev command then has no text pin
+            _log(f"pre-tool text pin {agent}: {traceback.format_exc()[-300:]}")
+            _token_skipped(agent, data, f"its text pin failed ({type(e).__name__}: {e})")
+            try:  # still a session whose calls are named by kernel facts: its state change is refused, never by text
+                from . import identity
+                identity.note_opened(agent, str(data.get("session_id") or ""))
+            except Exception as e2:
+                _swallowed("pre-tool", e2)
+    elif tool in SHELL_TOOLS:
         try:
             final = _stamped_token(agent, data, routed or stamped, token, digest)
         except Exception as e:  # the call goes out without its token, never without its route, advice and lessons
@@ -4052,10 +4386,9 @@ def post_tool_payload(agent: str, data: dict):
     _reconcile(agent, data)
     _prompt_refresh(data)
     try:
-        if data.get("tool_name") in ("Agent", "Task"):  # the launch names the agent it started: an exact binding
-            progress.launch_result(agent, data)
+        _bind_launch(agent, data)
         if data.get("agent_id"):
-            progress.bind(agent, data)
+            _bind_member(agent, data)
     except Exception:
         _log(f"post-tool bind {agent}: {traceback.format_exc()[-300:]}")
     # main: a compaction only the transcript shows (its brief) or "Not in the summary"; a member: its reminder after
@@ -4120,6 +4453,14 @@ def post_tool_failure(agent: str):
     _tool_failed(agent, _without_token(_stdin_json()), "PostToolUseFailure")
 
 
+def permission_denied(agent: str):
+    """PermissionDenied: the host refused a call at its permission check (Claude Code: a call its auto mode refused;
+    a denial at the prompt fires no hook). The call never runs: it leaves the call ledger as denied, so the same
+    command run again is the only call that types it, and a state change that already ran under its name is audited
+    (identity.note_closed, calls.text-use-without-result)."""
+    _close_call(_without_token(_stdin_json()))
+
+
 def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     """A tool call that failed: PostToolUseFailure, or the PostToolUse of a Codex command whose rollout record shows
     it failed (_codex_call). `event`: the hook event the context goes back under; `before`: context that goes first
@@ -4127,7 +4468,7 @@ def _tool_failed(agent: str, data: dict, event: str, before: str = ""):
     from . import progress
     _check_writes(agent, data)  # a call that failed may have written too
     _note_plan_writes(agent, data, failed=True)
-    _close_call(data)
+    _close_call(data, failed=True)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
     keys = ("", "")
@@ -4193,16 +4534,14 @@ def _codex_member_context(agent: str, data: dict, launch: dict) -> str:
         return ""
 
 
-def _claude_tmp() -> Path:
-    """Where Claude Code keeps its per-session folders, scratchpads among them."""
-    return Path("/tmp") / f"claude-{os.getuid()}"
-
-
 def _make_scratch_folder(agent: str, data: dict):
-    """Creates a crew member's own folder in the session scratchpad, scratchpad/<member id>/, when its lane opens: the
-    brief names it, and the member keeps its temporary files there. Codex folders use their trusted registration
-    (codexlaunch). Claude uses only the scratchpad its host
-    made (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad); a helper naming no member gets nothing."""
+    """Creates a crew lane's own folder in the session scratchpad (progress.lane_scratch): scratchpad/<member id>-<step>/
+    for a lane that runs a plan step, the member's plain scratchpad/<member id>/ for one that runs none, such as a
+    lane that still waits for its launch at SubagentStart; the brief names it, and the member keeps its temporary
+    files there. The lane makes it again once it binds and so knows its step (_bind_launch, _bind_member). Codex
+    folders use their trusted registration (codexlaunch). Claude uses only the scratchpad its host made
+    (progress.session_scratchpad, from the event's transcript); a helper naming no member gets nothing.
+    -> the folder's path, or None."""
     try:
         if agent == "codex":
             from . import codexlaunch
@@ -4216,16 +4555,57 @@ def _make_scratch_folder(agent: str, data: dict):
         transcript = str(data.get("transcript_path") or "")
         if agent != "claude" or not (sid and aid and transcript):
             return
-        pad = _claude_tmp() / Path(transcript).parent.name / sid / "scratchpad"
-        if not pad.is_dir():
-            return
         from . import progress
-        run = progress.load_run(agent, sid) or {}
-        member = _member_folder(run, aid)
-        if member and member != aid and re.fullmatch(r"[a-z0-9][a-z0-9-]*", member):
-            (pad / member).mkdir(exist_ok=True)
+        pad = progress.session_scratchpad(agent, sid, transcript=transcript)
+        if not pad or not os.path.isdir(pad):
+            return
+        pad = Path(pad)
+        names = progress.lane_scratch(progress.load_run(agent, sid) or {}, aid)
+        if names:
+            (pad / names[0]).mkdir(exist_ok=True)
+            return str(pad / names[0])
     except Exception:
         _log(f"scratch folder {agent}: {traceback.format_exc()[-300:]}")
+
+
+def _bind_launch(agent: str, data: dict):
+    """The tech lead's PostToolUse of a subagent launch: its result names the agent it started, an exact binding
+    (progress.launch_result). The lane now knows its step, so it gets its scratch folder for it."""
+    if data.get("tool_name") not in ("Agent", "Task"):
+        return
+    from . import progress
+    aid = progress.launch_result(agent, data)
+    if aid:
+        _make_scratch_folder(agent, dict(data, agent_id=aid))
+
+
+def _bind_member(agent: str, data: dict):
+    """A crew member's own hook binds it to its launch when nothing did yet (progress.bind); a lane that binds now
+    knows its step, so it gets its scratch folder for it, and so does a lane another step joined since its folder
+    was made (_scratch_folder_due)."""
+    from . import progress
+    if progress.bind(agent, data) or _scratch_folder_due(agent, data):
+        _make_scratch_folder(agent, data)
+
+
+def _scratch_folder_due(agent: str, data: dict) -> bool:
+    """True when the folder of the step a crew lane runs now (progress.lane_scratch's first) is not in the session
+    scratchpad yet while the scratchpad is: a step joined the lane after its launch's folder was made. One read of
+    the run and a look at one folder; the folder itself comes from _make_scratch_folder, by the rule that made the
+    first."""
+    try:
+        from . import progress
+        sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
+        run, lane = progress.lane_of(agent, sid or "-", aid)
+        names = progress.lane_scratch(run, aid) if lane else []
+        if len(names) < 2:  # no step: the member's plain folder, made at the lane's start
+            return False
+        transcript = str(data.get("transcript_path") or "") if agent == "claude" else None
+        pad = progress.session_scratchpad(agent, sid, transcript=transcript)
+        return bool(pad) and os.path.isdir(pad) and not os.path.isdir(os.path.join(pad, names[0]))
+    except Exception:
+        _log(f"scratch folder due {agent}: {traceback.format_exc()[-300:]}")
+        return False
 
 
 def _launch_meta(data: dict) -> dict:
@@ -4523,7 +4903,7 @@ HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session
             "guard": pre_tool, "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
             "post-tool": post_tool, "post-tool-failure": post_tool_failure, "subagent-start": subagent_start,
             "subagent-stop": subagent_stop, "statusline": statusline, "pre-compact": pre_compact,
-            "post-compact": post_compact}
+            "post-compact": post_compact, "permission-denied": permission_denied}
 
 
 # --------------------------------------------------------------------------- payload capture
@@ -4542,19 +4922,22 @@ def capture_enabled() -> bool:
     return os.environ.get("DEVKIT_HOOK_CAPTURE", "").strip() == "1"
 
 
-def _scrub(value, cut: bool, key: str = ""):
-    """A payload value with tokens removed; strings under a secret-looking key dropped whole; strings under the
-    CAPTURE_CUT_KEYS cut to CAPTURE_CUT characters."""
+def _scrub(value, cut: bool, key: str = "", rules=None):
+    """A payload value with tokens removed (audit.hide_secrets: the built-in rules and audit.redact.extra, this Mac's
+    and the team's; each string as its length while those cannot load); strings under a secret-looking key dropped
+    whole; strings under the CAPTURE_CUT_KEYS cut to CAPTURE_CUT characters. `rules`: audit.screen_rules(), read once
+    per payload."""
+    from . import audit
+    rules = audit.screen_rules() if rules is None else rules
     if isinstance(value, str):
         if _CAPTURE_SECRET_KEY.search(key):
             return "[redacted]"
-        from .audit import SECRET
-        s = _CAPTURE_TOKEN.sub("[redacted]", SECRET.sub("[redacted]", value))
+        s = _CAPTURE_TOKEN.sub("[redacted]", audit.hide_secrets(value, "[redacted]", rules))
         return s[:CAPTURE_CUT] + "…" if cut and len(s) > CAPTURE_CUT else s
     if isinstance(value, dict):
-        return {k: _scrub(v, cut or k in CAPTURE_CUT_KEYS, str(k)) for k, v in value.items()}
+        return {k: _scrub(v, cut or k in CAPTURE_CUT_KEYS, str(k), rules) for k, v in value.items()}
     if isinstance(value, list):
-        return [_scrub(v, cut, key) for v in value]
+        return [_scrub(v, cut, key, rules) for v in value]
     return value
 
 
@@ -4595,7 +4978,7 @@ def _capture_stdin(event: str, agent: str):
         raw = sys.stdin.read()
         sys.stdin = io.StringIO(raw)
         try:
-            data = json.loads(raw) if raw.strip() else {}
+            data = core.load_json(raw) if raw.strip() else {}
         except ValueError:
             data = {"unparsed": raw[:CAPTURE_CUT]}
         capture(event, agent, data)
@@ -4619,7 +5002,10 @@ def run(event: str, agent: str) -> int:
     from . import audit, watch
     with audit.hook_identity(), watch.context_notifications():
         try:
-            (STATE / "logs").mkdir(parents=True, exist_ok=True)
+            try:
+                (STATE / "logs").mkdir(parents=True, exist_ok=True)
+            except OSError:  # logs that do not open stop no handler: each log write goes on without its line
+                pass
             saved = _own_identity(event, agent)  # inside the try: a hook with no stdin fails open like any other error
             fn(agent)
         except SystemExit:
@@ -4648,7 +5034,7 @@ def _own_identity(event: str, agent: str) -> dict:
     try:
         raw = sys.stdin.read()
         sys.stdin = io.StringIO(raw)
-        payload = json.loads(raw) if raw.strip() else {}
+        payload = core.load_json(raw) if raw.strip() else {}
         sid = str(payload.get("session_id") or "") if isinstance(payload, dict) else ""
     except (OSError, ValueError, TypeError):
         sid = ""

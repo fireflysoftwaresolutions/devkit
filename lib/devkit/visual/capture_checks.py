@@ -185,7 +185,7 @@ def _one(project: str, c: dict, only, remote: bool, cwd) -> dict:
                                 "screen with dev visual capture <url>, then check that capture.")
     held = store.description(project, c)
     if held is None:
-        raise store.VisualError(f"The description of {cid} is not on this Mac, so devkit cannot tell whether the page "
+        raise store.VisualError(f"{store.not_here(c, 'description')}, so devkit cannot tell whether the page "
                                 "still lays out as its picture shows. Nothing was changed. Capture it again here, with "
                                 f"its own signals: dev visual capture --again {cid}")
     rec, desc = _probe(project, cid, remote, cwd)

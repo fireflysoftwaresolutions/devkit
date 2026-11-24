@@ -36,7 +36,7 @@ SELF = "dev impeccable"
 SETTINGS = {"IMPECCABLE_NO_UPDATE_CHECK": "1", "IMPECCABLE_NO_TELEMETRY": "1"}
 
 
-class Refused(Exception):
+class Refused(core.Refusal):
     """Why `dev impeccable` does not run the engine."""
 
 

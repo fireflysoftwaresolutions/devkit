@@ -51,6 +51,13 @@ saved key devkit does not read, such as one an older version allowed or one writ
 configuration invalid. After an upgrade, run `dev config validate`: it lists such keys, and `dev config edit`
 removes them. Each unknown key is named with that
 command, for example `unknown key legacy_root: devkit does not read it; remove it with dev config edit`.
+Every command names a key only when it is a short word of letters and underscores (at most 24 characters) that no
+secret rule or redaction pattern matches; any other key, such as a token pasted as a key, is named by its length and
+where it is: `unknown key of 40 characters in progress`.
+The same rule holds for a name you choose inside a path, such as a job's or a Codex profile's name:
+`jobs.<key of 21 characters>.cmd is required for a custom job`. An error never quotes a value; it names the
+value's type and length, and lists the allowed words when there are some:
+`work.mode must be one of auto, guided (got a string of 40 characters)`.
 `dev install`, `dev update`, and `dev doctor` name the unknown keys and go on. An unknown key does not block other changes:
 `dev config set`, `dev jobs`, and the other writers save a change as long as they leave every unknown key as it
 was. A wrong value of a known key, such as `work.mode: banana`, still blocks every writer until you repair it.
@@ -303,6 +310,12 @@ critical path first, then your latest request, then the oldest; a launch out of 
 `dev crew next --first "<step>" --why "…"`. Change these keys with `dev config set`, which validates and audits
 the update.
 
+### Tests
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `test.listing` | `false` | `true`: every `dev test` run finds the files that hold tests by the runners' own listings (pytest `--collect-only`, unittest discovery, `vitest list`, `playwright --list`), cached until the runner, its configuration, or the test files change, as `dev test --listed` does for one run. A listing that fails or takes over 5 minutes leaves the file rules to decide. Set it with `dev config set test.listing true`; see [Testing](testing.md) |
+
 ### Visual diagnosis
 
 | Key | Default | Meaning |
@@ -511,7 +524,10 @@ To update a third-party skill, review the upstream change, put the new full comm
 `dev doctor`'s **pinned npm packages** row checks each pinned package of your stacks: installed at its pinned
 version, and, for `@playwright/cli`, the playwright-core inside it at the exact version the CLI's own `package.json`
 names. When the row fails, run the npm command it prints, for example
-`npm install -g --ignore-scripts @playwright/cli@0.1.24`, then `dev doctor` again. To move a pin,
-change its version in `config/npm-globals.txt` in a branch: `dev doctor` then prints the command that installs it.
+`npm install -g --ignore-scripts @playwright/cli@0.1.24`, then `dev doctor` again. When it says
+`npm root -g gave no folder`, npm failed, did not answer in time, or printed nothing on both of its tries (15 s each),
+so the row could not check the pins: check that `npm root -g` prints a folder here, then run `dev doctor` again. To
+move a pin, change its version in `config/npm-globals.txt` in a branch: `dev doctor` then prints the command that
+installs it.
 
 See also [Agents](agents.md), [Skills and plugins](skills-and-plugins.md), and [Models and tokens](models-and-tokens.md).

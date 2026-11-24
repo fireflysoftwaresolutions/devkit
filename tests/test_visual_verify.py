@@ -12,6 +12,7 @@
 # or the pinned Playwright and its Chromium, the tests skip and say which is missing.
 # Tests carry comments, not docstrings: `dev test prove` leaves out tests with a docstring.
 # Run: python3 -m unittest tests.test_visual_verify
+import calendar
 import contextlib
 import hashlib
 import io
@@ -37,7 +38,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import cli  # noqa: E402
+from devkit import cli, identity  # noqa: E402
 from devkit.visual import commands, compare, store  # noqa: E402
 from devkit.visual import map as vmap  # noqa: E402
 import test_visual_store as base  # noqa: E402
@@ -329,6 +330,170 @@ class AnchorTest(VerifyCase):
         doc = self.record(f["id"])
         self.assertEqual((out["result"], doc["status"], doc["verification"]["accepted_by"]),
                          ("accepted", "verified", "devuser"))
+
+
+class BeforeElsewhereTest(VerifyCase):
+    # The finding's capture was taken on another Mac (m-studio01): its record synced here, its picture and
+    # description stayed there. verify captures the recipe again here and lets the check decide on the new capture;
+    # with no picture before, nothing is compared, and the record and the outcome say so. The record names the Mac by
+    # its machine id; the line a person reads names it as the dashboard does.
+    def elsewhere(self, c):
+        rec = self.record(c["id"])
+        rec["by"]["host"], rec["image"]["where"] = "m-studio01", "local:m-studio01"
+        store.save(P, rec)
+        (self.local / "blobs" / f"{c['image']['sha256']}.png").unlink()
+        (self.local / "desc" / f"{c['description']['sha256']}.json.gz").unlink()
+
+    def test_a_check_finding_whose_picture_before_is_on_another_mac_is_verified_on_a_new_capture(self):
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        self.elsewhere(before)
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        v = doc["verification"]
+        self.assertEqual((out["result"], doc["status"], v["check"], v["error"]), ("pass", "verified", "pass", None), out["message"])
+        self.assertEqual(self.record(v["capture"])["again_of"], before["id"])
+        self.assertEqual((v["compared"], v["inside"], v["outside"], v["diff"]), (False, None, None, None))
+        self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {v['capture']} · nothing compared: the "
+                                                    "picture before was taken on m-studio01 and is not on this Mac")
+        self.assertEqual(out["message"], f"{f['id']}  verified · overlap no longer fires on {v['capture']} · nothing "
+                                         "compared: the picture before was taken on another Mac (m-studio01) and is "
+                                         "not on this Mac")
+
+    # Export moved and renamed, still over Amount: a page that changed (an unchanged one writes the same picture
+    # back, which is then here to compare) where the check still fires
+    def test_a_check_finding_whose_picture_before_is_elsewhere_reopens_when_the_check_still_fires(self):
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        self.elsewhere(before)
+        self.page.write_text(MOVED_EXPORT)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        self.assertEqual((out["result"], doc["status"], doc["verification"]["compared"]), ("fail", "reopened", False))
+
+    # a capture from before the machine id names its Mac by hostname: the line a person reads may show it, the
+    # history, which syncs to the handoff repository, never takes it
+    def test_the_history_never_takes_a_hostname_from_an_older_capture_before(self):
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        self.elsewhere(before)
+        rec = self.record(before["id"])
+        rec["by"]["host"], rec["image"]["where"] = "bobs-macbook", "local:bobs-macbook"
+        store.save(P, rec)
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {doc['verification']['capture']} · "
+                                                    "nothing compared: the picture before was taken on another Mac and "
+                                                    "is not on this Mac")
+        self.assertNotIn("bobs-macbook", (self.records / "findings" / f"{f['id']}.json").read_text())
+        self.assertIn("taken on bobs-macbook and is not on this Mac", out["message"])
+
+    # judgment decides no fix by itself: with the picture before elsewhere, the reviewer looks at the new capture and
+    # accepts it with a reason, the command the outcome names
+    def test_a_judgment_finding_whose_picture_before_is_elsewhere_names_accept_and_accept_verifies_it(self):
+        before = self.shot()
+        f = self.fixed(store.add_finding(P, before["id"], region=[16, 80, 300, 60], pass_="hierarchy",
+                                         rules=["nielsen:8"], severity="P2", title="The bar reads before the title",
+                                         impact="The task is lost.", evidence="The bar pulls the eye first.",
+                                         fix="Quieter bar."))
+        self.elsewhere(before)
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        after = self.record(f["id"])["verification"]["capture"]
+        self.assertEqual((out["result"], out["status"]), ("none", "fixed"))
+        self.assertEqual(out["message"], f"{f['id']} came from judgment, and its picture before was taken on another "
+                                         f"Mac (m-studio01) and is not on this Mac. Look at {after}, then accept it: "
+                                         f"dev visual verify {f['id']} --accept --why \"…\"")
+        [out] = store.verify(P, f["id"], accept=True, why="the title reads first on the new capture")
+        self.assertEqual((out["result"], self.record(f["id"])["status"]), ("accepted", "verified"))
+
+
+class BeforePrunedHereTest(VerifyCase):
+    # This Mac took the finding's picture before and later pruned it from its store: the record names this Mac, so
+    # "taken on <this Mac> and is not on this Mac" contradicted itself. The outcome says the picture is no longer in
+    # this Mac's store, so nothing was compared, and offers no new capture: capture --again takes the page as it is
+    # now and cannot bring the picture before back. The history, which syncs, says the Mac that took it no longer
+    # has it
+    def test_a_picture_before_this_mac_pruned_reads_as_gone_from_its_store_with_nothing_compared(self):
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        self.assertEqual(self.record(before["id"])["image"]["where"], "local:m-test0001")
+        (self.local / "blobs" / f"{before['image']['sha256']}.png").unlink()
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        after = doc["verification"]["capture"]
+        self.assertEqual((out["result"], doc["status"], doc["verification"]["compared"]), ("pass", "verified", False))
+        self.assertEqual(out["message"], f"{f['id']}  verified · overlap no longer fires on {after} · the picture "
+                                         "before is no longer in this Mac's store, so nothing was compared")
+        self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {after} · nothing compared: the picture "
+                                                    "before was taken on m-test0001 and is no longer in its store")
+
+
+class BeforePrunedWithoutMachineIdTest(VerifyCase):
+    # Without a machine id (devkit cannot write its state folder), identity.machine names this Mac by its hostname,
+    # and a capture this Mac took under that name is still this Mac's. When its picture before was pruned, the
+    # history, which syncs and names a Mac by its machine id only, has no id for this Mac: it says the Mac that took
+    # the picture no longer has it, never that another Mac took it
+    def test_a_picture_before_pruned_on_a_mac_without_a_machine_id_is_never_said_to_be_another_macs(self):
+        self.patched(identity, "machine", new=lambda now=None: identity.Machine(
+            base.HOST, base.HOST, {base.HOST: [[0, 4e9]]}))
+        before = self.shot()
+        f = self.fixed(self.from_signal(before, "overlap"))
+        rec = self.record(before["id"])
+        rec["image"]["where"] = f"local:{base.HOST}"
+        store.save(P, rec)
+        (self.local / "blobs" / f"{before['image']['sha256']}.png").unlink()
+        self.page.write_text(FIXED)
+        [out] = store.verify(P, f["id"])
+        doc = self.record(f["id"])
+        after = doc["verification"]["capture"]
+        self.assertEqual((out["result"], doc["verification"]["compared"]), ("pass", False), out["message"])
+        self.assertEqual(out["message"], f"{f['id']}  verified · overlap no longer fires on {after} · the picture "
+                                         "before is no longer in this Mac's store, so nothing was compared")
+        self.assertEqual(doc["history"][-1]["why"], f"overlap no longer fires on {after} · nothing compared: the picture "
+                                                    "before is no longer in the store of the Mac that took it")
+
+
+class BeforePrunedUnderAnOldHostnameTest(VerifyCase):
+    # A capture from before the machine id names its Mac by the hostname it had then. This Mac took one as
+    # ana-macbook-pro, has been ana-studio since June, and pruned the picture: the record still names this Mac, so the
+    # outcome reads as gone from this Mac's store, never "taken on ana-macbook-pro and is not on this Mac", and the
+    # history, which syncs, names this Mac by its machine id. The old hostname names this Mac only for the time this
+    # Mac carried it (identity.was_this_mac at the capture's time): a capture taken under it after the rename is
+    # another Mac's
+    def test_this_macs_old_hostname_names_it_for_the_time_it_carried_that_name(self):
+        renamed = calendar.timegm((2026, 6, 1, 0, 0, 0))
+        self.patched(identity, "machine", new=lambda now=None: identity.Machine(
+            "m-test0001", "ana-studio", {base.HOST: [[calendar.timegm((2026, 1, 1, 0, 0, 0)), renamed]],
+                                         "ana-studio": [[renamed, 4e9]]}))
+        said = {}
+        for taken in ("2026-05-01T12:00:00Z", "2026-07-01T12:00:00Z"):
+            self.page.write_text(base.PAGE)
+            before = self.shot()
+            f = self.fixed(self.from_signal(before, "overlap"))
+            rec = self.record(before["id"])
+            rec["by"]["host"], rec["image"]["where"], rec["taken"] = base.HOST, f"local:{base.HOST}", taken
+            store.save(P, rec)
+            (self.local / "blobs" / f"{before['image']['sha256']}.png").unlink()
+            self.page.write_text(FIXED)
+            [out] = store.verify(P, f["id"])
+            doc = self.record(f["id"])
+            after = doc["verification"]["capture"]
+            self.assertEqual((out["result"], doc["verification"]["compared"]), ("pass", False), out["message"])
+            fires = f"overlap no longer fires on {after} · "
+            said[taken] = (out["message"].removeprefix(f"{f['id']}  verified · {fires}"),
+                           doc["history"][-1]["why"].removeprefix(fires))
+        self.assertEqual(said, {
+            "2026-05-01T12:00:00Z": ("the picture before is no longer in this Mac's store, so nothing was compared",
+                                     "nothing compared: the picture before was taken on m-test0001 and is no longer "
+                                     "in its store"),
+            "2026-07-01T12:00:00Z": ("nothing compared: the picture before was taken on ana-macbook-pro and is not on "
+                                     "this Mac",
+                                     "nothing compared: the picture before was taken on another Mac and is not on "
+                                     "this Mac")})
 
 
 class JudgmentAndRefusalTest(VerifyCase):

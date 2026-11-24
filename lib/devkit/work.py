@@ -51,8 +51,9 @@ LIST_FIELDS = ("links",)  # written as `[a, b]`; every other value is text, even
 
 def actor(agent: str = None, session: str = None, user: str = None) -> dict:
     """Who acts: the GitHub user, this Mac (`host`: its machine id, the same whatever the hostname), the agent and its
-    session. `label` is the Mac's hostname, for display only; every hostname devkit runs under is recorded as one this
-    Mac carried (identity.machine), so records that name the Mac by a former hostname stay its own (mine)."""
+    session. No hostname: what reads the actor (locks, presence, records) lands in the shared handoff, and a hostname
+    often names the person. Every hostname devkit runs under is recorded as one this Mac carried (identity.machine),
+    so records that name the Mac by a former hostname stay its own (mine)."""
     user = user or core.github_user() or os.environ.get("USER", "unknown")
     m = identity.machine()
     host = m.id
@@ -61,7 +62,7 @@ def actor(agent: str = None, session: str = None, user: str = None) -> dict:
                                                         os.environ.get("CODEX_THREAD_ID") else "human")
     sid = session or os.environ.get("DEVKIT_SESSION", "")
     sid = sid.split(":", 1)[1] if ":" in sid else sid  # DEVKIT_SESSION is "<agent>:<session id>"
-    return {"user": user, "host": host, "label": m.label, "agent": agent, "session": sid[:12]}
+    return {"user": user, "host": host, "agent": agent, "session": sid[:12]}
 
 
 def mine(who: str, a: dict = None, at: float = None) -> bool:
@@ -82,28 +83,13 @@ def mine(who: str, a: dict = None, at: float = None) -> bool:
     return host == m.id or identity.was_this_mac(host, at, m)
 
 
-_LABEL = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # a short hostname: what a label must look like to be shown
-
-
 def display(who: str, team: list = None) -> str:
-    """`who` as a person reads it: `user@<machine id>` (or a lock holder `user@<id> (agent:session)`) becomes
-    `user@<hostname>`. This Mac's id shows its hostname now; another Mac's the `label` its presence publishes (from
-    `team` when given, else its presence file). A label that is not a plain hostname (presence is another person's
-    text), an id with no presence, and a record that names a hostname already stay as they are. For display only:
-    compare people with mine() and the id."""
-    head, sep, rest = str(who or "").partition(" ")
-    user, at, host = head.partition("@")
-    if not at or not identity.MACHINE_ID.fullmatch(host) or not re.fullmatch(r"[A-Za-z0-9._-]+", user):
-        return str(who or "")
-    m = identity.machine()
-    label = m.label if host == m.id else ""
-    if not label:
-        found = [t for t in team if isinstance(t, dict) and t.get("user") == user and t.get("host") == host] \
-            if team is not None else [core.read_json(PRESENCE / f"{user}@{host}.json", None)]
-        label = next((str(t.get("label") or "") for t in found if isinstance(t, dict)), "")
-    if not _LABEL.fullmatch(label):
-        return str(who)
-    return f"{user}@{label}" + (sep + rest if sep else "")
+    """`who` as a person reads it: as it is written, `user@<machine id>` (or a lock holder `user@<id> (agent:session)`),
+    never `user@<hostname>`. What devkit shows lands in the handoff note, in screenshots and in logs shared with the
+    team, and a hostname often names the person, so no reader turns the id into a hostname: presence no longer
+    publishes one (write_presence), and this Mac's own is not shown either. A record from before the machine id
+    names its host already and stays as it is. `team` is accepted for the callers that pass the team they read."""
+    return str(who or "")
 
 
 def actor_str(a: dict) -> str:
@@ -175,16 +161,21 @@ _HEADING = re.compile(r"^ {0,3}#{1,6}(\s|$)")
 _KEY = re.compile(r"^([A-Za-z_][\w.-]*)[ \t]*:(.*)$")
 
 
-class RecordLossError(ValueError):
-    """A write would drop text of the record on disk that it does not edit. `path`: the file; `lost`: those lines."""
+class RecordLossError(core.Refusal, ValueError):
+    """A write would drop text of the record on disk that it does not edit. `path`: the file; `lost`: those lines.
+
+    Two causes look the same here: the file changed after the caller read it (running the command again reads it
+    anew), or devkit misread the record, a defect. A refusal files no crash report, so the fix names `dev bug report`
+    for the second; its title holds no file name or line, which can be private."""
 
     def __init__(self, path, lost):
         self.path, self.lost = Path(path), list(lost)
         super().__init__(
             f"refused to write {path}: it would drop {len(self.lost)} line(s) of the record that this change does not "
             f"edit, first “{self.lost[0][:100]}”. Nothing was written. If the file changed after devkit read it, run "
-            f"the command again; otherwise devkit misread the record: leave the file as it is and report the bug with "
-            f"it.")
+            f"the command again; otherwise devkit misread the record: leave the file as it is.",
+            fix="run the command again; if it refuses the same way, leave the file as it is and run dev bug report "
+                "--title \"a write of a work item or plan would drop lines it does not edit\"")
 
 
 def split_frontmatter(text: str):
@@ -303,8 +294,9 @@ def _replace(path: Path, text: str) -> None:
 RECORD_WAIT = 30  # seconds a write waits for another process's write of the same file on this Mac
 
 
-class RecordBusyError(RecordLossError):
-    """Another devkit process held the record's lock for RECORD_WAIT seconds: nothing was written."""
+class RecordBusyError(core.Busy, RecordLossError):
+    """Another devkit process held the record's lock for RECORD_WAIT seconds: nothing was written. Exit 75: running the
+    command again can work."""
 
     def __init__(self, path, wait):
         self.path, self.lost = Path(path), []
@@ -506,9 +498,14 @@ def _merge_lesson(base: str, remote: str, mine: str, contested: list = None):
             contested.append(s)
     out["meta"]["occurrences"] = r["meta"]["occurrences"] + m["meta"]["occurrences"] - b["meta"]["occurrences"]
     out["meta"]["last_seen"] = max(r["meta"].get("last_seen") or "", m["meta"].get("last_seen") or "")
-    added = _merge_history(b, r, m, out)
+    added = _merge_history(b, r, m, out, same=_without_repeat)
     if added is None:
         return None
+    shift = r["meta"]["occurrences"] - b["meta"]["occurrences"]
+    if shift > 0:  # this Mac's repeats come after the remote's: each entry names its repeat by the merged count
+        out["changelog"][:len(added)] = [
+            _REPEAT.sub(lambda x: f"{x.group(1)}(#{int(x.group(2)) + shift})", e, count=1)
+            for e in out["changelog"][:len(added)]]
     text = lessons.render(out)
     if contested:  # this Mac's contested lines are dropped on purpose: only the remote's must all be there
         return None if lost_lines(remote, text, base.splitlines()) else text
@@ -537,12 +534,28 @@ def _merge_fields(b, r, m, out, fields, lists, by_rule, contested: list = None) 
     return True
 
 
-def _merge_history(b, r, m, out):
+def _without_repeat(entry: str) -> str:
+    """A lesson's changelog entry without its version and repeat numbers, which a merge numbers again (_merge_lesson)."""
+    return _REPEAT.sub(lambda x: x.group(1), _VERSION.sub("", entry, count=1), count=1)
+
+
+_REPEAT = re.compile(r"(\b(?:happened again|opened to automate it) )\(#(\d+)\)")  # lessons.recur and lessons.automate
+
+
+def _merge_history(b, r, m, out, same=None):
     """A record's changelog in `out`: this Mac's entries on top of the remote's, numbered after them, and a version
-    that counts both; `updated` and `updated_by` from the side changed last. -> this Mac's added entries as it wrote
-    them, or None when the changelogs do not both start from the base's."""
+    that counts both; `updated` and `updated_by` from the side changed last. Entries are compared without their
+    version number (and as `same` reads them, when given): a pull replays this Mac's commits one at a time, and the
+    first one settled numbers this Mac's entry again, on top of the remote's, before the next one is settled. -> this
+    Mac's added entries as it wrote them, or None when this Mac's changelog does not start from the base's, or the
+    remote's lacks one of the base's entries or has them in another order."""
+    same = same or (lambda e: _VERSION.sub("", e, count=1))
     n = len(b["changelog"])
-    if any(x["changelog"][len(x["changelog"]) - n:] != b["changelog"] for x in (r, m) if n):
+    base = [same(e) for e in b["changelog"]]
+    if n and [same(e) for e in m["changelog"][len(m["changelog"]) - n:]] != base:
+        return None
+    theirs = iter(same(e) for e in r["changelog"])
+    if not all(e in theirs for e in base):  # the base's entries in the remote's, in order (`in` consumes the iterator)
         return None
     added = m["changelog"][:len(m["changelog"]) - n]
     version = r["meta"]["version"] + m["meta"]["version"] - b["meta"]["version"]
@@ -585,11 +598,22 @@ def all_items(scope: str = None) -> list:
     return out
 
 
-def find(selector: str, scope: str = None) -> dict:
-    """By id (exact or unique prefix), by number in the list `dev task` showed (`by_number`), or by a unique part of
-    the title."""
-    items = [i for i in all_items(scope) if i["meta"].get("status") not in ("done", "cancelled")] if not \
-        selector.upper().startswith(("T-", "F-", "B-", "S-")) else all_items(scope)
+class TitleMatch(ValueError):
+    """A part of a title that names several items, for a read: `items` are the items it names, for the caller to
+    list with the command for each."""
+
+    def __init__(self, selector: str, items: list):
+        self.selector, self.items = selector, items
+        super().__init__(f"“{selector}” names {len(items)} items")
+
+
+def find(selector: str, scope: str = None, titles: bool = False) -> dict:
+    """By id (exact or unique prefix), by number in the list `dev task` showed (`by_number`), or by a part of the
+    title that names one open item. A read (`titles`) also finds a closed item by a part of its title when no open
+    one has it, and a part that names several items raises TitleMatch, which lists them."""
+    everything = all_items(scope)
+    items = [i for i in everything if i["meta"].get("status") not in ("done", "cancelled")] if not \
+        selector.upper().startswith(("T-", "F-", "B-", "S-")) else everything
     sel = selector.strip()
     exact = [i for i in items if i["meta"]["id"].lower() == sel.lower()]
     if exact:
@@ -602,8 +626,14 @@ def find(selector: str, scope: str = None) -> dict:
     if sel.isdigit():
         return by_number(int(sel), scope, items)
     hits = [i for i in items if sel.lower() in i["meta"].get("title", "").lower()]
+    if titles and not hits:
+        searched = {i["meta"]["id"] for i in items}
+        hits = [i for i in everything if i["meta"]["id"] not in searched and
+                sel.lower() in i["meta"].get("title", "").lower()]
     if len(hits) == 1:
         return hits[0]
+    if titles and hits:
+        raise TitleMatch(sel, hits)
     raise ValueError(f"“{sel}” matches {len(hits)} items; use the id from `dev task`" if hits else f"no item matches “{sel}”")
 
 
@@ -850,6 +880,248 @@ def push_failed_file() -> Path:
     return core.STATE / "handoff-push-failed.json"
 
 
+# --------------------------------------------------------------------------- team policy files this Mac cannot load
+#
+# A team policy file (policy/<name>.json in the handoff repository) that no Mac could load must never be pushed: a
+# broken policy/audit.json makes every Mac withhold all audit text, refuse crew messages and hold every lesson. Left
+# in the repository uncommitted, it stopped this Mac's syncing instead: once a teammate changed the same file, every
+# pull's git reset --keep refused to move the checkout. So the text is moved out of the repository, under devkit's
+# state (HELD_POLICIES), with the time and the reason; the repository keeps the version it last pulled (origin's),
+# the hold is recorded (a critical, blocked handoff.push), and devkit says so at every sync and session start until
+# the developer drops the held copy (deletes it), after putting the repaired change back if they want it.
+
+_POLICY_FILE = re.compile(r"policy/[^/]+\.json")
+
+
+def held_policy_dir() -> Path:
+    return core.STATE / "policy-held"
+
+
+def _changed_policies(root: Path) -> list:
+    """The team policy files (policy/<name>.json) changed in the repository at `root` and not committed yet."""
+    parts = core.gitout(root, "status", "--porcelain", "-z", "--untracked-files=all", "--", "policy").split("\0")
+    out, i = [], 0
+    while i < len(parts):
+        entry, i = parts[i], i + 1
+        if len(entry) < 4:
+            continue
+        if "R" in entry[:2] or "C" in entry[:2]:  # a rename or copy names its source next
+            i += 1
+        if _POLICY_FILE.fullmatch(entry[3:]):
+            out.append(entry[3:])
+    return out
+
+
+def _held_copy(rel: str) -> Path:
+    """A new file for this Mac's text of `rel`: STATE/policy-held/<rel without .json>.<time>[-n].json."""
+    stem = f"{rel[:-len('.json')]}.{time.strftime('%Y%m%d-%H%M%S')}"
+    saved, n = held_policy_dir() / f"{stem}.json", 1
+    while saved.exists() or saved.with_suffix(".why").exists():
+        n += 1
+        saved = held_policy_dir() / f"{stem}-{n}.json"
+    saved.parent.mkdir(parents=True, exist_ok=True)
+    return saved
+
+
+def policy_records_file() -> Path:
+    return core.STATE / "policy-recorded.json"
+
+
+def _not_recorded(kind: str, root: Path, now: dict) -> dict:
+    """Of `now` ({path: reason}), what the last check of `kind` ("refused" a push, "stuck" a hold that could not move
+    the file) in the repository at `root` has not recorded with the same reason; `now` becomes what is recorded, so a
+    file the check no longer finds is recorded again when it comes back. Every sync says each one; the audit trail and
+    the sessions hear of it once per file and reason. When the state cannot be written, each is recorded again."""
+    f = policy_records_file()
+    state = core.read_json(f, {})
+    state = state if isinstance(state, dict) and state.get("repo") == str(root) else {"repo": str(root)}
+    known = state.get(kind) if isinstance(state.get(kind), dict) else {}
+    if known == now:
+        return {}
+    state[kind] = now
+    with contextlib.suppress(OSError):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        core.replace_text(f, json.dumps(state, sort_keys=True) + "\n")
+    return {rel: why for rel, why in now.items() if known.get(rel) != why}
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # the text may hold a secret
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
+def _blob(root: Path, spec: str):
+    """The bytes git holds for `spec` (HEAD:<path>, :<path> for the staged version) in the repository at `root`, or
+    None when it holds none."""
+    import subprocess
+    try:
+        p = subprocess.run(["git", "-C", str(root), "cat-file", "blob", spec], capture_output=True, timeout=30,
+                           env=core.GIT_ENV)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return p.stdout if p.returncode == 0 else None
+
+
+def _write_why(saved: Path, rel: str, why: str) -> None:
+    """The time and reason of a held copy, beside it (.why)."""
+    with contextlib.suppress(OSError):  # without it, held_policies reads the path and time from the copy's name
+        _write_private(saved.with_suffix(".why"), json.dumps(
+            {"path": rel, "time": time.strftime("%Y-%m-%d %H:%M"), "why": why}).encode())
+
+
+def _hold_text(rel: str, data: bytes, why: str) -> None:
+    """Write `data`, a staged text of `rel` no Mac could load either, to a new private held copy and its reason."""
+    saved = _held_copy(rel)
+    _write_private(saved, data)
+    _write_why(saved, rel, why)
+
+
+def hold_broken_policies(root: Path, paths=None) -> list:
+    """Move each changed team policy file at `root` that no Mac could load (audit.publishable_policy) out of the
+    repository: this Mac's text to a private file under held_policy_dir(), its time and reason beside it (.why), and
+    the repository's file back to its last commit (deleted when it has none), so a pull and a commit find nothing
+    to keep. A good version staged before the file broke stays staged, and the file goes back to it; a staged
+    deletion stays staged, and the file goes; a staged version no Mac could load either is held too. Each hold is
+    recorded (a critical, blocked handoff.push) and told to the live sessions. A file that cannot be moved (the state
+    folder cannot be written, the disk is full, git cannot put the repository's version back) stays as it is and is
+    returned with no held copy: the caller leaves it out of every commit, a staged version of it no Mac could load is
+    unstaged, and it is recorded once per file and reason (_not_recorded). `paths`: the changed files, when the
+    caller listed them. Under _repo_lock.
+    -> [(path, reason, held copy, or None when it could not be moved)]."""
+    from . import audit
+    out, stuck, problems = [], {}, {}
+    for rel in [p for p in paths if _POLICY_FILE.fullmatch(p)] if paths is not None else _changed_policies(root):
+        src = root / rel
+        why = audit.publishable_policy(src)
+        if not why:
+            continue
+        literal = f":(literal){rel}"
+        staged = core.git(root, "diff", "--cached", "--quiet", "--", literal)[0] == 1
+        staged_text = _blob(root, f":{rel}") if staged else None  # None too for a staged deletion
+        deleted = staged and bool(core.gitout(root, "diff", "--cached", "--name-only", "--no-renames",
+                                              "--diff-filter=D", "--", literal))
+        keep_index = staged_text is not None and not audit.publishable_text(Path(rel).name, staged_text)
+        saved = problem = None
+        try:
+            saved = _held_copy(rel)
+            try:
+                _write_private(saved, src.read_bytes())
+            except OSError:  # a file this Mac cannot read moves as it is
+                os.replace(src, saved)
+        except OSError as e:
+            problem = e.strerror or type(e).__name__
+            if saved is not None and src.exists():  # a copy cut short holds nothing the repository lost
+                with contextlib.suppress(OSError):
+                    saved.unlink()
+        theirs = ""  # why the repository's own version no Mac could load either
+        if problem is None:
+            if staged_text is not None and not keep_index:  # staged and broken too: held as well, once
+                with contextlib.suppress(OSError):
+                    if saved.read_bytes() != staged_text:
+                        _hold_text(rel, staged_text, audit.publishable_text(Path(rel).name, staged_text))
+            if deleted:  # the deletion the developer staged stays staged, and the file goes
+                rc, drop = 0, True
+            elif keep_index:  # the working copy back to the staged version
+                rc, drop = core.git(root, "checkout", "-q", "--", literal)[0], False
+            elif core.git(root, "cat-file", "-e", f"HEAD:{rel}")[0] == 0:
+                rc, drop = core.git(root, "checkout", "-q", "HEAD", "--", literal)[0], False
+            else:  # new since the last commit: out of the index, and gone
+                rc, drop = core.git(root, "rm", "-q", "--cached", "--ignore-unmatch", "--", literal)[0], True
+            if rc == 0 and drop:
+                try:
+                    src.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:  # a folder this Mac cannot write: the file stays, as a restore that failed
+                    rc = 1
+            if rc == 0 and not drop and src.exists():  # git put the repository's version back: broken too?
+                theirs = audit.publishable_policy(src)
+            if rc != 0 or drop and src.exists():  # git could not put the file back
+                problem = "git could not restore the repository's version"
+                with contextlib.suppress(OSError):
+                    if not src.exists():  # moved, and nothing came back: a git add -A would commit a deletion
+                        os.replace(saved, src)
+                    elif src.read_bytes() == saved.read_bytes():  # nothing moved: the copy is not a hold
+                        saved.unlink()
+                    saved.with_suffix(".why").unlink(missing_ok=True)
+        if problem is not None:
+            unstaged = _blob(root, f":{rel}")
+            if unstaged is not None and audit.publishable_text(Path(rel).name, unstaged) and \
+                    core.git(root, "diff", "--cached", "--quiet", "--", literal)[0] == 1:
+                core.git(root, "reset", "-q", "--", literal)  # never committed from the index either
+            stuck[rel], problems[rel] = why, problem
+            out.append((rel, why, None))
+            continue
+        _write_why(saved, rel, why)
+        text = (f"held: it {why}, so no Mac could load it; this Mac's text was moved to {core.tilde(saved)} and the "
+                "handoff repository keeps " + ("the deletion staged before it" if deleted else
+                                               "the version staged before it" if keep_index else
+                                               "the version it last pulled"))
+        if theirs:  # pushed by an older Mac, a raw commit, or an import: this Mac's commits leave it as it is
+            text += f", but the handoff repository's version cannot be loaded either: it {theirs}"
+        audit.record("handoff.push", rel, text, "blocked", severity="critical")
+        try:  # each live session hears of it once, with its next wake or hook
+            from . import watch
+            watch.notice_all("notice", f"policy-held:{saved.name}", f"{rel} {text}. {_REPAIR}")
+        except Exception:
+            pass
+        out.append((rel, why, saved))
+    for rel, why in _not_recorded("stuck", root, stuck).items():
+        audit.record("handoff.push", rel, f"held: it {why}, and it could not be moved out of the repository "
+                     f"({problems[rel]}), so it stays on this Mac, never committed or pushed", "blocked",
+                     severity="critical")
+    return out
+
+
+_REPAIR = ("To keep the change, repair it (dev audit config shows what is wrong) and put it back into the handoff "
+           "repository; then delete the held copy, or delete it to drop the change")
+
+
+_HELD_NAME = re.compile(r"(.+)\.(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)\d\d(?:-\d+)?\.json")
+
+
+def held_policies() -> list:
+    """This Mac's held team policy texts (hold_broken_policies) that the developer has not dropped yet, oldest first:
+    [{"path", "why", "time", "saved"}], from the note beside each copy, or from the copy's own name when there is
+    none. The note beside a copy the developer deleted goes with it."""
+    folder = held_policy_dir()
+    out = []
+    for why_file in sorted(folder.rglob("*.why")) if folder.is_dir() else []:
+        if not why_file.with_suffix(".json").exists():
+            with contextlib.suppress(OSError):
+                why_file.unlink()
+    for saved in sorted(folder.rglob("*.json")) if folder.is_dir() else []:
+        m = _HELD_NAME.fullmatch(saved.relative_to(folder).as_posix())
+        if not m:
+            continue
+        meta = core.read_json(saved.with_suffix(".why"), {}) or {}
+        meta = meta if isinstance(meta, dict) else {}
+        out.append({"path": str(meta.get("path") or m.group(1) + ".json"), "why": str(meta.get("why") or ""),
+                    "time": str(meta.get("time") or "{}-{}-{} {}:{}".format(*m.groups()[1:])), "saved": str(saved)})
+    return sorted(out, key=lambda h: (h["time"], h["saved"]))
+
+
+def held_policy_line() -> str:
+    """What a sync and a session start tell the developer while a held team policy text waits: each file, why no Mac
+    could load it, when it was held and where its text is, and how to repair or drop it. "" when none waits."""
+    from . import audit
+    held = held_policies()
+    if not held:
+        return ""
+
+    def theirs(rel: str) -> str:  # the repository's own version is broken too (an older Mac pushed it)
+        f = HANDOFF / rel
+        why = audit.publishable_policy(f) if _POLICY_FILE.fullmatch(rel) and f.is_file() else ""
+        return f", and the handoff repository's version cannot be loaded either: it {why}" if why else ""
+    each = "; ".join(f"{h['path']}{' ' + h['why'] if h['why'] else ''} (held {h['time']}: {core.tilde(h['saved'])})"
+                     f"{theirs(h['path'])}" for h in held[:5])
+    more = f"; and {len(held) - 5} more in {core.tilde(held_policy_dir())}" if len(held) > 5 else ""
+    return (f"devkit moved this Mac's copy of {len(held)} team policy file{'s' if len(held) != 1 else ''} that no "
+            f"Mac could load out of the handoff repository, which keeps the version it last pulled, so syncing goes "
+            f"on: {each}{more}. {_REPAIR}.")
+
+
 def sync_problem(problem: str, action: str = "handoff.push", target: str = "") -> None:
     """Record a sync of the handoff repository that did not reach the remote: an audit record that every audit level
     keeps (`target`: the files involved), and handoff-push-failed.json, shown as a problem until a push succeeds."""
@@ -934,13 +1206,67 @@ _APPEND_ONLY = re.compile(r"^(log/[^/]+\.md|sessions/.+)$")
 _LESSON_FILE = re.compile(r"^lessons/(.+/)?L-[^/]+\.md$")  # active and archived lessons
 
 
-def _settle(rel: str, retake: bool, base, remote, mine, set_aside: dict) -> tuple:
+def _one_automation(base: str, remote: str, mine: str, duplicates: list = None) -> str:
+    """Two Macs that each recorded a lesson's third repeat each opened a work item to automate it (lessons.automate),
+    and their lessons name different items (task_ref). The lesson keeps the remote's item, which every Mac already
+    has, and this Mac's goes on `duplicates` as (its id, the remote's, the lesson's id), for _close_duplicates after
+    the pull. -> this Mac's lesson, naming the remote's item (`mine` as it is in any other case)."""
+    from . import lessons  # it imports this module
+    try:
+        b, r, m = (lessons.parse(x) for x in (base, remote, mine))
+    except ValueError:
+        return mine
+    was, theirs, ours = (x["meta"].get("task_ref") or "" for x in (b, r, m))
+    if not (theirs and ours and theirs != ours and was not in (theirs, ours)):
+        return mine
+    if duplicates is not None:
+        duplicates.append((ours, theirs, m["meta"].get("id") or ""))
+    m["meta"]["task_ref"] = theirs
+    return lessons.render(m)
+
+
+def _close_duplicates(found: list) -> None:
+    """After a pull that settled a lesson both Macs had opened an automation item for (_one_automation): this Mac's
+    item, which the lesson no longer names, is cancelled as the remote's duplicate, in one commit the sync's push
+    carries. An item already closed, or gone, stays as it is, and so does one someone started (doing, or claimed):
+    work in progress is never cancelled; a notice names both items, for a person to cancel one. Runs within the
+    rebase, as _rewrite_tasks does."""
+    from . import ui
+    a, written = actor(), []
+    for ours, theirs, lid in dict.fromkeys(found):
+        files = sorted(ITEMS.rglob(f"{ours}.md")) if ours and ITEMS.is_dir() else []
+        try:
+            it = load(files[0]) if files else None
+        except (OSError, ValueError):
+            it = None
+        if not it or it["meta"].get("status") not in OPEN:
+            continue
+        if it["meta"].get("status") == "doing" or it["meta"].get("claimed_by"):
+            ui.warn(f"handoff repository: {ours} and {theirs} both automate lesson {lid}: another Mac opened {theirs} for "
+                    f"the same repeat, and the lesson now names it. {ours} is started here, so the sync kept it open; "
+                    f"finish one and cancel the other with `dev task cancel <id> --why \"a duplicate of <the other>\"`")
+            continue
+        it["meta"].update(UNLOCK, status="cancelled")
+        _touch(it, a, "cancel", detail=f"a duplicate of {theirs}, which another Mac opened for the same repeat of "
+                                        f"lesson {lid}")
+        try:
+            write_record(it["path"], render(it))
+        except RecordLossError:
+            continue
+        written.append(it["path"])
+    if written:
+        _commit(written, f"sync: cancel {len(written)} duplicate automation item(s) after the pull ({actor_str(a)})",
+                push=False)
+
+
+def _settle(rel: str, retake: bool, base, remote, mine, set_aside: dict, duplicates: list = None) -> tuple:
     """A file in conflict during a pull, from its three versions (_versions) -> (the text to keep, the problem when
     this Mac's version was set aside, else ""). It always settles, so a pull never stops on a conflict and never keeps
     this Mac's commits from the remote:
     - one side removed (or moved) the file: the text the other side has, so no change is lost;
     - a note: _settle_note; an append-only log: both sides' lines, the remote's first;
-    - a lesson: both sides' changes (`merge_lesson`); when both changed one field or section differently, the remote's
+    - a lesson: both sides' changes (`merge_lesson`); when both opened an item to automate it, the remote's item, and
+      this Mac's on `duplicates` (_one_automation); when both changed one field or section differently, the remote's
       value there, with the repeats, the Evidence and the changelogs of both, and this Mac's version set aside;
     - an item: this Mac's change applied again to the remote's version (`merge_item`); when both changed the same
       thing, the remote's version, and this Mac's set aside unless `retake` (the caller applies its change again);
@@ -954,6 +1280,7 @@ def _settle(rel: str, retake: bool, base, remote, mine, set_aside: dict) -> tupl
     if _APPEND_ONLY.match(rel):
         merged = _merge_text(base or "", remote, mine, union=True)
     elif _LESSON_FILE.match(rel) and base:
+        mine = _one_automation(base, remote, mine, duplicates)
         merged = merge_lesson(base, remote, mine)
         if merged is None:
             contested = []
@@ -1129,6 +1456,7 @@ def rebase_fetched(retake=()) -> tuple:
         if not got:
             return False, "another devkit process kept the handoff notes or repository busy"
         recover_rebase("a pull")
+        hold_broken_policies(HANDOFF)  # git reset --keep refuses while such a file has a change not committed yet
         return _rebase(retake)
 
 
@@ -1164,9 +1492,9 @@ def _rebase(retake) -> tuple:
         sync_problem(problem, "handoff.pull")
         return False, problem
     try:
-        settled_notes, set_aside = [], {}
-        new = _replay(tree, upstream, retake, settled_notes, set_aside) or \
-            _merge(tree, head, upstream, retake, settled_notes, set_aside)
+        settled_notes, set_aside, duplicates = [], {}, []
+        new = _replay(tree, upstream, retake, settled_notes, set_aside, duplicates) or \
+            _merge(tree, head, upstream, retake, settled_notes, set_aside, duplicates)
         if not new:
             problem = "a pull of the handoff repository could neither rebase this Mac's commits on the remote's nor " \
                       "merge them; nothing changed here"
@@ -1177,16 +1505,18 @@ def _rebase(retake) -> tuple:
         _drop_private_checkout(tree)
     if ok:
         _rewrite_tasks(settled_notes)
+        _close_duplicates(duplicates)
     return ok, problem
 
 
-def _settle_all(tree: Path, retake, merging: bool, settled_notes: list, set_aside: dict) -> bool:
+def _settle_all(tree: Path, retake, merging: bool, settled_notes: list, set_aside: dict,
+                duplicates: list = None) -> bool:
     """Settle and stage every file in conflict in the private checkout (`_settle`). `settled_notes` gets the notes
     whose generated blocks were taken whole (_rewrite_tasks writes their tasks block again). -> False when a settled
     file could not be written (a folder in its place): the rebase or merge cannot go on."""
     for rel in _conflicted(tree):
         base, remote, mine = _versions(rel, tree, merging)
-        text, problem = _settle(rel, rel in retake, base, remote, mine, set_aside)
+        text, problem = _settle(rel, rel in retake, base, remote, mine, set_aside, duplicates)
         if _NOTE_FILE.match(rel) and remote is not None and mine is not None and not problem:
             settled_notes.append(rel)
         if text is None:  # neither side has the file any more
@@ -1201,14 +1531,14 @@ def _settle_all(tree: Path, retake, merging: bool, settled_notes: list, set_asid
     return True
 
 
-def _replay(tree: Path, upstream: str, retake, settled_notes: list, set_aside: dict) -> str:
+def _replay(tree: Path, upstream: str, retake, settled_notes: list, set_aside: dict, duplicates: list = None) -> str:
     """Rebase the private checkout's commits (this Mac's) on `upstream`, settling each conflict. -> the rebased
     commit, or "" when the rebase did not finish (it is aborted)."""
     rc, _, _ = core.git(tree, *NO_AUTO_GC, "rebase", "-q", upstream, timeout=60)
     for _ in range(200):  # one round per commit of this Mac that conflicts
         if rc == 0 or not _stopped(tree) or not _conflicted(tree):
             break
-        if not _settle_all(tree, retake, False, settled_notes, set_aside):
+        if not _settle_all(tree, retake, False, settled_notes, set_aside, duplicates):
             break
         nothing = core.git(tree, "diff", "--cached", "--quiet")[0] == 0
         rc = core.git(tree, *NO_AUTO_GC, "-c", "core.editor=true", "rebase", "--skip" if nothing else "--continue",
@@ -1221,13 +1551,14 @@ def _replay(tree: Path, upstream: str, retake, settled_notes: list, set_aside: d
     return new if finished else ""
 
 
-def _merge(tree: Path, head: str, upstream: str, retake, settled_notes: list, set_aside: dict) -> str:
+def _merge(tree: Path, head: str, upstream: str, retake, settled_notes: list, set_aside: dict,
+           duplicates: list = None) -> str:
     """Merge `upstream` into this Mac's commits in the private checkout, settling each conflict, when the rebase could
     not finish. -> the merge commit, or "" when the merge did not finish either."""
     core.git(tree, "reset", "-q", "--hard", head)
     message = "sync: merge the remote's commits (the rebase of this Mac's could not finish)"
     rc, _, _ = core.git(tree, *NO_AUTO_GC, "merge", "-q", "--no-edit", "-m", message, upstream, timeout=60)
-    if rc != 0 and _conflicted(tree) and _settle_all(tree, retake, True, settled_notes, set_aside):
+    if rc != 0 and _conflicted(tree) and _settle_all(tree, retake, True, settled_notes, set_aside, duplicates):
         rc = core.git(tree, *NO_AUTO_GC, "commit", "-q", "-m", message, timeout=60)[0]
     new = core.gitout(tree, "rev-parse", "HEAD")
     if rc != 0 or new == head:
@@ -1268,11 +1599,111 @@ def push_now(retake=()) -> tuple:
     return push_handoff() if ok else (False, problem)
 
 
+POLICY_REFUSED = "refused to push: "
+
+
+def unpublishable_commits(root: Path) -> list:
+    """The team policy files (policy/<name>.json) that a commit of this Mac not pushed yet (@{u}..HEAD; every commit
+    when there is no upstream) changes to a version no Mac could load (audit.publishable_text): committed by a raw git
+    commit, an import, or an older devkit whose push failed, they never went through hold_broken_policies. Every such
+    commit counts, not only HEAD's version: a repair on top still publishes the broken text in the history. A merge
+    counts for what it changes itself (git's combined diff), so a broken file the remote already has publishes
+    nothing new. A deletion publishes nothing broken. One git log reads the policy paths each commit changed, then
+    one read per change. When the commits cannot be read (git log fails or gives output that is no commit id and no
+    policy file, a policy file the commit holds cannot be read), the push is refused too, with no commit:
+    [("policy", the cause, "")], which _refuse_policy_push says in its own words.
+    -> [(path, reason, short commit)], oldest first."""
+    from . import audit
+    has_upstream = core.git(root, "rev-parse", "-q", "--verify", "@{u}")[0] == 0
+    rc, log, _ = core.git(root, "log", "-z", "--reverse", "--format=%x01%h", "--name-only", "--no-renames",
+                          "--full-history", "--diff-merges=combined", "@{u}..HEAD" if has_upstream else "HEAD",
+                          "--", "policy", timeout=120)
+    if rc != 0 and core.git(root, "rev-parse", "-q", "--verify", "HEAD")[0] == 0:
+        return [("policy", "git log failed", "")]
+    out, sha, seen = [], "", set()
+    # -z ends every commit id and every name with NUL, which no path can hold. A field is a commit when it begins with
+    # \x01 and a name when it begins with "policy" (git names only the paths under the pathspec), so a name that holds
+    # \x01 or copies a commit id stays a name; any other field is output this check cannot read.
+    for field in log.split("\0"):
+        field = field.lstrip("\n")
+        if not field:
+            continue
+        if field.startswith("\x01"):
+            sha = field[1:]
+            if not _SHORT_SHA.fullmatch(sha):
+                return [("policy", "git log gave a commit id that cannot be read", "")]
+            continue
+        if not sha or not (field == "policy" or field.startswith("policy/")):
+            return [("policy", "git log gave a line that is no commit and no policy file", "")]
+        if not _POLICY_FILE.fullmatch(field) or (sha, field) in seen:
+            continue
+        seen.add((sha, field))
+        data = _blob(root, f"{sha}:{field}")
+        if data is None and core.git(root, "cat-file", "-e", f"{sha}:{field}")[0] == 0:
+            return [("policy", f"{field} at commit {sha} could not be read", "")]  # there, but not read
+        why = audit.publishable_text(Path(field).name, data) if data is not None else ""
+        if why:
+            out.append((field, why, sha))
+    return out
+
+
+_SHORT_SHA = re.compile(r"[0-9a-f]{4,64}")
+
+
+_AMEND = ("and a repair on top still publishes it, secrets too. Undo the unpushed commits (git reset --soft @{u}); "
+          "dev sync recommits the rest and holds the file for repair (dev audit config)")
+# what a refusal says before its files: every short copy of it (the saved failure, 300 characters; the session notice,
+# 200; dev status, 120) keeps the repair
+_REFUSAL_REPAIR = ("a team policy no Mac could load is in an unpushed commit; run git reset --soft @{u}, then dev sync, "
+                   "which holds it for repair (dev audit config), as a repair on top still publishes it")
+REFUSAL_FILES_SHOWN = 3  # files a refusal names; the rest are counted
+
+
+def _named(rel: str, sha: str) -> str:
+    return f"{rel} (commit {sha})" if sha else rel
+
+
+def _refuse_policy_push(root: Path, refused) -> str:
+    """Record each committed team policy file no Mac could load (a critical, blocked handoff.push), once per file,
+    commit and reason (_not_recorded) -> the problem, said at every refusal. The broken text may hold a pasted secret,
+    and a repair committed on top would still publish it in the history, so the repair undoes the commits."""
+    from . import audit
+    unchecked = [why for _, why, sha in refused if not sha]
+    if unchecked:  # the check could not run: no file is known broken, so no repair applies
+        problem = f"could not check the unpushed commits ({unchecked[0]}); run dev sync again"
+        for _ in _not_recorded("refused", root, {"policy": unchecked[0]}):
+            audit.record("handoff.push", "policy", f"refused: {problem}", "blocked", severity="warning")
+        return POLICY_REFUSED + problem
+    now = {_named(rel, sha): (rel, sha, why) for rel, why, sha in refused}
+    for key in _not_recorded("refused", root, {k: v[2] for k, v in now.items()}):
+        rel, sha, why = now[key]
+        text = f"refused: commit {sha} not pushed yet changes it to a version that {why}, so no Mac could load it, " \
+               f"{_AMEND}"
+        audit.record("handoff.push", rel, text, "blocked", severity="critical")
+    named = [f"{_named(rel, sha)} {why}" for rel, why, sha in refused]
+    more = len(named) - REFUSAL_FILES_SHOWN
+    return f"{POLICY_REFUSED}{_REFUSAL_REPAIR}; {len(named)} file(s): " + "; ".join(named[:REFUSAL_FILES_SHOWN]) + \
+        (f"; and {more} more" if more > 0 else "")
+
+
+def refusal_pairs(root: Path) -> list:
+    """What a refused push is about, to tell one refusal from another (cli._refused_again): [[file (commit), reason],
+    …], sorted. The refusal's text is cut short where it is saved, so a new file past the cut would read as the same
+    refusal."""
+    return sorted([_named(rel, sha), why] for rel, why, sha in unpublishable_commits(root))
+
+
 def push_handoff(timeout: int = 60) -> tuple:
-    """Push the handoff repository's commits (the network), under _repo_lock alone. -> (ok, the problem when not ok)."""
+    """Push the handoff repository's commits (the network), under _repo_lock alone. Refused, and recorded, while a
+    commit not pushed yet leaves a team policy file that no Mac could load (unpublishable_commits): pushed, it would
+    make every Mac withhold text. -> (ok, the problem when not ok; POLICY_REFUSED starts a refusal)."""
     with _repo_lock() as got:
         if not got:
             return False, _BUSY
+        refused = unpublishable_commits(HANDOFF)
+        if refused:
+            return False, _refuse_policy_push(HANDOFF, refused)
+        _not_recorded("refused", HANDOFF, {})  # the same refusal later is recorded again
         rc, _, err = core.git(HANDOFF, "push", "-q", timeout=timeout)
         return rc == 0, (err.strip()[:300] if rc else "")
 
@@ -1377,15 +1808,51 @@ def _touch(it: dict, a: dict, op: str, why: str = "", detail: str = ""):
 
 
 def task_body(kind: str, why: str = "", done=None) -> str:
-    """A structured body for a new work item: the type's template with the reason and acceptance criteria filled in."""
+    """A structured body for a new work item: the type's template with the reason and acceptance criteria filled in,
+    and only the sections that hold text (an unfilled one reads as an empty template on the board)."""
     f = core.DEVKIT_HOME / "templates" / "tasks" / f"{kind}.md"
-    text = f.read_text().strip() if f.exists() else "## Done when\n- [ ] _Acceptance criterion, testable._"
+    text = f.read_text().strip() if f.exists() else _BARE_TEMPLATE
     if why:
         text = re.sub(r"(## (Why|Context|Question|Symptom)\n\n?)_[^\n]*_", lambda m: m.group(1) + why, text, count=1)
     if done:
         crit = "\n".join(f"- [ ] {d}" for d in done)
         text = re.sub(r"(## Done when\n\n?)(- \[ \] [^\n]*\n?)+", lambda m: m.group(1) + crit + "\n", text, count=1)
-    return text.strip()
+    return shown_body(text)
+
+
+_BARE_TEMPLATE = "## Done when\n- [ ] _Acceptance criterion, testable._"  # when the type has no template file
+# How the task templates (templates/tasks/*.md) mark text to fill in: a whole line in italics, after a list marker or
+# an empty box and a `Label:`: `_What happens, where, since when._`, `1. _…_`, `- [ ] _Acceptance criterion._`,
+# `- Expected: _…_`. It picks the placeholder lines out of the templates only; a body is matched against those lines.
+_TEMPLATE_PLACEHOLDER = re.compile(r"^\s*(?:[-*]\s+(?:\[ \]\s+)?|\d+\.\s+)?(?:[A-Za-z][\w /.-]{0,30}:\s+)?_[^\n]*_\s*$")
+_PLACEHOLDERS: dict = {}  # templates folder -> its placeholder lines
+
+
+def _placeholders() -> frozenset:
+    """The task templates' placeholder lines, stripped, exactly as the templates write them."""
+    folder = core.DEVKIT_HOME / "templates" / "tasks"
+    if str(folder) not in _PLACEHOLDERS:
+        lines = _BARE_TEMPLATE.splitlines()
+        for f in sorted(folder.glob("*.md")):
+            try:
+                lines += f.read_text().splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+        _PLACEHOLDERS[str(folder)] = frozenset(ln.strip() for ln in lines if _TEMPLATE_PLACEHOLDER.match(ln))
+    return _PLACEHOLDERS[str(folder)]
+
+
+def shown_body(body: str) -> str:
+    """An item's body without the sections that hold only template placeholders (and the blank lines they leave).
+    A placeholder is a template's line exactly as the template writes it: a line a person wrote in italics, or a box
+    they checked, is the item's text. For reading: the item's file keeps its body as written."""
+    placeholders = _placeholders()
+
+    def filled(part: str) -> bool:
+        text = part.partition("\n")[2] if part.startswith("## ") else part  # a section's text, under its heading
+        return any(ln.strip() and ln.strip() not in placeholders for ln in text.splitlines())
+    kept = [p.strip() for p in re.split(r"(?m)^(?=## )", body or "") if filled(p)]
+    return re.sub(r"\n{3,}", "\n\n", "\n\n".join(kept)).strip()
 
 
 def create(scope: str, title: str, kind="task", bucket="next", priority="normal", body="", why="", a=None,
@@ -1496,6 +1963,22 @@ def _on_remote(path: Path):
     return parse(out + "\n") if rc == 0 else None
 
 
+def _gone(iid: str) -> ValueError:
+    return ValueError(f"{iid} is no longer in the handoff repository: another Mac removed it, or a sync took it away. "
+                      f"Nothing was written: `dev sync`, then `dev task show {iid}` says where it went")
+
+
+def _where_now(path: Path, iid: str) -> Path:
+    """An item's file now: where it was, else where a pull moved it (another folder of items/). ValueError (_gone)
+    when it is in none."""
+    if path.is_file():
+        return path
+    moved = sorted(ITEMS.rglob(f"{iid}.md")) if ITEMS.is_dir() else []
+    if not moved:
+        raise _gone(iid)
+    return moved[0]
+
+
 def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     """Apply `change` to the item at `path`, commit it and push it now. `change(item)` checks the item as it is and
     changes it (ValueError when it may not) -> the commit message. When another Mac pushed a change to the item
@@ -1505,13 +1988,21 @@ def _push_change(path: Path, change, what: str, must_reach: bool) -> dict:
     second one's checks see the first one's change. `must_reach`: raise when the
     change is not on the remote after three tries (it stays committed here, and `dev sync` pushes it later); without
     a remote the commit is the whole change. -> the item."""
-    remote, rel = _pushes(), str(Path(path).relative_to(HANDOFF))
+    path, iid = Path(path), Path(path).stem
+    remote, rel = _pushes(), str(path.relative_to(HANDOFF))
     entry, problem = None, ""
     for attempt in range(3):
         if remote and attempt == 0:
             pull(retake=[rel])
+        # a pull may have moved the item to another folder, or taken it away: the first one above, or the one each
+        # push_now below makes before the next try
+        path = _where_now(path, iid)
+        rel = str(path.relative_to(HANDOFF))
         with record_lock(path):  # another session of this Mac changing the item waits, then checks this change
-            it = load(path)
+            try:
+                it = load(path)
+            except FileNotFoundError:
+                raise _gone(iid) from None
             if entry is None or not _has_entry(it, entry):
                 message = change(it)
                 entry = it["changelog"][0]
@@ -1938,8 +2429,9 @@ def _presence_now(d: dict) -> tuple:
 def write_presence(sessions: list, a=None):
     """presence/<user>@<host>.json: this machine's tracked sessions, each with its `active` flag (a session still
     tracked a while after its agent stopped is not active) and a summary of its run (run_summary), and held locks
-    (written only by this machine). `host` is the machine id and `label` the hostname, for display. This Mac's
-    presence files from before the machine id go (_drop_former_presence).
+    (written only by this machine). `host` is the machine id; the hostname is never published (the handoff is
+    shared and keeps its history, and a hostname often names the person), so another Mac shows this one as
+    `user@<machine id>`. This Mac's presence files from before the machine id go (_drop_former_presence).
     Written when a session starts or ends, or changes project, branch or `active`, or a lock changes; any other change
     (status line, last seen, run summary) only once the file is PRESENCE_HEARTBEAT seconds old. -> whether a file was
     written or removed (the sync commits it)."""
@@ -1949,7 +2441,7 @@ def write_presence(sessions: list, a=None):
     held = [{"id": i["meta"]["id"], "title": i["meta"]["title"], "scope": i["scope"],
              "until": i["meta"]["lock_expires"]} for i in all_items()
             if mine(i["meta"].get("claimed_by"), a, _claimed_at(i)) and not lock_holder(i)[1]]
-    data = {"user": a["user"], "host": a["host"], "label": a.get("label") or a["host"], "updated": now_iso(),
+    data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
             "sessions": [dict({k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
                                                      "subagents", "turn_started", "active")},
                               progress=run_summary(s.get("progress")))

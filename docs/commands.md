@@ -3,8 +3,11 @@
 This page lists every `dev` command and option. `dev help` (or `dev -h`) prints the grouped list, and
 `dev <command> -h` prints the options of one command.
 
-A `<query>` is a project id, a project name, a path, or part of an id. When more than one project matches and you are
-in a terminal, an fzf picker opens.
+A `<query>` is a project id, a project name, a path, or part of an id. A path starts with `/`, `~`, or `.` and may be
+any folder of the project; with a worktree's path the command works in that worktree and its branch. An exact id,
+alias, or path wins over an exact name, which wins over a name or alias that starts with the query, then one that holds it.
+When two or more projects match equally well and not exactly one of them is on this Mac, the command lists each match
+with the command for it and exits with `2`: devkit never guesses.
 
 Commands that fail print a reason on stderr and exit with a non-zero code: `2` for usage problems (an unknown or
 ambiguous project, a bad argument, a missing `--why`), `1` for an operation that did not complete, `70` when devkit
@@ -248,9 +251,10 @@ dev task add "Agree on the event schema" --now -i payments
 ```
 
 A `<selector>` is an id (`T-…`, `F-…`, `B-…`, `S-…`, or a unique prefix), a number from the list, or a unique part
-of the title. Agents use ids. A number counts only in the list `dev task` last showed you, for 30 minutes, and while
-the open items are still that list. devkit refuses the number once an item was closed, added, or moved. The refusal
-names the id the number had and the one at its place now; see
+of the title. `show` and `history` also find a closed item by a part of its title; when the part fits more than one
+item, they list each one with the command that shows it. Agents use ids. A number counts only in the list `dev task`
+last showed you, for 30 minutes, and while the open items are still that list. devkit refuses the number once an
+item was closed, added, or moved. The refusal names the id the number had and the one at its place now; see
 [Work states › Numbers and ids](work-states.md#numbers-and-ids). Every write prints its item, as
 `✓ done T-… “<title>”`. See [Teams and machines](teams.md) for locks, versions, and the changelog.
 
@@ -324,7 +328,7 @@ Versioned plans and specs in `plans/<scope>/`. See [Templates](templates.md#plan
 | --- | --- |
 | `dev plan new "<title>" [--kind plan\|spec\|spike\|bugfix\|adr]` | Creates `plans/<scope>/<date>-<slug>.md` from the template of that kind (default `plan`), at version 1, status draft |
 | `dev plan revise <file> --why "…"` | Records a change: bumps the version, logs who, when, why, and the size of the change, and commits. A plan written without devkit (for example by Superpowers) is adopted into the format on its first revision |
-| `dev plan approve <file> [--why "…"]` | Sets the status to approved and records a version. `revise`, `approve` and `supersede` also take the plan's id (`P-…`, as `dev plan ls` shows it) instead of its file |
+| `dev plan approve <file> [--why "…"]` | Sets the status to approved and records a version. `revise`, `approve` and `supersede` also take the plan's id (`P-…`, as `dev plan ls` shows it) or its path in the handoff repository (`plans/…`) instead of its file, from any folder |
 | `dev plan supersede <file> --why "…"` | Sets the status to superseded and records a version |
 | `dev plan` · `dev plan ls` | Every plan (or the plans of `-p` / `-i`): id, status, version, title, path, and `✎ needs dev plan revise` when the body changed without a revision |
 
@@ -332,7 +336,8 @@ Versioned plans and specs in `plans/<scope>/`. See [Templates](templates.md#plan
 
 Who is working on what: one entry per developer and machine that published presence in the last `N` hours (default
 24), with its live sessions (agent, project, branch, latest status) and the locks it holds. A machine shows as
-`user@hostname (machine id)`, such as `ana@ana-mbp (m-0a1b2c3d)`, and a Mac renamed by macOS shows once (see
+`user@<machine id>`, such as `ana@m-0a1b2c3d`, never by its hostname, which often names the person, and a Mac
+renamed by macOS shows once (see
 [Teams and machines › Machine identity](teams.md#machine-identity)). Each machine publishes its own presence file
 when it syncs.
 
@@ -351,13 +356,13 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 | --- | --- |
 | `dev progress start "<goal>" [--plan "a=30m; b=1h after a [backend]; c"] [--estimate 2h] [--steps N] [--mode guided\|auto] [--replace --why "…"]` | Starts a run for the current session. While the session's run is live, a second start is refused: finish it with `dev progress done`, or replace it with `--replace --why "…"`, which keeps the reason in the new run. Each plan step can carry an estimate, the steps it waits for, and its kind of work in brackets: an id from `dev crew raci`, which decides the RACI check and the approver ([The crew › Kinds of work](crew.md#kinds-of-work-and-the-raci)); an unknown id is refused. Steps without an estimate share what `--estimate` leaves. `--mode` sets who takes the developer's decisions ([The crew](crew.md#guided-or-automatic)). Prints how long similar runs took here |
 | `dev progress step "<what finished>" --check "<evidence>" [--step <n or name>] [--next "…"] [--force]` | Closes the running step (or the one named) with its evidence, and prints the update, which is the status block with the plan under it, then the exact change made. Refused when the description does not match the step, a crew member still owns it, or its dependencies are open; `--no-check` when there is nothing to verify. The tech lead's step closes done whatever its Check says, `⚠` and `✗` included, and the Check is kept in the step's history (`dev progress history`). A crew member's `--step <its step> --check "…"` closes that step at once, by the rules of its end: done with a ✓ Check, otherwise unverified. Without `--step`, a member's record closes its lane's only running step; with two or more running it is refused, and with none it prints ⚠ and closes no step. The member works on, and the line shows ✓ only when a step's state changed: it says which step closed, names a step that joined the lane, or says why nothing changed. A review step stays running and ends with the member's report, done only when the crew gates pass it. A member's `--step` on a step its lane does not hold, on a step still queued for its lane, or on its own step without `--check` exits 2, records nothing, and says what to do |
-| `dev progress step "<what finished>" --check "<evidence>" --approves "api, screens"` | The step's Check is also its verdict on the finished steps it names: `✓` approves them, `✗` or `⚠` sends them back. Refused, whole, when a named step is not done, has no kind of work, was done by the same member, or is approved by someone else in the RACI. The tech lead's verdict counts at once. A crew member's is checked at once and counts at the end of its lane, only when the crew gates pass its report without a finding ([The crew › Kinds of work](crew.md#kinds-of-work-and-the-raci)) |
+| `dev progress step "<what finished>" --check "<evidence>" --approves "api, screens"` | The step's Check is also its verdict on the finished steps it names: `✓` approves them, `✗` or `⚠` sends them back. Refused, whole, when a named step is not done (an unverified one excepted, below), has no kind of work, was done by the same member in any of its versions, or is approved by someone else in the RACI. A `✓` on a step that ended unverified also closes it, and the command says why it was unverified; a `✗` or `⚠` on one is refused, and the tech lead reopens it. A verdict given before the step last ended unverified closes and approves nothing. The tech lead's verdict counts at once. A crew member's is checked at once and counts at the end of its lane, only when the crew gates pass its report without a finding ([The crew › Kinds of work](crew.md#kinds-of-work-and-the-raci)) |
 | `dev progress note "<what is happening>" [--next "…"] [--step <n or name> --check "<evidence>"]` | An update while a step is still running: recorded and printed as the status block (Check `–` the step is still running), and no step changes state. From a crew member, it stays in its lane. `--step` with `--check` keeps partial evidence on a step that is not finished: the step stays as it is, and the crew gates count it as the member's recorded step. A crew member's goes on a step its lane holds; for another step it stays in its lane |
 | `dev progress add "<name>=<estimate> [after …] [<id>]" [--why "…"]` | Adds a step found during the work; add it when it starts. `[<id>]` declares its kind of work, as in a plan. Each quoted spec is a step (`dev progress add "a=5h [security]" "b=2h [testing]"` adds two), and so is each part between `;`; a step name that still holds an estimate (`a=5h b`) is refused. From a crew member, the step goes to its own lane |
-| `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--why "…"]` | Hands a step to a crew member; its time is that member's, and an edit outside the scope gets advice in the member's context. A working lane of that member that runs no other step takes it at once, a member resumed with `SendMessage` included, so the lane gets the step's scope and its report closes it. Otherwise the step keeps its assignment and waits: the first lane of the member that frees takes it, oldest assignment first, with its scope; `--to "<launch description>"` binds it to one lane. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
-| `dev progress begin <step>` | Starts a step in parallel with the running one; the tech lead's next `dev progress step` without `--step` closes that step or nothing. Refused for a step that is already done or skipped, with the line that adds your evidence to it (`dev progress note "…" --step "<step>" --check "…"`, or `dev progress confirm` when its dependencies were reopened) and the `dev progress reopen` line that works on it again; refused too while its dependencies are open |
+| `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--why "…"]` | Hands a step to a crew member; its time is that member's, and an edit outside the scope gets advice in the member's context. A working lane of that member that runs no other step takes it at once, a member resumed with `SendMessage` included, so the lane gets the step's scope and its report closes it. Otherwise the step keeps its assignment and waits: the first lane of the member that frees takes it, oldest assignment first, with its scope; `--to "<launch description>"` binds it to one lane. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded. A review step is refused, with no `--why` override, for a member whose lane ran a step it follows, directly or through other work and across reopens, and for a label that names no crew member |
+| `dev progress begin <step>` | Starts a step in parallel with the running one; the tech lead's next `dev progress step` without `--step` closes that step or nothing. Refused for a step that is already done or skipped, with the line that adds your evidence to it (`dev progress note "…" --step "<step>" --check "…"`, or `dev progress confirm` when its dependencies were reopened) and the `dev progress reopen` line that works on it again; refused too while its dependencies are open. A member's blocked step goes back as an answer returns it: to its lane when that lane is free, else first in that lane's or its member's queue |
 | `… --verbose` on `add`, `assign`, `begin`, `reopen`, `skip` and `confirm` | Prints the whole plan after the change. Without it, these commands print the steps the change touched and one line with the run's progress |
-| `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` · `dev progress confirm <step> --why "…"` | Undoes a wrong close, skips a step on purpose, or confirms a step whose dependencies were reopened and closed again |
+| `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` · `dev progress confirm <step> --why "…"` | Undoes a wrong close, skips a step on purpose, or confirms a step whose dependencies were reopened and closed again. A reopened step keeps who did its work, and the `--approves` verdicts members still hold on it are dropped, with a notice to each member still at work. The steps that used it get a recheck flag ([Work states › Steps](work-states.md#steps)) |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
 | `dev progress done "<outcome>" [--why "…"]` | The run is finished; refused while steps are pending, decisions wait, or an Accountable member has not approved the work they own. `--why` ends it without that approval and records the reason. Records the active time against the estimate and sends a desktop notification. The messages to you that nobody acknowledged close with the run, so they stop coming back, and it names them; `dev crew read` still shows each one |
 | `dev progress history` | Every step change: when, from → to, by whom (the tech lead (Morpheus), a crew member, devkit), why |
@@ -412,9 +417,9 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew show <name>` | One member: role, personality, when to use it, skills, tools, model tier, keywords |
 | `dev crew brief <name> "<task>" [--scope "<globs>"] [--step <step>] [--activity ID]` | A ready brief for the Agent tool or `spawn_agent`, the exact launch line for Claude Code and Codex, and the `dev progress assign` command that links the lane. `--activity` declares the task's kind of work, which picks the brief's skills, knowledge, and known pitfalls in any language; without it, the member's Responsible kind of work decides |
 | `dev crew route "<task>" [--files a,b]` · `dev crew route --plan [--apply]` | The best members for a task, with scores and reasons; or a member for every unowned plan step |
-| `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for the tech lead (Morpheus) to launch it |
-| `dev crew decline "<step>" --why "…"` | Hands a delegated step back to the tech lead (Morpheus) |
-| `dev crew withdraw <id> --why "…"` | Closes a pending decision that no longer applies (tech lead only): frees the step blocked on it, tells the asking member, and records why. It is never the developer's answer |
+| `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for the tech lead (Morpheus) to launch it. The whole task is checked for secrets before anything changes, and a notice that cannot be sent, such as one holding a secret, refuses the whole command, with nothing saved |
+| `dev crew decline "<step>" --why "…"` | Hands a delegated step back to the tech lead (Morpheus). A notice that cannot be sent, such as one holding a secret, refuses the whole command, with nothing saved |
+| `dev crew withdraw <id> --why "…"` | Closes a pending decision that no longer applies (tech lead only): frees the step blocked on it, tells the asking member, and records why. It is never the developer's answer. The whole reason is checked for secrets before anything changes, and a notice that cannot be sent, such as one holding a secret, refuses the whole command, with nothing saved |
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
 | `dev crew next --first <step> --why "…"` | The tech lead (Morpheus) launches that step ahead of the order; the reason is recorded and audited. Both options are required |
 | `dev crew owner <path>… [--json]` | Who holds each file before you edit or assign it: the crew member, their run and session, their step, their lane state (working; stale when its session's process is gone or it has been silent for `progress.stale_agent_minutes`; ended when devkit or Claude Code saw it end) and last activity, and what to do (wait, `dev crew ask --to <id> "…"`, or nothing when the holder ended or is stale). It decides exactly as the edit check does. Exits with `1` while a working member holds a path, `0` when every path is free. Reads only |
@@ -481,6 +486,7 @@ project data, and hotfix rankings. The guide is [The bug registry](bug-registry.
 | `dev bug sync` | Refreshes the cache and sends the outbox; the hourly sync job does the same |
 | `dev bug pending` | Items held for review, each with the exact issue title and body, comment, or private report it would post |
 | `dev bug send <id>` · `dev bug drop <id>` | Sends or drops a held item. Sending keeps the exact-payload and privacy checks |
+| `dev bug drop --old-format` | Drops every item an older devkit queued, which no sync can send, and lists each one; the items that can be sent stay. An item another devkit process holds is kept and named, and the command exits `1`: run it again |
 | `dev bug confirm <bug> <detour>` | Confirms a detour; it becomes `verified` only for an owner, member, or listed maintainer other than its author |
 | `dev bug share on\|reports\|off` | Legacy rich-payload sharing; it does not turn off automatic safe capture or delivery or approve held items |
 
@@ -631,7 +637,7 @@ Local CI evidence: proof that what CI runs passed on your Mac, on exactly the fi
 
 | Option | Effect |
 | --- | --- |
-| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, a hosted runner's own setup (deletions outside the checkout, Docker prunes, setup run with `sudo`, OS package installs, `playwright install`, `git config --global`, Linux-only system setup such as `fc-cache`, `ldconfig`, or `locale-gen`, and `mkdir`, `cp`, `mv`, `ln`, `install`, `touch`, `tee`, or `rsync` writes and shell redirects (`>`, `>>`, `2>`, `&>`) into the home folder outside the checkout, unless the same pipeline runs a check, as `pytest \| tee ~/pytest.log` and `pytest > ~/pytest.log` do; a check that writes into a dotfile such as `~/.bashrc`, through `tee` or a redirect, or that is written as root (`sudo tee`, `sudo dd of=`) into any folder, blocks the evidence instead; a download written as root into a system folder stays setup), and steps that need CI secrets are skipped, each with a line that says why. In a step that sets up a tool and runs it (`brew install gitleaks && gitleaks detect`), only the setup is left out and the check runs, so a tool missing on this Mac fails the evidence. A script run with `source` or `.`, and a command or process substitution, count as checks. A check that cannot be separated from its setup (a nested shell, a subshell, a substitution, a heredoc, a `case`), a check run with `sudo` (including `sudo test`, `sudo [`, and a reporting command with a substitution, such as `sudo echo "$(…)"`), and a step that names a Docker context this Mac lacks block the evidence (see [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence)) |
+| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, a hosted runner's own setup (deletions outside the checkout, Docker prunes, setup run with `sudo`, OS package installs, `playwright install`, `git config --global`, Linux-only system setup such as `fc-cache`, `ldconfig`, or `locale-gen`, and `mkdir`, `cp`, `mv`, `ln`, `install`, `touch`, `tee`, or `rsync` writes and shell redirects (`>`, `>>`, `2>`, `&>`) into the home folder outside the checkout, unless the same pipeline runs a check, as `pytest \| tee ~/pytest.log` and `pytest > ~/pytest.log` do; a check that writes into a dotfile such as `~/.bashrc`, through `tee` or a redirect (also through a variable the step set, as in `LOG=~/.bashrc; pytest > $LOG`), that writes to a path this Mac cannot tell, such as a command's output (`LOG=$(echo ~/.bashrc); pytest > $LOG`) or a variable that `read` sets (a fresh `mktemp` path is known), or that pipes into any `sudo` command (`sudo tee`, `sudo dd of=`, `sudo cat`), blocks the evidence instead; a download written as root into a system folder stays setup), and steps that need CI secrets are skipped, each with a line that says why. In a step that sets up a tool and runs it (`brew install gitleaks && gitleaks detect`), only the setup is left out and the check runs, so a tool missing on this Mac fails the evidence. A script run with `source` or `.`, and a command or process substitution, count as checks. A check that cannot be separated from its setup (a nested shell, a subshell, a substitution, a heredoc, a `case`), a check run with `sudo` (including `sudo test`, `sudo [`, and a reporting command with a substitution, such as `sudo echo "$(…)"`), and a step that names a Docker context this Mac lacks block the evidence (see [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence)) |
 | `--dry-run` | With `--run`: the plan, without running anything |
 | `--keep-going` | With `--run`: do not stop at the first failure |
 | `--step-timeout MIN` | With `--run`: minutes per step. Default: the step's own `timeout-minutes`, else its job's. Without either, 1.5 × its longest local pass when that is over 30 minutes, else 30. A job with a literal matrix runs once locally, so history may raise its per-leg timeout. Values under 1 are refused |
@@ -801,7 +807,13 @@ push to a draft runs the whole CI. `draft-gate-no-ready` (medium) flags a workfl
 `types` leave out `ready_for_review`, so marking a draft ready starts no run until the next push. `--fix` writes the
 gate: `types: [opened, synchronize, reopened, ready_for_review]` on `pull_request`, and
 `if: github.event.pull_request.draft == false` on every job that needs no other job (the jobs that need it skip with
-it; on a push the field is null, which equals false, so pushes still run).
+it; on a push the field is null, which equals false, so pushes still run). A workflow whose skipped jobs never run on
+a pull request gets neither finding nor `ready_for_review`; when `--fix` leaves a draft gate to you, it says which
+type to add.
+
+Job timeouts: `--fix` sizes each new `timeout-minutes` from the job's last 20 successful runs on GitHub, at 1.5 times
+the longest, rounded up to 5 minutes and never below the policy's `job_timeout_minutes`. When no run can be read, it
+writes no number and says why.
 
 ### `dev ci init [--provider HOST] [--stack STACK] [--dry-run] [--force] [-p PROJECT]`
 
@@ -863,8 +875,10 @@ dev delivery apply -i platform --set release_train="bom → parent → services,
 
 ### `dev sec scan [<query>] [--history] [--config RULES] [-v]`
 
-Scans the current repository (or `<query>`) for security problems. Each scanner is optional; a missing one is reported
-with its install command and skipped. A skipped scanner provides no coverage for its checks.
+Scans the current repository (or `<query>`) for security problems. A `<query>` that is a folder outside any checkout,
+such as `.`, scans that folder; a project that is not on this Mac is refused with the `dev clone` command that brings
+it. Each scanner is optional; a missing one is reported with its install command and skipped. A skipped scanner
+provides no coverage for its checks.
 
 Exits with `1` for findings at the thresholds below or when an installed scanner fails to complete a valid scan.
 Operational failures include unexpected exit codes, timeouts, empty or invalid JSON reports, invalid report
@@ -876,12 +890,19 @@ and incomplete on any error, rule timeout, fixpoint timeout, or skipped rule, ea
 Two framework rules (boto3 hardcoded token, Flask NaN injection) are left out when no Python file imports those
 packages, and the scan says so.
 
+A Semgrep finding the repository reviewed and accepted does not fail the scan. devkit reads `REVIEWED_DISPOSITIONS` in
+`scripts/security_corpus.py` as the HEAD commit holds it, without running the file, and matches each finding by the
+rule of the repository's qualification gate: its rule, its path, a context found once in the file, and the finding's
+exact span. The scan lists those findings as reviewed, and any other finding at the thresholds still exits with `1`.
+A disposition only in the working tree, or one whose path leaves the repository, reviews nothing; when the file does
+not read as literal data, the scan says why. Only a scan of a checkout's top folder reads them.
+
 | Scanner | Finds |
 | --- | --- |
 | gitleaks | Secrets in the working tree, and in the git history with `--history` |
 | osv-scanner | Known vulnerabilities in lockfiles and manifests |
 | Semgrep | Error and warning code patterns (rule set `p/default`, or `--config`); informational findings are counted but do not fail the scan; metrics are off |
-| Trivy | High and critical vulnerabilities, misconfiguration (Dockerfile, Terraform, Kubernetes) and secrets; telemetry and version checks are off |
+| Trivy | High and critical vulnerabilities, misconfiguration (Dockerfile, Terraform, Kubernetes) and secrets; telemetry and version checks are off; `node_modules`, `.venv`, `venv`, `vendor`, `dist`, `build`, `target`, `.git`, `.worktrees`, and `.next` are skipped at any depth |
 | zizmor | GitHub Actions workflows: template injection, untrusted triggers, unpinned actions, broad permissions (runs offline, medium severity and up) |
 
 `-v` lists up to 60 findings per scanner instead of 8.
@@ -977,9 +998,9 @@ lists what it has), also when another remote has them.
    (`git fetch`, `git log --left-right`, `git rebase origin/<branch>`, or `dev push --force-with-lease` on your own
    branch).
 4. No WIP commit, and the project's backup policy allows it (below). Then, on a public repository, no commit that
-   reads as a security fix (a `security` scope, a CVE, a red-team test): devkit suggests `dev branch embargo` first,
-   and `--public` pushes it anyway. Public or private is the visibility of the repository the push goes to, not
-   origin's.
+   reads as a security fix (a `security` scope, a CVE, a red-team test that still expects a failure): devkit suggests
+   `dev branch embargo` first, and `--public` pushes it anyway. Public or private is the visibility of the repository
+   the push goes to, not origin's.
 5. The CI configuration of the commit it sends shows that the push starts no CI run. It reads the GitHub Actions
    `push` branches, `branches-ignore`, tags and paths filters, the pull request of the branch (a draft whose jobs
    skip drafts starts none, looked up on the repository the push goes to), and the jobs' `if:`; GitLab rules, Bitbucket `default` and `branches`, Azure `trigger` and `pr`. CI that
@@ -1168,6 +1189,7 @@ first three, and says that `dev test run <test files>` runs them (`outside_lane`
 | Option | Effect |
 | --- | --- |
 | `--since REF` | Compare with `REF` instead of the merge-base with `origin/<default>` (`run`, `plan`, `prove`, `audit`) |
+| `--listed` | The files that hold tests are those the runner's own listing names (pytest `--collect-only`, unittest discovery, `vitest list`, `playwright --list`), cached; config `test.listing` turns it on for every run |
 | `--runner NAME` | Only this runner: `pytest`, `unittest`, `jest`, `vitest`, `node`, `maven`, `gradle`, `go`, `phpunit`, `pest` |
 | `-v`, `--verbose` | Stream the runner's full output (it streams to a terminal anyway) |
 | `--json` | The result as JSON |
@@ -1336,6 +1358,7 @@ When a command refuses:
 | `VF-… sits on VC-…, which is not VC-…'s recipe at another width or theme` | Record the pass with a finding of its own, `--clean`, or `--na` |
 | `<host> is not on this Mac` | Capture fixture or demo data only, with `--remote` |
 | `gitleaks is not installed` · `node is not installed` · `The pinned Playwright is not installed` | `dev install --only tools` |
+| `npm root -g gave no folder` | npm failed, did not answer in time, or printed nothing on both of its tries (25 s each), which is not a missing install: check that `npm root -g` prints a folder here, then capture again or run the command again. When it says npm is not installed, run `dev install --only tools` |
 | `Step N, <step>, found nothing in 10 s` | Fix the step's target, or add a `wait` step before it; nothing was recorded |
 | `E412 is not in the description of VC-…` · `Mark 14 is not on the marked copy` | List the elements (`dev visual describe VC-… --interactive`) or the marks (`dev visual marks VC-…`) |
 | `The picture of VC-… does not match its record` | The local picture changed: `dev visual capture --again VC-…`, then share the new capture's finding |
@@ -1798,7 +1821,13 @@ the parent processes, sends a desktop notification, and stays listed at the sess
 you run [`dev ext ack`](#dev-ext-ack). The notification is a security notice: `DEVKIT_NO_NOTIFY=1` and
 `progress.notify: false` do not turn it off. In Claude Code, the session start shows that list to you as a message, not
 only to the agent. When the list is busy, does not parse, or cannot be written, nothing is accepted: the change stays as
-drift, and `dev ext update --apply` says it was not recorded.
+drift, and `dev ext update --apply` says it was not recorded. It says why for each agent's copy it updates (Claude Code's
+and Codex's without `--agent`) and goes on with the next: a list another devkit process holds exits with `75`, so run
+the command again in a moment; a list that does not parse, is unsafe, or cannot be written exits with `2`, with the
+repair to make first. When the copies fail in different ways, the command exits with the code that asks the most of
+you: `2` (repair) before `1` (failed), and `1` before `75` (run it again). `dev ext ack`, which writes one list,
+exits with `75` or `2` by the same rule when it cannot write that list, and with `1` when every acceptance it
+lists was made outside a terminal.
 
 ### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
 

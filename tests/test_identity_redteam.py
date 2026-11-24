@@ -255,7 +255,9 @@ class ClaudePermissionModeTests(TokenCase):
         token, new, _ = self.mode("git status", "bypassPermissions")
         self.assertTrue(token)
 
-    def test_default_and_accept_edits_stamp_only_visible_dev_calls(self):
+    # where Claude Code checks the developer's rules, no call carries a token; a plain dev call goes out as
+    # written (its dev command is text-pinned), so the developer's allow rule matches the text the agent wrote
+    def test_default_and_accept_edits_stamp_nothing_and_leave_plain_dev_calls_as_written(self):
         for mode in ("default", "acceptEdits", "plan"):
             with self.subTest(mode=mode):
                 token, new, out = self.mode("git status", mode)
@@ -263,9 +265,8 @@ class ClaudePermissionModeTests(TokenCase):
                 token, new, out = self.mode("dev crew inbox 2>&1 | tail -5", mode)  # visible, but not plain
                 self.assertEqual(token, "")
                 token, new, out = self.mode("dev crew inbox", mode)
-                self.assertTrue(new.startswith(f"DEVKIT_CALL={token} dev crew inbox") or
-                                f" DEVKIT_CALL={token} dev crew inbox" in new, new)
-                self.assertNotIn("set -C", new)  # dev pins the plain form itself: no redirect outside the project
+                self.assertEqual((token, new), ("", ""))
+                self.assertNotIn("permissionDecision", out)
                 self.assertNotIn("export:", out)
                 self.assertNotIn("Bash(export", out)
 
@@ -339,6 +340,18 @@ class CodexAskingThreadTests(CodexTokenCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["crew"]["tool_use_id"], data["tool_use_id"])
         self.assertIn(SUB, found[0]["detail"])
+
+    def test_a_plain_call_pin_written_before_its_shell_started_names_nobody(self):
+        # the plain form's dev command writes the pin itself; a shell that started after that write cannot be the
+        # call's (its pid went to a newer process), so its token names nobody
+        _, token, _ = self.exec("dev progress add extra")
+        self.starts[self.shell] = time.time() + 1
+        rc, out = self.lead(token)
+        self.assertEqual(rc, 2, out)
+        self.assertFalse(self.added())
+        found = self.records("caller.token-foreign-use")
+        self.assertEqual(len(found), 1)
+        self.assertIn("outside the first", found[0]["detail"])
 
 
 class PinRaceTests(TokenCase):

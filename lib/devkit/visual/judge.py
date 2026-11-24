@@ -95,9 +95,8 @@ def _description(project: str, c: dict) -> dict:
                                 "one: dev visual capture <url>")
     desc = store.description(project, c)
     if not isinstance(desc, dict) or not isinstance(desc.get("elements"), list):
-        host = str((c.get("image") or {}).get("where") or "another Mac").removeprefix("local:")
-        raise store.VisualError(f"The description of {c['id']} is not on this Mac (it was taken on {host}). Capture "
-                                f"it again here: dev visual capture --again {c['id']}")
+        raise store.VisualError(f"{store.not_here(c, 'description')}. Capture it again here: dev visual capture "
+                                f"--again {c['id']}")
     return desc
 
 
@@ -246,9 +245,8 @@ def _picture(project: str, c: dict) -> bytes:
     try:
         data = path.read_bytes()
     except OSError:
-        host = str((c.get("image") or {}).get("where") or "another Mac").removeprefix("local:")
-        raise store.VisualError(f"The picture of {c['id']} is not on this Mac (it was taken on {host}). Capture it "
-                                f"again here: dev visual capture --again {c['id']}") from None
+        raise store.VisualError(f"{store.not_here(c, 'picture')}. Capture it again here: dev visual capture --again "
+                                f"{c['id']}") from None
     if hashlib.sha256(data).hexdigest() != sha:
         raise store.VisualError(f"The picture of {c['id']} does not match its record (its SHA-256 differs), so it is "
                                 f"not marked. Capture it again: dev visual capture --again {c['id']}")

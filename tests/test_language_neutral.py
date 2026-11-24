@@ -210,11 +210,15 @@ class SkillRuleTests(unittest.TestCase):
     def tearDown(self):
         skillguard.installed = self._installed
 
+    # every rule fires on what the work does: the files it changes (by name, or by what they hold: content_files with
+    # a content pattern, as the aspnetcore rule reads C# files for a controller), the commands it runs, or the kind
+    # of work a step declares; content_files without a content pattern match nothing in skillguard
     def test_no_rule_reads_the_developers_words(self):
         for r in skillguard.rules():
             with self.subTest(rule=r["id"]):
                 self.assertNotIn("prompt", r)
-                self.assertTrue(r.get("files") or r.get("commands") or r.get("activities"))
+                by_content = bool(r.get("content_files") and r.get("content"))
+                self.assertTrue(r.get("files") or by_content or r.get("commands") or r.get("activities"))
 
     def test_a_declared_kind_of_work_and_a_command_name_their_skills(self):
         self.assertIn("workflows", [r["id"] for r in skillguard.rules_for_activity("cicd")])

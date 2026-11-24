@@ -78,6 +78,7 @@ _AUDIT_CACHE: dict = {}  # (file, size, mtime) -> the git.backup* records in it,
 
 
 def _backup_records(f: Path) -> list:
+    from . import audit
     try:
         st = f.stat()
     except OSError:
@@ -95,10 +96,7 @@ def _backup_records(f: Path) -> list:
         for ln in data.splitlines():
             if b'"git.backup' not in ln:
                 continue
-            try:
-                r = json.loads(ln)
-            except ValueError:
-                continue
+            r = audit.parse_line(ln)  # None for a line no reader can read: cut short, or nested past any record
             if isinstance(r, dict) and r.get("action") in ("git.backup", "git.backup-skipped"):
                 recs.append({"action": r["action"], "project": r.get("project") or "", "branch": r.get("branch") or "",
                              "ts": r.get("ts") or 0, "outcome": r.get("outcome") or "", "detail": r.get("detail") or ""})
@@ -168,6 +166,7 @@ _TRAIL_CACHE: dict = {}  # (file, size, mtime) -> the git.embargo records in it
 
 def _embargo_records(f: Path):
     """The `git.embargo` records of one audit file; [] for a file that is gone, None for one that cannot be read."""
+    from . import audit
     try:
         st = f.stat()
     except FileNotFoundError:
@@ -189,10 +188,7 @@ def _embargo_records(f: Path):
         for ln in data.splitlines():
             if b'"git.embargo"' not in ln:
                 continue
-            try:
-                r = json.loads(ln)
-            except ValueError:
-                continue
+            r = audit.parse_line(ln)  # None for a line no reader can read: cut short, or nested past any record
             if isinstance(r, dict) and r.get("action") == "git.embargo" and r.get("outcome") == "ok":
                 recs.append({"id": r.get("id") or "", "project": r.get("project") or "",
                              "branch": r.get("branch") or r.get("target") or "", "ts": r.get("ts") or 0,

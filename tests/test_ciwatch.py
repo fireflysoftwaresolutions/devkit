@@ -18,6 +18,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, ciwatch  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState  # noqa: E402
@@ -788,6 +793,20 @@ class StopGateTests(WatchCase):
                 sha = git(self.repo, "rev-parse", "HEAD")
                 want = [(top, f"v1.0.{n}", sha)] if watched else []
                 self.assertEqual(ciwatch.targets(f"dev release --version 1.0.{n}", str(self.repo)), want)
+
+    def test_dev_release_with_a_version_watches_the_tag_spelled_as_the_repository_tags(self):
+        # the watch looked for v<version>, which a repository whose tags have no v never gets from dev release
+        wf = self.repo / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "release.yml").write_text("on:\n  push:\n    tags: ['[0-9]+.[0-9]+.[0-9]+']\njobs:\n  t:\n"
+                                        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "ci: release on version tags")
+        git(self.repo, "tag", "1.0.0", "HEAD~1")
+        git(self.repo, "tag", "1.0.1")  # what dev release --version 1.0.1 created here
+        top, sha = git(self.repo, "rev-parse", "--show-toplevel"), git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(ciwatch.targets("dev release --version 1.0.1", str(self.repo)), [(top, "1.0.1", sha)])
+        self.assertEqual(ciwatch.targets("dev release --version v1.0.1", str(self.repo)), [(top, "1.0.1", sha)])
 
     def test_codex_is_told_to_wait_in_the_foreground(self):
         self.codex("git push origin feat/x", prompt=True)

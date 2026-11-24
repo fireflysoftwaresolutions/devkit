@@ -554,8 +554,8 @@ def read_presence(handoff: Path, reg: dict, max_age_h: float = 24, now: float = 
         try:
             if f.stat().st_size > PRESENCE_CAP:
                 continue
-            p = json.loads(f.read_text())
-        except (OSError, ValueError, RecursionError):  # RecursionError: deep nesting under the cap (Python 3.9's json)
+            p = core.load_json(f.read_text())  # another Mac's file: too deep reads as invalid
+        except (OSError, ValueError):
             continue
         if valid_presence(p) and now - work.parse_iso(p.get("updated") or "") < max_age_h * 3600:
             out.append(p)
@@ -719,7 +719,8 @@ def people(team: list, items: list, slog: list, now: float = None, local: list =
 
 
 def _host_label(who: str, team: list) -> str:
-    """The hostname part of `who` as a person reads it (work.display): `mac-158` for `ana@m-…`."""
+    """The machine part of `who` as a person reads it (work.display): its machine id, `m-0a1b2c3d` for
+    `ana@m-0a1b2c3d`, never a hostname; a record from before the machine id keeps the host it named."""
     from . import work
     return work.display(who, team).partition("@")[2]
 

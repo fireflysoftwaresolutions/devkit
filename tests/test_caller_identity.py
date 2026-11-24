@@ -20,7 +20,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, cli, hooks, identity, progress as pg  # noqa: E402
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
+from devkit import audit, cli, hooks, progress as pg  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 SETTINGS = Path(__file__).resolve().parents[1] / "config" / "claude" / "settings.json"
@@ -562,19 +566,19 @@ class CodexThreadSessionTests(CallerCase):
 
 
 class RewriteTests(CallerCase):
-    def test_a_member_lane_command_is_rewritten_without_approving_it(self):
-        # S2: updatedInput applies without a permission decision, and the permission check runs on the result
+    def test_a_member_lane_command_goes_out_as_written_without_approving_it(self):
+        # outside bypass mode a member's plain lane call is neither rewritten nor approved, so Claude
+        # Code checks the developer's rules on the text the member wrote; its dev command is text-pinned to the lane
         data = {"session_id": "s1", "tool_use_id": "toolu_r", "tool_name": "Bash", "agent_id": "a_tank",
                 "tool_input": {"command": "dev progress note x"}, "cwd": str(self.root)}
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
             hooks.run("pre-tool", "claude")
-        spec = json.loads(out.getvalue())["hookSpecificOutput"]
-        command = spec["updatedInput"]["command"]
-        # no bypass mode: the plain form, the token right before dev, so the call still reads as a dev command
-        self.assertRegex(command, r"\ADEVKIT_FROM_AGENT=a_tank DEVKIT_CALL=toolu_r\.[A-Za-z0-9_-]{22} dev progress note x\Z")
-        self.assertEqual(identity.strip_token(command), "DEVKIT_FROM_AGENT=a_tank dev progress note x")
+        spec = (json.loads(out.getvalue()) if out.getvalue().strip() else {}).get("hookSpecificOutput") or {}
+        self.assertNotIn("updatedInput", spec)
         self.assertNotIn("permissionDecision", spec)
+        entry = pg.call_entry(data)
+        self.assertEqual((entry["caller"], entry["pin_by"]), ("a_tank", "text"))
 
 
 if __name__ == "__main__":

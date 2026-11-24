@@ -278,7 +278,8 @@ def record_occurrence(kind: str, fp: str, *, impact: str = "blocked", command: s
                       session: str = "", text: str = "", security: bool = False) -> dict:
     """Record one hit of `fp` on this machine with a fresh one-time code, in BUGS/occurrences.jsonl. `text`: the raw
     error message, read only to tell a security failure (is_security), never kept. -> the record, with `saved` False
-    when the state folder could not be written (the code then matches nothing)."""
+    when the state folder could not be written or the log's lock was not free within 0.1 s, the budget a hook can
+    spend (the code then matches nothing)."""
     rec = {"ts": round(time.time(), 3), "kind": kind, "fingerprint": fp,
            "code": _code(), "impact": impact, "session": session,
            "version": core.VERSION, "command": command, "event": event, "refusal_id": refusal_id, "word": word,
@@ -809,12 +810,13 @@ def _old_refusal_id(value) -> str:
 
 
 def _secret_like(value) -> bool:
-    """True when `value` holds something shaped like a secret: what the audit's redactor removes (token prefixes,
-    keys with their values, passwords in URLs, private keys), a hex run of 16 or more characters, or a run of 24 or
-    more token characters that mixes letters and digits. Over-matching only holds an item for the developer."""
+    """True when `value` holds something shaped like a secret: what the audit's secret screen finds (audit.find_secret:
+    token prefixes, keys with their values, passwords in URLs, private keys, and the patterns of audit.redact.extra,
+    this Mac's and the team's; any text while those cannot load), a hex run of 16 or more characters, or a run of 24
+    or more token characters that mixes letters and digits. Over-matching only holds an item for the developer."""
     from . import audit
     s = value if isinstance(value, str) else ""
-    if audit.SECRET.search(s) or _HEX_RUN.search(s):
+    if audit.find_secret(s) or _HEX_RUN.search(s):
         return True
     return any(re.search(r"\d", m.group(0)) and re.search(r"[A-Za-z]", m.group(0)) for m in _TOKEN_RUN.finditer(s))
 
@@ -1493,8 +1495,8 @@ def _one_block(body):
     if len(blocks) != 1:
         return None
     try:
-        obj = json.loads(blocks[0])
-    except (ValueError, RecursionError):  # nested past the parser's depth: no payload either
+        obj = core.load_json(blocks[0])
+    except ValueError:  # not JSON, or nested deeper than a reader can read: no payload either
         return None
     return obj if isinstance(obj, dict) else None
 
@@ -1683,12 +1685,12 @@ def stdlib_namespaces() -> list:
     readable text may name the exception classes they define (_known_classes). tests/test_bugs_render.py fails when
     devkit's source imports a module this list leaves out. tomllib joins on Python 3.11 and later."""
     import __future__, _thread, argparse, ast, base64, bisect, builtins, calendar, collections  # noqa: E401
-    import contextlib, contextvars, copy, csv, ctypes, dataclasses, datetime, difflib, fcntl, filecmp  # noqa: E401
+    import configparser, contextlib, contextvars, copy, csv, ctypes, dataclasses, datetime, difflib, fcntl, filecmp  # noqa: E401
     import fnmatch, functools, getpass, glob, gzip, hashlib, hmac, html, importlib, io, itertools, json  # noqa: E401
     import marshal, math, os, pathlib, platform, plistlib, posixpath, pty, py_compile, random, re  # noqa: E401
     import secrets, select, selectors, shlex, shutil, signal, socket, stat, statistics, string, struct  # noqa: E401
     import subprocess, sys  # noqa: E401
-    import sysconfig, tarfile, tempfile, termios, textwrap, threading, time, traceback, types  # noqa: E401
+    import sysconfig, tarfile, tempfile, termios, textwrap, threading, time, tokenize, traceback, types  # noqa: E401
     import typing, unicodedata, uuid, warnings, zipfile, zlib  # noqa: E401
     import concurrent.futures, http.client, http.server, importlib.util, urllib.error, urllib.parse  # noqa: E401
     import urllib.request, xml.etree.ElementTree, xml.parsers.expat  # noqa: E401
@@ -2603,7 +2605,7 @@ def _old_format(item: dict) -> bool:
 
 def old_format_problem(item_id) -> str:
     return (f"queued by an older devkit without the record of where it came from, so it is never sent; "
-            f"`dev bug drop {item_id}` removes it")
+            f"`dev bug drop {item_id}` removes it, `dev bug drop --old-format` every such item")
 
 
 def pending() -> list:
@@ -2679,6 +2681,33 @@ def drop(item_id: str) -> None:
         except OSError:
             raise KeyError(item_id)
     _forget_approval(str(int(item_id)))
+
+
+def drop_old_format() -> tuple:
+    """Remove every old-format item (_old_format) from the outbox, as `drop` removes one: each is read again under its
+    lock, so an item queued again in the current format since the listing stays, and so does every item that can be
+    sent. -> ([{id, type, fingerprint}] of the dropped items, oldest first; [ids] another process kept busy)."""
+    dropped, busy = [], []
+    for iid in map(str, _item_ids()):
+        first = _load_item(iid)
+        if not first or not _old_format(first):
+            continue
+        path = _outbox() / f"{int(iid)}.json"
+        with core.file_lock(path, COMMAND_WAIT) as got:
+            if not got:
+                busy.append(iid)
+                continue
+            item = _load_item(iid)
+            if not item or not _old_format(item):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+        _forget_approval(iid)
+        p = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        dropped.append({"id": iid, "type": p.get("type") or "?", "fingerprint": p.get("fingerprint") or "?"})
+    return dropped, busy
 
 
 def _forget_approval(item_id: str):
@@ -3259,11 +3288,20 @@ def flush(client=None, now: float = None) -> dict:
         _prepare_capture_vocabulary()
     except OSError:
         pass  # optional detail; its absence never stops the safe minimal report
-    with core.Lock("bugs-automatic-flush", wait=0) as locked:
+    with core.Lock(_automatic_flush_lock(), wait=0) as locked:
         automatic = _flush_automatic(client, time.time() if now is None else now) if locked else {}
     examined = automatic.get("examined", 0)
     legacy = _flush_legacy(client, now, limit=max(0, 50 - examined), scan_limit=max(0, 250 - examined))
     return {**legacy, **{k: legacy.get(k, 0) + automatic[k] for k in automatic}}
+
+
+def _automatic_flush_lock() -> str:
+    """The name of the lock one automatic flush holds, one per outbox (BUGS): a flush finding it busy skips the
+    automatic reports. This Mac's outbox (core.STATE/bugs) keeps the name every release uses, so an older and a newer
+    devkit never flush it at once; any other outbox has a name of its own, so its flush never waits for this Mac's."""
+    if BUGS == core.STATE / "bugs":
+        return "bugs-automatic-flush"
+    return "bugs-automatic-flush-" + _digest([str(BUGS)])[:16]
 
 
 def _flush_legacy(client=None, now: float = None, *, limit: int = 50, scan_limit: int = 250) -> dict:
@@ -3747,13 +3785,16 @@ def _exception_security(exc):
     return is_security({"frames": frames}, _message(exc))
 
 
-def swallowed(component: str, exc: BaseException) -> None:
+def swallowed(component: str, exc: BaseException, impact: str = "minor") -> None:
     """An error a hook handler goes on without (`component`: its hook event): recorded as a `hook` occurrence with
-    impact `minor`. The durable outbox coalesces identical failures; distinct exceptions are never suppressed."""
+    `impact` (IMPACT): `minor` when the session goes on as before, `blocked` when the error stopped the developer's
+    work (a settings change refused because its check failed). The durable outbox coalesces identical failures;
+    distinct exceptions are never suppressed."""
     try:
         frames = devkit_frames(exc.__traceback__, cached_only=True)
         exc_class = _fits(type(exc).__name__, _IDENT_RE) or "Exception"
-        record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames), impact="minor",
+        record_occurrence("hook", fingerprint("hook", exc_class=exc_class, frames=frames),
+                          impact=impact if impact in IMPACT else "minor",
                           event=component if component in _hook_events() else "", exc_class=exc_class,
                           frames=frames, text=_message(exc), security=_exception_security(exc))
     except Exception:  # recording a swallowed error must never break the handler that swallowed it
@@ -4400,7 +4441,8 @@ def status_line(now: float = None):
                      f"`dev bug send <id>` sends one")
     if old:
         parts.append(f"{old} old-format report{'s' if old != 1 else ''} cannot be sent: `dev bug pending` lists "
-                     f"{'them' if old != 1 else 'it'}, `dev bug drop <id>` removes one")
+                     + ("them, `dev bug drop --old-format` removes them all, `dev bug drop <id>` one" if old != 1 else
+                        "it, `dev bug drop <id>` removes it"))
     if consent_waits:
         parts.append(consent_waits)
     later = limit_note(now)

@@ -20,6 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from unittest import mock  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, bugs, cli, core, gates, gitx, lessonevents, lessons, shellparse, skillguard, work  # noqa: E402
 from devkit import lanescope  # noqa: E402
 from devkit import progress as pg  # noqa: E402
@@ -58,6 +63,8 @@ LINK = {"id": "link", "name": "Link", "title": "Release engineer", "tools": "all
             {"phase": "Hand off", "do": "hand off", "skills": ["communicating"], "devkit": ["dev progress step"],
              "proof": "dev progress step"}]}
 WAIVER = "Waived proof: `dev ci --run` — the shared checkout holds other members' uncommitted work"
+# The gates trust a `timeout` only from a system folder, as they do a uv or a python: this Mac's must be there
+TIMEOUT = any(os.path.isfile(os.path.join(d, "timeout")) for d in ("/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"))
 
 # A read-only member (tools: read) whose procedure still names a proof and a skill.
 SCOUT = {"id": "sparks", "name": "Sparks", "tools": "read", "skills": ["docs"],
@@ -87,10 +94,12 @@ def taught_anchors(text: str) -> tuple:
 
 class Transcript:
     # Builds a member's own transcript (JSONL) in the shape Claude Code writes for a subagent: the brief's record
-    # carries the time the lane started, as Claude Code's `timestamp` (UTC, milliseconds).
+    # carries the time the lane started, as Claude Code's `timestamp` (UTC, milliseconds), and so does each tool call,
+    # at `clock` (the lane's start unless a test moves it; None writes a call without one).
     def __init__(self, path):
         self.path = Path(path)
         self.started = time.time()
+        self.clock = self.started
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(self.started)) + ".000Z"
         self.records = [{"type": "user", "isSidechain": True, "timestamp": stamp,
                          "message": {"role": "user", "content": "the brief"}}]
@@ -104,8 +113,12 @@ class Transcript:
     def call(self, name, result="ok", is_error=False, **inp):
         self.n += 1
         tid = f"toolu_{self.n:04d}"
-        self.records.append({"type": "assistant", "isSidechain": True, "message": {
-            "role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}})
+        use = {"type": "assistant", "isSidechain": True, "message": {
+            "role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}}
+        if self.clock is not None:
+            use["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(self.clock)) + \
+                f".{int(self.clock * 1000) % 1000:03d}Z"
+        self.records.append(use)
         self.records.append({"type": "user", "isSidechain": True,
                              "toolUseResult": ("Error: " if is_error else "") + result,
                              "message": {"role": "user", "content": [
@@ -310,6 +323,55 @@ class CrewGateTests(GateCase):
                 found = self.proofs_with(f"cd {shlex.quote(str(folder))} && dev test")
                 self.assertEqual(self.rules(found), owed)
 
+    # A member's shell starts in the session's folder each call, so it reaches its lane's worktree with a cd in
+    # front of its proof, joined with && or with ; (or a new line). Either form counts, in the repository or one of its
+    # worktrees: with `;` a cd that fails leaves the proof in the folder it started in, so that folder must be one of
+    # them too. Any other prefix still proves nothing: it may change which program runs, or the exit code is not the
+    # proof's own.
+    def test_a_proof_whose_only_prefix_is_a_cd_into_the_lanes_checkout_counts(self):
+        tree = Path(self.tmp.name) / "worktrees" / "feat-x"
+        git(self.repo, "worktree", "add", "-q", "-b", "feat/x", str(tree))
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        git(other, "init", "-q", "-b", "main")
+        at, away = shlex.quote(str(tree)), shlex.quote(str(other))
+        for command, owed in ((f"cd {at} && dev test run tests/test_calc.py", []),
+                              (f"cd {at}; dev test run tests/test_calc.py", []),
+                              (f"cd {at}\ndev test", []),
+                              (f"cd {at}; cd lib && dev test", []),
+                              ("export PATH=/tmp/bin:$PATH; dev test", [("proofs", "dev test")]),
+                              ("true; dev test", [("proofs", "dev test")]),
+                              (f"cd {away}; dev test", [("proofs", "dev test")]),
+                              (f"cd {away}; cd {at}; dev test", [("proofs", "dev test")]),
+                              (f"cd {at} || dev test", [("proofs", "dev test")])):
+            with self.subTest(command=command):
+                (tree / "lib").mkdir(exist_ok=True)
+                self.tx = Transcript(Path(self.tmp.name) / f"agent-cd-{abs(hash(command))}.jsonl")
+                self.assertEqual(self.rules(self.proofs_with(command)), owed)
+
+    # A brief asks members to bound their proofs with `timeout 600`: timeout gives back the proof's own exit code (124
+    # when the time ends first, a failure either way), so each proof counts behind it, alone or after a cd. A timeout
+    # of another program, one with an option or a duration it does not take, and any other wrapper still prove nothing
+    @unittest.skipUnless(TIMEOUT, "the gates trust timeout only from /usr/bin, /usr/local/bin or /opt/homebrew/bin")
+    def test_each_proof_counts_behind_a_timeout_and_other_wrappers_do_not(self):
+        at = shlex.quote(str(self.repo))
+        proofs = {"dev test": "dev test run tests/test_calc.py", "dev test prove": "dev test prove tests/test_calc.py",
+                  "dev progress step": 'dev progress step "built it" --check "✓ 12 tests pass"'}
+        for wrap, counts in (("timeout 600 {}", True), (f"cd {at} && timeout 600 {{}}", True),
+                             ("timeout -k 10 --preserve-status 10m {}", True), ("timeout --signal=TERM 1.5h {}", True),
+                             ("timeout 600 env X=1 {}", False), ("timeout soon {}", False),
+                             ("timeout --unknown 600 {}", False), ("nice timeout 600 {}", False),
+                             ("timeout 600 sh -c '{}'", False)):
+            with self.subTest(wrap=wrap):
+                self.tx = Transcript(Path(self.tmp.name) / f"agent-timeout-{abs(hash(wrap))}.jsonl")
+                self.write("calc.py", "def add(a, b):\n    return a + b\n")
+                self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+                for command in proofs.values():
+                    self.tx.bash(wrap.format(command))
+                found = gates.crew_gates(KID_DOCS, self.tx.save(), str(self.repo))
+                owed = [f["item"] for f in found if f["rule"] == "proofs"]
+                self.assertEqual(owed, [] if counts else list(proofs))
+
     def test_a_proof_piped_into_a_read_only_filter_counts_as_run(self):
         for command in ("dev test 2>&1 | tail -40", "dev test | head -5", "dev test 2>&1 | grep -c passed"):
             with self.subTest(command=command):
@@ -325,6 +387,34 @@ class CrewGateTests(GateCase):
         self.assertIn("run `dev test` alone", found[0]["fix"])
         self.tx = Transcript(Path(self.tmp.name) / "agent-alone.jsonl")
         self.assertEqual(self.proofs_with("dev test 2>&1", successful=True), [])  # joined stderr keeps its exit code
+
+    def test_a_piped_step_record_counts_once_its_lane_holds_it_and_its_hidden_exit_code_is_kept(self):
+        # the Technical researcher's `dev progress step … | tail -3` recorded its step, yet the gates sent it back
+        # as if it had not: the lane's own record of that update is the proof, and the audit keeps the warning
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_progress import TempState, launch
+        step = 'dev progress step "built it" --step calc --check "✓ 12 tests pass"'
+        with TempState():
+            pg.start("Work", plan=["calc=10m"])
+            pg.assign("calc", "Kid", why="test")
+            launch("a1", "devkit:kid", "Kid: calc")
+            self.write("calc.py", "def add(a, b):\n    return a + b\n")
+            self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+            self.tx.bash("dev test")
+            self.tx.bash(f"{step} 2>&1 | tail -3")
+            transcript = self.tx.save()
+
+            def proofs(accepted):
+                return self.rules(f for f in gates.crew_gates(KID, transcript, str(self.repo), session="s1",
+                                                              lane="a1", accepted=accepted, successful=True)
+                                  if f["rule"] == "proofs")
+            self.assertEqual(proofs([]), [("proofs", "dev progress step")])  # refused, or never ran: not recorded
+            pg.step("built it", which="calc", check="✓ 12 tests pass", from_agent="a1")
+            accepted = []
+            self.assertEqual(proofs(accepted), [])
+            self.assertEqual([a["proof"] for a in accepted], ["dev progress step"])
+            self.assertIn("piped into `tail -3`", accepted[0]["how"])
+            self.assertIn("its own exit code", accepted[0]["how"])
 
     def test_a_proof_run_through_the_python_interpreter_counts(self):
         self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
@@ -468,6 +558,93 @@ class CommandProofTests(unittest.TestCase):
     def test_other_proofs_keep_their_rules(self):
         self.assertTrue(gates._proof_owed({"proof": "dev progress step"}, [], []))
         self.assertFalse(gates._proof_owed({"proof": "dev docs check"}, ["lib/x.py"], []))
+
+
+class PipedStepRecordTests(GateCase):
+    # `dev progress step … | tail -5` hides its exit code behind the filter's, but the step it records is in the
+    # member's lane of the run: that record, with the call's own text, is the proof, so a positive report is not sent
+    # back to record it again.
+    # A pipe that recorded nothing, and a piped `dev test`, whose exit code is the only record, still are.
+    def setUp(self):
+        super().setUp()
+        runs = Path(self.tmp.name) / "runs"
+        runs.mkdir()
+        for p in (mock.patch.object(pg, "RUNS", runs), mock.patch.object(pg, "CALLS", Path(self.tmp.name) / "calls")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.run_file = runs / "claude-s1.json"
+
+    def lane(self, *updates):
+        self.run_file.write_text(json.dumps(
+            {"v": 2, "agent": "claude", "session": "s1", "project": self.repo.name, "goal": "fix it",
+             "agents": {"a_kid": {"persona": "Kid", "label": "Kid: fix it", "state": "running",
+                                  "updates": list(updates)}}}))
+
+    def step_proofs(self, step_command, test_command="dev test"):
+        self.write("calc.py", "def add(a, b):\n    return a + b\n")
+        self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+        self.tx.bash(test_command)
+        self.tx.bash(step_command)
+        found = gates.crew_gates(KID, self.tx.save(), str(self.repo), session="s1", lane="a_kid", successful=True)
+        return [f for f in found if f["rule"] == "proofs"]
+
+    def test_a_piped_step_counts_only_when_the_lane_recorded_it(self):
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        self.assertEqual(self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" 2>&1 | tail -5'), [])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-not-recorded.jsonl")
+        self.lane({"ts": int(time.time()), "kind": "note", "text": "half way", "check": ""})
+        found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | head -3')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `head -3`", found[0]["evidence"])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-test-piped.jsonl")
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass"', "dev test 2>&1 | tail -40")
+        self.assertEqual(self.rules(found), [("proofs", "dev test")])
+
+    def test_a_piped_step_counts_only_for_the_step_its_text_names(self):
+        # an earlier ✓ step of the lane does not stand in for a later piped one that recorded nothing (refused)
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        found = self.step_proofs('dev progress step "documented it" --check "✓ docs check clean" | tail -5')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `tail -5`", found[0]["evidence"])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-named-step.jsonl")
+        # the step this call recorded, so after it started
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        found = self.step_proofs('dev progress step --step fix-it "built it" --check "✓ 12 tests pass" | tail -5')
+        self.assertEqual(found, [])  # the text after its options is the step the lane recorded
+
+    def test_an_earlier_step_with_the_same_text_does_not_stand_in_for_a_later_piped_one(self):
+        # the lane recorded "built it" ten minutes before the piped call with that text, which was refused and
+        # recorded nothing: only a step recorded since the call started is its own
+        now = time.time()
+        earlier = {"ts": int(now) - 600, "kind": "step", "text": "built it", "check": "✓ 12 tests pass"}
+        self.lane(earlier)
+        self.tx.clock = now
+        found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | tail -5')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `tail -5`", found[0]["evidence"])
+        self.tx = Transcript(Path(self.tmp.name) / "agent-recorded-again.jsonl")
+        self.tx.clock = now
+        # the call's own record, which progress writes in whole seconds, so it can read up to a second before it
+        self.lane(earlier, dict(earlier, ts=int(now)))
+        self.assertEqual(self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | tail -5'), [])
+
+    def test_an_earlier_recorded_piped_step_does_not_stand_in_for_a_later_call_that_recorded_nothing(self):
+        # the lane holds "built it" from a first piped call; a second one, "documented it", was refused and recorded
+        # nothing: as for every proof, the latest call decides
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        self.tx.bash('dev progress step "built it" --check "✓ 12 tests pass" | tail -5')
+        found = self.step_proofs('dev progress step "documented it" --check "✓ docs check clean" | tail -5')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `tail -5`", found[0]["evidence"])
+
+    def test_a_piped_step_whose_call_has_no_time_is_not_proven_by_a_record(self):
+        # a call whose start the transcript does not give cannot tell its own record from an earlier one
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        self.tx.clock = None
+        found = self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | tail -5')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `tail -5`", found[0]["evidence"])
 
 
 class SessionOutsideTheRepositoryTests(GateCase):

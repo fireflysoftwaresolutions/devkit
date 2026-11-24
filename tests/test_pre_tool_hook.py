@@ -131,7 +131,8 @@ class NoDecisionTests(PreToolCase):
 
     def test_a_members_single_lane_call_is_routed_with_codexs_allow_even_where_codex_asks(self):
         # one plain devkit call and nothing else: Codex's `allow` approves only devkit's own call, so it goes out
-        # whatever Codex's approval policy (no config.toml here, and the call's own policy asks)
+        # whatever Codex's approval policy (no config.toml here, and the call's own policy asks). Claude Code, where
+        # it checks the developer's rules, gets the call exactly as written: its dev command is text-pinned
         for agent in ("claude", "codex"):
             with self.subTest(agent=agent):
                 s = self.lead_on(agent)
@@ -139,9 +140,10 @@ class NoDecisionTests(PreToolCase):
                                  **self.member(agent, TANK, "tank"))
                 if agent == "codex":
                     self.assertRewritesForCodex(out)
+                    self.assertIn(f"DEVKIT_FROM_AGENT={TANK}", out["hookSpecificOutput"]["updatedInput"]["command"])
                 else:
                     self.assertDecidesNothing(out)
-                self.assertIn(f"DEVKIT_FROM_AGENT={TANK}", out["hookSpecificOutput"]["updatedInput"]["command"])
+                    self.assertNotIn("updatedInput", out.get("hookSpecificOutput") or {})
 
 
 class AdviceTests(PreToolCase):

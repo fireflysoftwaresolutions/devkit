@@ -20,6 +20,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import core, dashboard, identity, plans, work  # noqa: E402
 
 EVIL = "<img src=x onerror=alert(1)>"
@@ -345,9 +350,12 @@ class RenderTests(unittest.TestCase):
         self.assertIn('document.addEventListener("focusin"', js)
         self.assertIn('document.addEventListener("pointerover"', js)
         self.assertGreaterEqual(js.count('"data-tip"'), 12)
-        for token in ("--s-ok:var(--ff-green)", "--s-caution:var(--ff-", "--s-risk:var(--ff-red)", "--ff-red:#d03b3b"):
+        for token in ("--s-ok:var(--ff-green)", "--s-caution:var(--ff-", "--s-risk:var(--ff-red)"):
             self.assertIn(token, dashboard.LIGHT)
             self.assertIn(token, dashboard.DARK)
+        # the dark theme lightens the red so a red fill keeps 3:1 on its darker track
+        self.assertIn("--ff-red:#d03b3b", dashboard.LIGHT)
+        self.assertIn("--ff-red:#d55050", dashboard.DARK)
 
     def test_rows_are_links(self):
         """Clickable rows hold a real link (keyboard, screen readers, j/k) instead of being focusable themselves."""
@@ -531,7 +539,7 @@ PAIRS = ([(fg, bg, TEXT) for fg in ("ink", "ink-2", "ink-strong") for bg in ("su
          + [("you-ink", "you", TEXT), ("you-ink", "you-hover", TEXT), ("alert-ink", "alert", TEXT), ("ink", "selection", TEXT), ("ink", "highlight", TEXT)]
          + [(fg, bg, GLYPH) for fg in ("ok", "alert", "focus", "you-text") for bg in ("surface-page", "surface-raised", "surface-sunken")])
 # AC-11: the only rules that may read amber (--you, --you-hover): the waiting-for-you glyph and bar, the primary button
-YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.you::before", ".now-glyph.you", ".now-strip .you", ".tab .n.you", ".navmore .n.you"}
+YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.now-bar::before", ".now-glyph.you", ".now-strip .you", ".tab .n.you", ".navmore .n.you"}
 RAW_COLOR = re.compile(r"(?<![\w&])#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3}(?:[0-9a-fA-F]{2})?)?\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(")
 FONT_NAME = re.compile(r"Manrope|\bInter\b|Source Serif|SF Mono|Menlo|Consolas|ui-monospace|system-ui|-apple-system|Segoe UI|Arial|Helvetica")
 
@@ -742,8 +750,9 @@ class TeamWorkTests(unittest.TestCase):
         self.assertEqual(ppl["bob@studio"]["claimed"], ["T-a2"])               # expired but still held
         self.assertTrue(all(r["who"] == "bob@studio" for r in ppl["bob@studio"]["recent"]))
 
-    def test_people_and_collisions_name_a_machine_by_its_hostname_label(self):
-        # presence names a Mac by its machine id; people and texts show its hostname (this Mac's current one)
+    def test_people_and_collisions_name_a_machine_by_its_id_never_its_hostname(self):
+        # presence names a Mac by its machine id, and so do people and texts: the label an older devkit publishes is a
+        # hostname, which often names the person, and the page lands in screenshots
         ses = lambda agent: [{"project": "p", "branch": "b", "agent": agent, "last_seen": NOW}]  # noqa: E731
         team = [{"user": "me", "host": "m-thismac1", "label": "old-name", "updated": iso(NOW), "sessions": ses("claude")},
                 {"user": "bob", "host": "m-0000beef", "label": "mini", "updated": iso(NOW), "sessions": ses("codex")},
@@ -753,13 +762,14 @@ class TeamWorkTests(unittest.TestCase):
         slog = [{"who": "bob@m-0000beef", "ts": NOW, "text": "done"}]
         ppl = {p["who"]: p for p in dashboard.people(team, [lock], slog, NOW, me=ME)}
         self.assertEqual({w: p["label"] for w, p in ppl.items()},
-                         {ME: "mac-158", "bob@m-0000beef": "mini", "cy@studio": "studio"})
-        self.assertEqual([r["label"] for r in ppl["bob@m-0000beef"]["recent"]], ["mini"])
+                         {ME: "m-thismac1", "bob@m-0000beef": "m-0000beef", "cy@studio": "studio"})
+        self.assertEqual([r["label"] for r in ppl["bob@m-0000beef"]["recent"]], ["m-0000beef"])
         texts = " ".join(c["text"] for c in dashboard.collisions(team, [lock], NOW))
-        self.assertIn("bob@mini (codex)", texts)
-        self.assertIn("me@mac-158 (claude)", texts)
-        self.assertIn("still claimed by bob@mini", texts)
-        self.assertNotIn("m-0000beef", texts)
+        self.assertIn("bob@m-0000beef (codex)", texts)
+        self.assertIn("me@m-thismac1 (claude)", texts)
+        self.assertIn("still claimed by bob@m-0000beef", texts)
+        for hostname in ("mini", "old-name", "mac-158"):
+            self.assertNotIn(hostname, texts)
 
     def test_actions_for_locks_and_collisions(self):
         reg = registry()
@@ -1381,23 +1391,31 @@ CHROME_HANGS_ALLOWED = 2
 
 
 def _chrome_once(url: str, width: int, height: int, budget: int, timeout: int) -> subprocess.CompletedProcess:
-    """One headless Chrome with a fresh profile, in its own process group. When it runs out of time, the whole group
-    (the browser and its GPU, network and renderer helpers) is killed and reaped, and TimeoutExpired is raised."""
-    with tempfile.TemporaryDirectory() as prof:
+    """One headless Chrome with a fresh profile, in its own process group. The call ends when the browser process does:
+    its output goes to files, not pipes, because its GPU, network and storage helpers inherit them and, on a loaded
+    Mac, outlive a browser that exited by 20 to 50 s; what is left of the group is then killed. When the browser runs
+    out of time, the whole group is killed and reaped, and TimeoutExpired is raised."""
+    with tempfile.TemporaryDirectory() as prof, tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         args = [CHROME, "--headless", "--use-mock-keychain", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
                 "--hide-scrollbars", f"--user-data-dir={prof}", f"--window-size={width},{height}",
                 f"--virtual-time-budget={budget}", "--dump-dom", url]
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        proc = subprocess.Popen(args, stdout=out, stderr=err, start_new_session=True)
         try:
-            out, err = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
+            hung = False
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            out, err = proc.communicate()
-            raise subprocess.TimeoutExpired(args, timeout, output=out, stderr=err) from None
-        return subprocess.CompletedProcess(args, proc.returncode, out, err)
+            hung = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # the group is gone (or its id already belongs to another process)
+        proc.wait()
+        out.seek(0)
+        err.seek(0)
+        stdout, stderr = out.read(), err.read()
+        if hung:
+            raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
 def run_chrome(url: str, width: int, height: int = 900, budget: int = 6000, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -1521,7 +1539,8 @@ def fixture_data(root: Path, now: float) -> dict:
 
 
 # A stand-in for Chrome: each call takes the next word of $FAKE_CHROME/plan. "hang" starts a helper process in its
-# group (as Chrome's renderers are), records both pids and sleeps; "answer" dumps a page with the probe's output.
+# group (as Chrome's renderers are), records both pids and sleeps; "answer" dumps a page with the probe's output;
+# "linger" dumps it, then exits as Chrome's teardown watchdog ends it while a helper still holds its output open.
 # Every call records the profile it was given.
 FAKE_CHROME = r"""#!%s
 import os, subprocess, sys, time
@@ -1536,6 +1555,12 @@ if plan[n] == "hang":
     sys.stderr.write("CVDisplayLinkCreateWithCGDisplay failed\n"); sys.stderr.flush()
     time.sleep(60)
 print('<html><body><pre id="probe-out">{&quot;ok&quot;: %%d}</pre></body></html>' %% (n + 1))
+if plan[n] == "linger":
+    sys.stdout.flush()
+    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    open(os.path.join(d, "pids"), "a").write("%%d %%d\n" %% (os.getpid(), helper.pid))
+    sys.stderr.write("Teardown watchdog expired; recording dump and terminating.\n")
+    sys.exit(2)
 """
 
 
@@ -1591,6 +1616,20 @@ class ChromeHarnessTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual([p for p in pids if self.alive(p)], [], "Chrome or its helper outlived the timeout")
 
+    # On a loaded Mac, Chrome's helpers outlive the browser by 20 to 50 s after its teardown watchdog ends it, and they
+    # hold its stdout and stderr open: a call that reads until the pipes close waits for them and calls Chrome hung
+    def test_a_browser_that_exited_is_read_without_waiting_for_its_helpers(self):
+        self.plan("linger", "answer")
+        started = time.monotonic()
+        self.assertEqual(chrome("file:///page.html", 800, timeout=10), {"ok": 1})
+        self.assertLess(time.monotonic() - started, 10, "run_chrome waited for the helpers of a browser that exited")
+        self.assertEqual(len(self.calls()), 1, "a browser that exited was taken for a hung one and started again")
+        pids = [int(p) for p in (self.dir / "pids").read_text().split()]
+        deadline = time.monotonic() + 5
+        while any(self.alive(p) for p in pids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual([p for p in pids if self.alive(p)], [], "the exited browser's helper was left running")
+
     def test_a_second_hang_fails_the_page(self):
         self.plan("hang", "hang", "answer")
         with self.assertRaisesRegex(AssertionError, r"did not finish in 1 s.*CVDisplayLink"):
@@ -1610,15 +1649,18 @@ class ChromeHarnessTests(unittest.TestCase):
 @unittest.skipUnless(CHROME, NO_CHROME)
 class HeadlessChromeTests(unittest.TestCase):
 
-    # The run's HOME has no login keychain: a Chrome that reaches for it stalls at exit and its teardown watchdog
-    # kills it (exit 2), or it hangs until the timeout, as every browser test did on CI's macOS runner for PR #6
-    def test_chrome_dumps_the_page_and_exits_cleanly_under_the_runs_home(self):
+    # The run's HOME has no login keychain: a Chrome that reaches for it blocks in the keychain's sign-in prompt, so its
+    # teardown never ends and its teardown watchdog kills it (exit 2), or it hangs until the timeout, as every browser
+    # test did on CI's macOS runner for PR #6. The mock keychain is what keeps it away. Chrome's exit status cannot tell
+    # that stall from a slow Mac: the watchdog is 10 s of wall clock, which a healthy Chrome also runs past when the
+    # helpers it waits for at exit get no CPU (7 runs in 60 with one busy loop per core), so the test reads the launch.
+    def test_chrome_dumps_the_page_under_the_runs_home_with_the_mock_keychain(self):
         with tempfile.TemporaryDirectory() as t:
             f = Path(t) / "page.html"
             f.write_text('<html><body><pre id="probe-out">{"ok": 1}</pre></body></html>', encoding="utf-8")
             res = run_chrome(f.as_uri(), 800, budget=1000, timeout=60)
-        self.assertEqual(res.returncode, 0, res.stderr[-1500:])
-        self.assertIn('<pre id="probe-out">{"ok": 1}</pre>', res.stdout)
+        self.assertIn('<pre id="probe-out">{"ok": 1}</pre>', res.stdout, res.stderr[-1500:])
+        self.assertIn("--use-mock-keychain", res.args, "Chrome under the run's HOME reaches for the login keychain")
 
     # Chrome's window is never narrower than 500: a phone width must still reach the page's media queries
     def test_a_phone_width_below_chromes_window_minimum_is_the_pages_own_width(self):
@@ -2283,6 +2325,166 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertIn("Pull request #41 draft", out["row"])
 
 
+@unittest.skipUnless(CHROME, NO_CHROME)
+class NamesAndUnknownFiguresTests(unittest.TestCase):
+    """A control is named first by the text it shows, a pull request count the page could not read shows the dash and
+    never 0, and a long hostname never pushes the machine id out of sight."""
+
+    setUpClass = PageBehaviorTests.__dict__["setUpClass"]
+    tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
+    variant = PageBehaviorTests.variant
+
+    # what a sighted person reads: the text drawn on screen, without the screen-reader-only (.sr) text
+    SEEN = """const seen = el => { const out = []; (function walk(n) { for (const c of n.childNodes) {
+        if (c.nodeType === 3) out.push(c.textContent);
+        else if (c.nodeType === 1 && !c.classList.contains("sr") && getComputedStyle(c).display !== "none") walk(c); } })(el);
+      return out.join(" ").replace(/\\s+/g, " ").trim(); };
+    """
+
+    def probe(self, steps, width, hash_, page=None):
+        out = browse(page or self.page, PROJECT_JS + self.SEEN + steps, width, hash_, now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        return out
+
+    # A voice-control user says what a button shows: each session bar's name, and the palette button's, starts with its
+    # visible text (WCAG 2.5.3), and the bar's name still carries the task, branch, agent and steps. The text is read as
+    # axe reads it, the spans' text joined as written (a span is phrasing content), so "widget" and "1/3" need a space
+    def test_a_session_bar_and_the_palette_button_are_named_first_by_the_text_they_show(self):
+        out = self.probe("""const raw = b => b.textContent.replace(/\\s+/g, " ").trim();
+            out.bars = $$("main .sbar").map(b => [raw(b), b.getAttribute("aria-label")]);
+            const k = $("#palbtn"); out.pal = [raw(k), k.getAttribute("aria-label"), k.getAttribute("aria-keyshortcuts")];""", 1440, "#/projects/acme/widget")
+        self.assertEqual(len(out["bars"]), 3, out["bars"])
+        for shown, name in out["bars"]:
+            self.assertTrue(name.startswith(shown + ","), (shown, name))
+        self.assertIn(["widget 1/3", "widget 1/3, Reconcile ledgers on feat/z, codex, 1 of 3 steps, about 25m left"], out["bars"])
+        self.assertEqual(out["pal"], ["⌘K", "⌘K, Command palette", "Meta+K Control+K"])   # ⌘K or Ctrl+K opens it
+
+    # The pull request list could not be read (prs_known false): the Open PRs tile and the Pull requests tab show the dash
+    # and say "not known", never 0, at every width, and the tab's panel does not claim there are none
+    def test_an_unknown_pull_request_count_shows_the_dash_never_0_at_every_width(self):
+        steps = """const tile = $$("main .tiles > a.stile").find(t => /^Open PRs/.test(said(t))), tab = $("#tab-prs");
+            out.tile = [seen($(".s-v", tile)), said(tile)]; out.tab = [seen(tab), said(tab)];
+            tab.click(); await tick(50); out.panel = seen($("#tabpanel"));
+            await go("#/projects/acme/api?modal=project%3Aacme%2Fapi"); await tick(50); out.modal = said($("#modal .mfigs"));"""
+        for width in (390, 1440):
+            out = self.probe(steps, width, "#/projects/acme/api")
+            self.assertEqual(out["tile"], ["—", "Open PRs not known Pull requests not known"], width)
+            self.assertEqual(out["tab"], ["Pull requests —", "Pull requests not known"], width)
+            self.assertIn("Pull requests not known", out["panel"], width)
+            self.assertNotIn("No open pull requests", out["panel"], width)
+            self.assertTrue(out["modal"].startswith("Open PRs: not known Pull requests not known"), (width, out["modal"]))
+
+    # At 390 px a 40-character hostname takes the ellipsis: the machine id beside it stays whole and clear of the "you"
+    # badge, in Who is on it and on the person's card in Team
+    def test_a_long_hostname_never_pushes_the_machine_id_onto_the_you_badge_on_a_phone(self):
+        def long_host(d):
+            next(x for x in d["people"] if x["who"] == d["who"])["label"] = "studio-mac-pro-of-the-lending-team-4321x"
+        steps = """const row = el => { const n = el.querySelector(".ell"), id = el.querySelector(".mid"), you = el.querySelector(".tag"), b = x => x.getBoundingClientRect();
+                return {cut: n.scrollWidth > n.clientWidth, id: [id.textContent, id.scrollWidth <= id.clientWidth], order: [b(n).right <= b(id).left, b(id).right <= b(you).left],
+                        inside: b(you).right <= b(el).right + 0.5}; };
+            out.who = row($$(".prows .pw").find(p => p.querySelector(".tag")));
+            await go("#/team"); out.card = row($$(".pc-n h3").find(h => h.querySelector(".tag")));"""
+        out = self.probe(steps, 390, "#/initiatives/lending", page=self.variant(long_host))
+        for where in ("who", "card"):
+            self.assertEqual(out[where], {"cut": True, "id": [ME.split("@")[1], True], "order": [True, True], "inside": True}, where)
+        # another Mac's presence is untrusted: a 72-character machine id takes the ellipsis within 14 characters and
+        # never makes the page wider than the phone, while a real 10-character id stays whole (above)
+        long_id = "me@m-" + "x" * 70
+        def long_mid(d):
+            d.update(json.loads(json.dumps(d).replace(ME, long_id)))
+            next(x for x in d["people"] if x["who"] == d["who"])["label"] = "studio"
+        out = self.probe(steps.replace('await go("#/team");', 'out.sw = [document.documentElement.scrollWidth]; await go("#/team"); out.sw.push(document.documentElement.scrollWidth);')
+                         + 'out.mid = [$(".mid").scrollWidth > $(".mid").clientWidth, getComputedStyle($(".mid")).textOverflow];',
+                         390, "#/initiatives/lending", page=self.variant(long_mid))
+        self.assertEqual(out["sw"], [390, 390])
+        self.assertEqual(out["mid"], [True, "ellipsis"])
+        for where in ("who", "card"):
+            self.assertEqual((out[where]["id"][0], out[where]["order"], out[where]["inside"]), (long_id.split("@")[1], [True, True], True), where)
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class RemoteRunCountLimitTests(unittest.TestCase):
+    """Another Mac's presence is untrusted: Background work keeps its counts to what the run can hold, as the Now
+    server does (dashnow._remote_steps). More current steps than the steps left count as the steps left, and a crew
+    of more than 1,000 members is no count."""
+
+    def test_the_card_and_the_drawer_cap_the_current_steps_and_drop_an_impossible_crew(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = fixture_data(Path(tmp) / "handoff", NOW)
+            step = lambda name, state: {"name": name, "state": state, "est": 10, "min": 4.0, "owner": "main"}  # noqa: E731
+            brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                     "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                     "plan": [step("load", "done"), step("match", "done"), step("spike", "skipped"), step("report", "done"),
+                              step("rows", "running"), step("totals", "pending")], "agents": []}
+            next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = dict(work.run_summary(brief), current_more=99, crew=5000)
+            out = browse(dashboard.page(d), """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);
+                $(".rh a", c).click(); await tick(200);
+                out.sec = $$("#modal .msec").map(s => [s.getAttribute("aria-label"), text(s)]).filter(s => s[0] === "Steps" || s[0] === "Crew");""",
+                         1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        steps, crew = dict(out["sec"])["Steps"], dict(out["sec"])["Crew"]
+        self.assertIn("2 steps running", steps)                     # 5 steps, 3 done: "rows" and 1 more, never 100
+        self.assertEqual(crew, "Crew No crew member working, at the last presence update.")
+        self.assertNotIn("crew member", out["card"])
+
+    def test_a_step_count_past_what_a_run_can_hold_is_no_count(self):
+        # the Now server drops counts above dashnow.STEPS_MAX; the page drops the same ones
+        with tempfile.TemporaryDirectory() as tmp:
+            d = fixture_data(Path(tmp) / "handoff", NOW)
+            brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                     "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                     "plan": [{"name": "rows", "state": "running", "est": 10, "min": 4.0, "owner": "main"}], "agents": []}
+            summary = dict(work.run_summary(brief), steps_total=10 ** 9)
+            next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = summary
+            out = browse(dashboard.page(d), """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);""",
+                         1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertTrue(out["card"], "the run's card is drawn")
+        self.assertNotIn("1000000000", out["card"].replace(",", ""))
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class RemoteRunCardTests(unittest.TestCase):
+    """Background work and the run drawer draw a run on another Mac from the summary its presence publishes
+    (work.run_summary): the step counts, the steps running now and the crew count. Its plan holds only the current
+    steps, so counting that plan said "0 of 1 steps" for a run 3 steps along."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = fixture_data(Path(cls.tmp.name) / "handoff", NOW)
+        step = lambda name, state: {"name": name, "state": state, "est": 10, "min": 4.0, "owner": "main"}  # noqa: E731
+        brief = {"goal": "Reconcile ledgers", "state": "running", "step": 4, "steps": 6, "estimate": 40, "started": int(NOW - 1200),
+                 "eta_min": 25, "active_min": 18, "wall_min": 20, "last": "matching rows", "next": "", "updated": int(NOW - 300),
+                 "plan": [step("load", "done"), step("match", "done"), step("spike", "skipped"), step("report", "done"),
+                          step("rows", "running"), step("totals", "pending")],
+                 "agents": [{"label": "Tank: rows", "state": "running", "min": 4.0}]}
+        next(x for x in d["people"] if x["who"] == "bob@studio")["sessions"][0]["progress"] = work.run_summary(brief)
+        cls.page = dashboard.page(d)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_card_and_the_drawer_count_the_steps_and_the_crew_from_the_summary(self):
+        out = browse(self.page, """const c = $$("#runs .rcard").find(x => text(x).startsWith("Reconcile ledgers")); out.card = text(c);
+            out.bar = $(".rbar", c).getAttribute("aria-valuetext"); out.steps = $$(".rsteps li", c).map(text);
+            $(".rh a", c).click(); await tick(200); out.figs = text($("#modal .mfigs"));
+            out.sec = $$("#modal .msec").map(s => [s.getAttribute("aria-label"), text(s)]).filter(s => s[0] === "Steps" || s[0] === "Crew");""",
+                     1440, "#/background", now=NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertTrue(out["bar"].startswith("3 of 5 steps"), out["bar"])               # skipped steps count in neither number
+        self.assertIn("○ 1 more to do · ✓ 3 done · – 1 skipped", out["card"])
+        self.assertEqual([s.split(" · ")[0] for s in out["steps"]], ["▸ Running: rows"])
+        self.assertIn("1 crew member working", out["card"])
+        self.assertIn("Progress 3 of 5 steps", out["figs"])
+        steps, crew = dict(out["sec"])["Steps"], dict(out["sec"])["Crew"]
+        self.assertIn("rows", steps)
+        self.assertIn("studio shares only the steps running now", steps)
+        self.assertNotIn("Only the main session worked on this run.", crew)
+        self.assertIn("1 crew member working", crew)
+
+
 class LivePageTests(unittest.TestCase):
     """The live page against a small stand-in server: the session-ended state, and an update that arrives while a drawer is open."""
 
@@ -2481,6 +2683,99 @@ class LivePageTests(unittest.TestCase):
                     return 404, "application/problem+json", b'{"title":"Not found"}'
                 out = chrome(self.serve(routes) + "/#/background?modal=run%3Aclaude-rel", 1440)
                 self.assertEqual(own_goal or "Agent run", out["title"])
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class BoardAndScopeChipTests(unittest.TestCase):
+    """The scope chip (a task's project or initiative) is a target of at least 24 by 24 px that looks as before, a
+    keyboard user sees it focused on a Tasks board card too, and the board's columns are headings one level below the
+    page's."""
+
+    setUpClass = PageBehaviorTests.__dict__["setUpClass"]
+    tearDownClass = PageBehaviorTests.__dict__["tearDownClass"]
+    probe = PageBehaviorTests.probe
+
+    # WCAG 2.5.8: the chip under a task title (an initiative's Overview) and on a board card is at least 24 by 24 px at
+    # both widths, while its text keeps the meta line's size and color, with no padding or background, and a long name
+    # still ends in an ellipsis within 240 px
+    def test_a_scope_chip_is_a_24_px_target_that_keeps_its_look_and_its_ellipsis(self):
+        steps = """const chip = c => { const r = c.getBoundingClientRect(), s = getComputedStyle(c), p = getComputedStyle(c.parentElement);
+                return {w: r.width, h: r.height, look: [s.fontSize === p.fontSize, s.color === p.color, s.paddingTop, s.paddingLeft, s.backgroundColor]}; };
+            const long = c => { c.textContent = "lending-platform-".repeat(6); const r = c.getBoundingClientRect();
+                return [r.width <= 240.5, c.scrollWidth > c.clientWidth, getComputedStyle(c).textOverflow]; };
+            out.row = $$("main .irow .imeta button.sc").map(chip);
+            await go("#/tasks"); out.card = $$("main .tc .meta button.sc").map(chip); out.long = long($("main .tc .meta button.sc"));"""
+        for width in (1440, 390):
+            out = self.probe(steps, width, "#/initiatives/lending")
+            for where in ("row", "card"):
+                self.assertTrue(out[where], (width, where))
+                for c in out[where]:
+                    self.assertGreaterEqual(min(c["w"], c["h"]), 24, (width, where, c))
+                    self.assertEqual(c["look"], [True, True, "0px", "0px", "rgba(0, 0, 0, 0)"], (width, where))
+            self.assertEqual(out["long"], [True, True, "ellipsis"], width)
+
+    # WCAG 2.4.7: the card's reset of its meta buttons must not take the chip's focus ring away
+    def test_a_scope_chip_on_a_board_card_shows_its_focus_ring(self):
+        out = self.probe("""const c = $("main .tc .meta button.sc"); c.focus(); await tick(50); const s = getComputedStyle(c);
+            out.ring = [document.activeElement === c, c.matches(":focus-visible"), s.outlineStyle, s.outlineWidth];""", 1440, "#/tasks")
+        self.assertEqual(out["ring"], [True, True, "solid", "2px"])
+
+    # The board's column headings (Now, Next, Later, Closed) are level 2 under the page's h1, with the look the columns
+    # had: 15 px (--fs-2), weight 600, no margin, 8 px (--s2) above a 1 px rule
+    def test_the_board_columns_are_level_2_headings_that_keep_their_look(self):
+        out = self.probe("""out.levels = $$("main h1, main h2, main h3, main h4").map(x => x.tagName);
+            out.cols = $$("main .col").map(c => c.firstElementChild.tagName);
+            const s = getComputedStyle($("main .col > :first-child"));
+            out.look = [s.display, s.fontSize, s.fontWeight, s.marginTop, s.marginBottom, s.paddingBottom, s.borderBottomWidth, s.borderBottomStyle];""",
+                         1440, "#/tasks")
+        self.assertEqual(out["levels"][0], "H1")
+        self.assertEqual(out["cols"], ["H2"] * 4)
+        self.assertNotIn("H3", out["levels"][:out["levels"].index("H2")] if "H2" in out["levels"] else out["levels"])
+        self.assertEqual(out["look"], ["flex", "15px", "600", "0px", "0px", "8px", "1px", "solid"])
+
+    # WCAG 1.4.11: the Closed column's dot shows the theme's done color (--ok, as a closed task's ✓ does) at 3:1 or
+    # more against the page, light and dark; it read --good, which no theme defines, and was transparent
+    def test_the_closed_columns_dot_shows_the_done_color_in_both_themes(self):
+        out = self.probe("""out.t = {}; for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(50);
+                const dot = $("main .col[aria-label=Closed] h2 .dot");
+                out.t[theme] = {dot: getComputedStyle(dot).backgroundColor, page: getComputedStyle(document.body).backgroundColor,
+                                ok: getComputedStyle(document.documentElement).getPropertyValue("--ok").trim()}; }""", 1440, "#/tasks")
+        self.assertEqual(sorted(out["t"]), ["dark", "light"])
+        for theme, t in out["t"].items():
+            self.assertEqual(rgb(t["dot"], rgb(t["page"])), rgb(t["ok"]), (theme, t))
+            self.assertGreaterEqual(contrast(rgb(t["dot"], rgb(t["page"])), rgb(t["page"])), 3, (theme, t))
+
+    # The quota bars (Claude Code, Codex) and the reply-check bars on Health fill with the tone of the dot beside
+    # them: --ok when fine, --ink when near the limit, --alert at or over it; they read --good, --warning and
+    # --critical, which no theme defines, and showed an empty track
+    def test_the_health_bars_fill_with_the_tone_of_their_dot_in_both_themes(self):
+        def bars(d):
+            d["providers"]["claude"]["quota"] = {"available": True, "used_percent": 75, "window_minutes": 300}
+            d["canary"] = {"summary": {"claude": [19, 20], "codex": [9, 10], "gemini": [1, 2]}, "records": []}
+        out = self.probe("""out.t = {}; for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(50);
+                const root = getComputedStyle(document.documentElement), tok = n => root.getPropertyValue("--" + n).trim();
+                out.t[theme] = {bars: $$("main .qbar i").map(i => getComputedStyle(i).backgroundColor), track: getComputedStyle($("main .qbar")).backgroundColor,
+                                ok: tok("ok"), ink: tok("ink"), alert: tok("alert")}; }""", 1440, "#/health", page=PageBehaviorTests.variant(self, bars))
+        for theme, t in out["t"].items():
+            # Claude Code at 75 %, Codex exhausted; replies 95 % (claude), 90 % (codex) and 50 % (gemini) with the block
+            self.assertEqual([rgb(b, rgb(t["track"])) for b in t["bars"]], [rgb(t[k]) for k in ("ink", "alert", "ok", "ink", "alert")], (theme, t))
+            # a red fill is a graphical object (WCAG 1.4.11): it needs 3:1 against the track it fills, in both themes
+            self.assertGreaterEqual(contrast(rgb(t["alert"]), rgb(t["track"])), 3, (theme, t))
+
+    # The quota tiles at the top of Health draw the used share at 70 % or more in the caution color (--s-caution) on
+    # the tile's bar, an HTML element; .k-warn set only an SVG fill, so the share was transparent and the quota read as
+    # unused (Claude Code at 75 %, Codex not signed in)
+    def test_a_quota_tiles_share_near_the_limit_shows_the_caution_color_in_both_themes(self):
+        def quota(d):
+            d["providers"]["claude"]["quota"] = {"available": True, "used_percent": 75, "window_minutes": 300}
+        out = self.probe("""out.t = {}; for (const theme of ["light", "dark"]) { document.documentElement.dataset.theme = theme; await tick(50);
+                out.t[theme] = {used: $$("main .tiles .segbar i.k-warn").map(i => getComputedStyle(i).backgroundColor),
+                                track: getComputedStyle($("main .tiles .segbar")).backgroundColor,
+                                caution: getComputedStyle(document.documentElement).getPropertyValue("--s-caution").trim()}; }""", 1440, "#/health", page=PageBehaviorTests.variant(self, quota))
+        for theme, t in out["t"].items():
+            self.assertEqual(len(t["used"]), 2, (theme, t))
+            self.assertEqual([rgb(u, rgb(t["track"])) for u in t["used"]], [rgb(t["caution"])] * 2, (theme, t))
+            self.assertGreaterEqual(contrast(rgb(t["caution"]), rgb(t["track"])), 3, (theme, t))
 
 
 if __name__ == "__main__":

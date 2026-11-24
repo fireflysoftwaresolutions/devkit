@@ -15,6 +15,7 @@
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -27,9 +28,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import approvals, canary, ciwatch, cli, continuity, core, hooks, progress as pg, state, work  # noqa: E402
+from devkit import identity  # noqa: E402
 from test_progress import launch  # noqa: E402
 from test_state_e2e import Clock, HookSandbox, dev, patch_if  # noqa: E402
 from test_watch import watch  # noqa: E402
+
+AGENT, SHELL = 70001, 70002  # the agent process and the shell of the tech lead's wait call, as the kernel lists them
+TOKEN = re.compile(r"DEVKIT_CALL=([A-Za-z0-9_.-]+)")
 
 LINE = "**[Firefly> DevKit]** widget · `feat/x` · Release\n- **Done:** briefed the crew\n- **Check:** – none yet\n" \
        "- **Progress:** 0 of 5 steps · 10 min of ~1h50m\n- **Next:** the crew works"
@@ -83,6 +88,17 @@ class WakeEveryEventTests(HookSandbox):
         s.enter_context(mock.patch("devkit.scope.decide", lambda *a, **k: True))
         s.enter_context(mock.patch.object(hooks, "_spawn_sync", lambda *a, **k: None))  # no background dev sync
         s.enter_context(mock.patch.dict(core.CFG, {"progress": {"max_parallel": 6, "reserve": 0}}))
+        # the kernel's facts on the tech lead's wait: the agent runs each call in a shell right below it, started
+        # after its call opened, in the agent's process session; the wait runs below the shell of its call (arm)
+        self.shell_line, self.waits, self.started = "", 0, time.time()
+        for name, value in (("_chain", lambda: [(SHELL, self.shell_line), (AGENT, "claude")]),
+                            ("_pid", lambda: 71999), ("_session_of", lambda pid: 1),
+                            ("_proc", lambda pid: (AGENT, self.started)), ("pin_dir", lambda: self.root / "pins")):
+            s.enter_context(mock.patch.object(identity, name, value, create=True))
+        s.enter_context(mock.patch.object(pg, "_call_agent_pid", lambda: AGENT))
+        s.enter_context(mock.patch.object(hooks, "_hook_launched_by", lambda pid: pid == AGENT, create=True))
+        identity._forget()
+        self.addCleanup(identity._forget)
         self.handoff_that_cannot_push()
         self.transcript = self.root / "t.jsonl"
         self.transcript.write_text(json.dumps({"type": "user", "timestamp": iso(self.t0 - 60),
@@ -131,13 +147,28 @@ class WakeEveryEventTests(HookSandbox):
         return json.loads(out) if out else {}
 
     def arm(self):
+        # the tech lead's background wait, while members work: the PreToolUse hook (bypassPermissions) opens its call
+        # and stamps its call token; its shell starts and writes its pid to the call's pin as the stamp's first
+        # action; its PostToolUse comes as soon as it starts, so its call closes and its record is kept, and the wait
+        # is named by its token from that record
+        self.waits += 1
+        argv = ["watch", "--wait", "--timeout", "240"]
+        pre = {"session_id": "s1", "tool_use_id": f"toolu_wait{self.waits}", "tool_name": "Bash",
+               "hook_event_name": "PreToolUse", "cwd": str(self.root), "permission_mode": "bypassPermissions",
+               "tool_input": {"command": "dev " + " ".join(argv), "run_in_background": True}}
+        stamped = json.loads(self.hook("pre-tool", pre))["hookSpecificOutput"]["updatedInput"]["command"]
+        token = TOKEN.search(stamped).group(1)
+        self.started = time.time()
+        self.shell_line = f"/bin/zsh -c source /tmp/snapshot.sh 2>/dev/null || true && eval '{stamped}' < /dev/null"
+        identity.pin_path("s1", pre["tool_use_id"]).write_text(f"{SHELL}\n")
+        self.hook("post-tool", dict(pre, hook_event_name="PostToolUse", tool_response={"backgroundTaskId": "b1"}))
         box = {}
 
         def run():
-            # the tech lead's background wait, as the PreToolUse hook stamps it: its own call leaves the ledger as
-            # soon as it starts, and members work
-            with mock.patch.dict(os.environ, {"DEVKIT_SPEAKER": "main"}):
-                box["rc"], box["out"], box["err"] = dev("watch", "--wait", "--timeout", "240")
+            identity._forget()  # a dev process of its own
+            with mock.patch.dict(os.environ, {"DEVKIT_SPEAKER": "main", identity.CALL_VAR: token}), \
+                    mock.patch.object(sys, "argv", ["dev", *argv]):
+                box["rc"], box["out"], box["err"] = dev(*argv)
         t = threading.Thread(target=run)
         t.start()
         return t, box

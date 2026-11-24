@@ -195,7 +195,8 @@ a.fig:hover .fl{text-decoration:underline;text-underline-offset:3px;text-decorat
 .ist{flex:none;display:inline-grid;place-items:center;width:16px;height:16px;color:var(--ink-2)}
 .ist.i-doing{color:var(--ink-strong)} .ist.i-blocked{color:var(--alert-text)} .ist.i-done{color:var(--ok)}
 .sc{all:unset;cursor:pointer;color:var(--ink-2);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .sc:hover{color:var(--ink-strong);text-decoration:underline}
-.mchip{all:unset;cursor:pointer;font-size:var(--fs-1);color:var(--ink-2);white-space:nowrap} .mchip:hover{color:var(--ink-strong);text-decoration:underline}
+/* the scope chip is a target of 24 px at least (WCAG 2.5.8) with the look of the text around it: its own line box, no padding (the run drawer's step name, a span .sc, keeps the line it sits in) */
+button.sc{display:inline-block;min-inline-size:24px;line-height:max(24px,1.4em);vertical-align:middle;text-align:center}
 .prow{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:2px var(--s3);align-items:start;padding:var(--s3) var(--s2)}
 .prow .pm{min-width:0} .prow .pw{display:flex;align-items:center;gap:var(--s2);min-width:0;font-weight:600;color:var(--ink-strong)}
 .prow .ps{font-size:var(--fs-1);color:var(--ink-2)}
@@ -411,13 +412,13 @@ dialog.modal .md{padding:0}
 .since .k{color:var(--ink-2)}
 /* ---------- kanban (lists, not nested cards) */
 .board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--s5);align-items:start}
-.col h3{display:flex;align-items:center;gap:var(--s2);margin:0;padding:0 0 var(--s2);border-bottom:1px solid var(--line);font-size:var(--fs-2);font-weight:600;color:var(--ink-strong)}
-.col h3 .n{margin-left:auto;color:var(--ink-2);font-weight:400}
+.col h2{display:flex;align-items:center;gap:var(--s2);margin:0;padding:0 0 var(--s2);border-bottom:1px solid var(--line);font-size:var(--fs-2);font-weight:600;color:var(--ink-strong)}
+.col h2 .n{margin-left:auto;color:var(--ink-2);font-weight:400}
 .tc{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--s1) var(--s2);padding:var(--s2) var(--s2);border-bottom:1px solid var(--line-soft)}
 .tc:hover{background:var(--surface-hover)}
 .tc .tx{display:flex;gap:6px;align-items:flex-start;line-height:1.4;color:var(--ink-strong)} .tc .tx .ist{margin-top:2px}
 .tc .meta{grid-column:1/-1;display:flex;gap:2px var(--s3);align-items:center;flex-wrap:wrap;font-size:var(--fs-1);color:var(--ink-2)}
-.tc .meta button{all:unset;cursor:pointer} .tc .meta button:hover{text-decoration:underline}
+.tc .meta button:hover{text-decoration:underline}
 /* ---------- project cards (Projects, cards layout) */
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s4)}
 .pcard{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);padding:var(--s4);background:transparent;border:1px solid var(--line-soft);border-radius:var(--radius-surface);cursor:pointer;text-align:left;min-width:0}
@@ -439,6 +440,7 @@ dialog.modal .md{padding:0}
 .hbar .trk i{display:block;height:100%;border-radius:2px;background:var(--mark);min-width:2px}
 .hbar button{all:unset;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hbar button:hover{text-decoration:underline}
+.hbar button:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
 .road{display:grid;padding:var(--s2) 0}
 .road-row{display:grid;grid-template-columns:minmax(120px,240px) minmax(0,1fr);gap:var(--s3);align-items:center;min-height:32px}
 .road-row:hover{background:var(--surface-hover)}
@@ -535,7 +537,7 @@ body{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh}
 .g12.home{row-gap:var(--s5)}
 .view-home .head{margin-bottom:var(--s5)}
 /* status and magnitude colors (dataviz: fixed status palette, one-hue ramp); fills only, text stays in text tokens */
-.k-ok{fill:var(--s-ok);background:var(--s-ok)} .k-warn{fill:var(--s-caution)} .k-risk{fill:var(--s-risk);background:var(--s-risk)}
+.k-ok{fill:var(--s-ok);background:var(--s-ok)} .k-warn{fill:var(--s-caution);background:var(--s-caution)} .k-risk{fill:var(--s-risk);background:var(--s-risk)}
 .k-done{fill:var(--s-done);background:var(--s-done)} .k-none{fill:var(--s-none);background:var(--s-none)} .k-mark{fill:var(--mark);background:var(--mark)}
 .k-quiet{fill:var(--track);background:var(--track);box-shadow:inset 0 0 0 1px var(--axis)}
 .k-hol{fill:none;background:transparent;box-shadow:inset 0 0 0 1.5px var(--axis)}
@@ -618,8 +620,9 @@ a.stile:hover{background:var(--card-hover)}
 .pcard3 .pc-h{display:flex;gap:var(--s3);align-items:center;min-width:0}
 .pcard3 .pc-n{flex:1;min-width:0} .pcard3 h3{margin:0;display:flex;gap:var(--s2);align-items:center;font-size:var(--fs-3);font-weight:600;min-width:0}
 .pcard3 h3 .rl{color:var(--ink-strong)}
-/* the machine id beside a person's hostname: quiet, and the first to give way when the line is short */
-.mid{flex:0 100 auto;min-width:3ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-1);font-weight:400;color:var(--ink-2)}
+/* the machine id beside a person's hostname: quiet. 14ch holds a real id (m- and 8 characters) whole; only a longer
+   one, which another Mac can publish, is cut with an ellipsis. A long hostname takes its own ellipsis first. */
+.mid{flex:none;max-width:14ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-1);font-weight:400;color:var(--ink-2)}
 .prow .sbars{margin-top:6px}
 /* page headers */
 .mh-row{display:flex;gap:var(--s4);align-items:center;min-width:0}

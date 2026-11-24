@@ -149,7 +149,7 @@ def _read(path: Path):
     except FileNotFoundError:
         return None
     try:
-        doc = clean_record(json.loads(text))
+        doc = clean_record(core.load_json(text))
     except ValueError:
         doc = None
     if not isinstance(doc, dict) or not isinstance(doc.get("version"), int):
@@ -273,6 +273,32 @@ def _who() -> str:
     return core.github_user() or "unknown"
 
 
+def this_mac():
+    """This Mac as a visual record names it: its machine id, never its hostname, which tells whose Mac it is and which
+    the records would carry to the handoff repository. None when devkit keeps no machine id here (identity.machine
+    then names the Mac by its hostname)."""
+    mid = identity.machine().id
+    return mid if identity.MACHINE_ID.fullmatch(mid) else None
+
+
+def mac_name(host) -> str:
+    """A Mac a visual record names, as a message a person reads names it, the way the dashboard does (work.display):
+    by its machine id, never by a hostname devkit would have to look up, since a hostname often names the person and
+    messages land in shared reports and logs. This Mac is `this Mac (m-…)`; another one `another Mac (m-…)`. A record
+    from before the machine id names a hostname already, which another Mac wrote: it stays when it is a plain short
+    hostname, as work.display keeps such a record as written, and is "another Mac" otherwise, so no control character
+    reaches a terminal or the report; no name at all is "another Mac". For messages only: records keep the id."""
+    host = str(host or "").strip()
+    if not host:
+        return "another Mac"
+    if not identity.MACHINE_ID.fullmatch(host):
+        return host if _HOSTNAME.fullmatch(host) else "another Mac"
+    return f"this Mac ({host})" if host == identity.machine().id else f"another Mac ({host})"
+
+
+_HOSTNAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # a plain short hostname, the only kind an older record shows
+
+
 def _check(m: dict) -> None:
     """The map's references hold: unique ids, edges between nodes, journeys over edges, labels on nodes."""
     ids = [n["id"] for n in m["nodes"]]
@@ -319,12 +345,12 @@ def save(project: str, m: dict, base: int, why: str, by: str = None) -> dict:
         current = _read(current_file)
         at = current["version"] if current else 0
         if at != base:
-            host = ((current or {}).get("changelog") or [{}])[-1].get("host") or "another Mac"
+            host = mac_name(((current or {}).get("changelog") or [{}])[-1].get("host"))
             raise MapConflict(f"The map changed to v{at} on {host}. Run the command again on v{at}.")
         new = copy.deepcopy({**empty(), **m})
         new["version"] = base + 1
         new["changelog"] = list((current or {}).get("changelog") or []) + [
-            {"v": base + 1, "at": _now(), "by": by or _who(), "host": identity.hostname(), "why": why}]
+            {"v": base + 1, "at": _now(), "by": by or _who(), "host": this_mac(), "why": why}]
         _check(new)
         new = _redact_map(new)
         text = json.dumps(new, indent=2, ensure_ascii=False) + "\n"
@@ -798,7 +824,7 @@ def apply(project, doc: dict, *, why, by=None) -> dict:
 
 def _record(path: Path):
     try:
-        doc = json.loads(path.read_text())
+        doc = core.load_json(path.read_text())
     except (OSError, ValueError):
         return None
     return doc if isinstance(doc, dict) else None

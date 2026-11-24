@@ -443,7 +443,7 @@ class LandingTests(unittest.TestCase):
         done = statement_run(session="d1", state="done", started=at(14, 0), finished=at(15, 0))
         kw = with_runs(fx.example(), blocked, silent, older, done)
         got = ["remote" if r["machine"] else r["id"] for r in areas(kw)["runs"]]
-        self.assertEqual(got, ["claude-7f3a", "claude-b1", "claude-s1", "remote", "claude-r1", "claude-d1"])
+        self.assertEqual(got, ["claude-7f3a", "claude-b1", "claude-s1", "claude-r1", "remote", "claude-d1"])  # this Mac's first in a state
 
     def test_a_remote_run_keeps_its_id_between_updates_and_two_sessions_get_two(self):
         p = fx.remote_presence()
@@ -701,6 +701,14 @@ class BuildActionsQuotingTests(unittest.TestCase):
                          ("gh pr view 45 -R acme/lending-core --comments", "dev gc --apply",
                           'dev task -p acme/lending-rules release T-fz3lock --why "lock expired"'))
 
+    def test_the_commands_that_answer_a_decision_quote_its_id(self):
+        # a decision id comes from a run record; one with shell syntax stays one argument
+        did = "D1@7f3a;touch pwn"
+        for cmd in dashnow._type_to_answer(did, [{"key": "A"}]) + dashnow._type_to_answer(did, []):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(shlex.split(cmd)[:4], ["dev", "crew", "decide", did])
+        self.assertEqual(dashnow._type_to_answer("D1@7f3a", [{"key": "A"}]), ["dev crew decide D1@7f3a A"])
+
     def test_a_quoted_reclaim_command_runs_no_command_substitution(self):
         reg = fx.registry_example()
         reg["projects"][0]["worktrees"] = [fx._wt(HOSTILE[0], 41)]
@@ -775,6 +783,73 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(now_contract.check(doc), [])
         self.assertEqual(get({"Authorization": f"Bearer {TOKEN}", "If-None-Match": hdrs["etag"]})[0], 304)
         self.assertEqual(get({})[0], 401)
+
+
+class RemoteRunSummaryTests(unittest.TestCase):
+    """Another Mac's presence carries a summary of each run (work.run_summary): the step counts, the steps running now
+    and how many crew members work, never the whole plan. Its run on Now reads them, from an older devkit's whole plan
+    too, and keeps them to sane types and sizes (another Mac's presence is untrusted)."""
+    SHOWN = ("steps_done", "steps_total", "steps_skipped", "current", "current_more", "crew")
+
+    def remote(self, presence):
+        kw = fx.empty()
+        kw["team"] = [presence]
+        return next(r for r in areas(kw)["runs"] if r["machine"])
+
+    def test_a_remote_run_has_its_step_counts_current_steps_and_crew_from_the_summary(self):
+        run = self.remote(fx.remote_presence())
+        self.assertEqual({k: run.get(k) for k in self.SHOWN},
+                         {"steps_done": 2, "steps_total": 4, "steps_skipped": 0,
+                          "current": ["rate tables", "parity tests"], "current_more": 0, "crew": 2})
+
+    def test_an_older_devkits_whole_plan_gives_the_same_counts(self):
+        p = fx.remote_presence(summary=False)
+        p["sessions"][0]["progress"]["plan"].insert(0, {"name": "spike", "state": "skipped", "est": 10, "min": 0.0,
+                                                        "owner": "main"})
+        run = self.remote(p)
+        self.assertEqual({k: run.get(k) for k in self.SHOWN},
+                         {"steps_done": 2, "steps_total": 4, "steps_skipped": 1,
+                          "current": ["rate tables", "parity tests"], "current_more": 0, "crew": 2})
+
+    def test_counts_and_names_from_another_mac_keep_their_types_and_sizes(self):
+        p = fx.remote_presence()
+        p["sessions"][0]["progress"].update(steps_done="2", steps_total=7.5, steps_skipped=-1, crew=1e9,
+                                            current=["x" * 500, 3, None, " ", "rate\ntables", "b", "c"],
+                                            current_more=True)
+        run = self.remote(p)
+        self.assertEqual({k: run.get(k) for k in self.SHOWN},
+                         {"steps_done": None, "steps_total": None, "steps_skipped": None,
+                          "current": ["x" * 119 + "…", "rate tables", "b"], "current_more": 0, "crew": None})
+
+    def test_more_current_steps_than_the_steps_left_count_only_the_steps_left(self):
+        p = fx.remote_presence()
+        p["sessions"][0]["progress"].update(steps_done=2, steps_total=10, current_more=99)
+        self.assertEqual(self.remote(p)["current_more"], 6)          # 10 steps, 2 done, 2 named as current: 6 left
+        p["sessions"][0]["progress"].update(steps_total=4)
+        self.assertEqual(self.remote(p)["current_more"], 0)          # the 2 named current steps are all that is left
+
+    def test_more_steps_done_than_the_total_is_no_count(self):
+        p = fx.remote_presence()
+        p["sessions"][0]["progress"].update(steps_done=9, steps_total=4)
+        run = self.remote(p)
+        self.assertEqual((run["steps_done"], run["steps_total"]), (None, 4))
+
+
+class RunOrderTests(unittest.TestCase):
+    """Within one state, this Mac's runs come before other machines' (newest first within each), so answering a
+    decision never drops the developer's own run below a run on another Mac."""
+
+    def test_an_answered_run_keeps_its_place_above_another_macs_run(self):
+        kw = fx.example()
+        before = [r["machine"] or r["id"] for r in areas(kw)["runs"]]
+        run = kw["raw_runs"][0]
+        run["decisions"][0].update(state="decided", answer="A", by="developer", decided=NOW)
+        run["plan"][3].update(state="running")
+        run["plan"][3].pop("waiting")
+        kw["briefs"] = dashboard._runs(NOW, HOST, raw=copy.deepcopy(kw["raw_runs"]))
+        after = [(r["machine"] or r["id"], r["waiting_on"]) for r in areas(kw)["runs"]]
+        self.assertEqual(before[:2], ["claude-7f3a", "studio"])
+        self.assertEqual(after[:2], [("claude-7f3a", None), ("studio", None)])   # both run now: this Mac's first
 
 
 class ContractTests(unittest.TestCase):

@@ -56,7 +56,8 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
-from . import noderun
+from .. import core
+from . import noderun, npmroot
 
 HERE = Path(__file__).resolve().parent
 PAGE = HERE / "compare.html"
@@ -85,6 +86,8 @@ MODULE = re.compile(r'<script type="module">(.*?)</script>', re.S)
 UNSAFE_IN_SCRIPT = re.compile(r"(?i)</script|<!--|<script")
 NO_BROWSER = ("No browser to compare with. devkit uses the Chromium of the pinned Playwright CLI "
               "(config/npm-globals.txt): run dev install --only tools.")
+NO_NPM_ROOT = ("No browser to compare with: {}, so devkit cannot find the pinned Playwright. Check that npm root -g "
+               "prints a folder here, then run the command again.")
 
 
 class CompareError(Exception):
@@ -200,10 +203,9 @@ def _playwright(core=None) -> dict:
         raise CompareError(NO_BROWSER)
     if core is None:
         try:
-            npm = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True, timeout=60).stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            npm = ""
-        core = Path(npm or "/nonexistent") / "@playwright" / "cli" / "node_modules" / "playwright-core"
+            core = npmroot.global_root() / "@playwright" / "cli" / "node_modules" / "playwright-core"
+        except npmroot.NoFolder as e:
+            raise CompareError(NO_NPM_ROOT.format(e)) from None
     if not (Path(core) / "package.json").is_file():
         raise CompareError(NO_BROWSER)
     return {"node": node, "core": str(core)}
@@ -480,7 +482,7 @@ def _capture(records: Path, cid: str) -> dict:
     if not ID.match(cid or ""):
         raise CompareError(f"{cid!r} is not a capture id (VC-…).")
     try:
-        rec = json.loads((records / "captures" / f"{cid}.json").read_text(encoding="utf-8"))
+        rec = core.load_json((records / "captures" / f"{cid}.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise CompareError(f"No capture {cid} in {records / 'captures'}.") from None
     except ValueError:
@@ -497,8 +499,9 @@ def _picture(store: Path, rec: dict) -> bytes:
     try:
         data = (store / "blobs" / f"{sha}.png").read_bytes()
     except OSError:
-        raise CompareError(f"The picture of {cid} is not on this Mac. Capture it here: "
-                           f"dev visual capture --again {cid}") from None
+        from . import store as vstore  # store.py imports this module first, so it is imported when it is needed
+        raise CompareError(f"{vstore.not_here(rec, 'picture')}. Capture it here: dev visual capture --again {cid}") \
+            from None
     if hashlib.sha256(data).hexdigest() != sha:
         raise CompareError(f"The picture of {cid} in the store does not match its record (SHA-256 {sha[:12]}…). "
                            "Nothing was compared.")

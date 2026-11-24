@@ -41,13 +41,13 @@ class MootQuestionTests(WatchCase):
         run = pg.load_run("claude", "s1")
         self.assertEqual(run["agents"]["a1"]["state"], "done")
         self.assertEqual(pg.waiting_messages(run), [])
-        rc, out, _ = dev("watch")
+        rc, out, _ = self.lead("watch")
         self.assertEqual(rc, 0, out)
         moot = [ln for ln in out.splitlines() if "M1" in ln]
         self.assertEqual(len(moot), 1, out)
         self.assertIn("moot", moot[0])
         self.world()
-        rc, out, err = dev("watch", "--wait", "--timeout", "1")
+        rc, out, err = self.lead("watch", "--wait", "--timeout", "1")
         self.assertEqual(rc, 3, out + err)  # the tests member still works: the wait waits, but not for M1
         self.assertNotIn("M1", out)
 
@@ -55,7 +55,7 @@ class MootQuestionTests(WatchCase):
         self.run_with_member()
         self.world(lambda: (pg.crew_ask("Rename the column?", from_agent="a1", now=self.clock.t),
                             pg.crew_answer("M1", "No, keep it", now=self.clock.t)))
-        rc, out, err = dev("watch", "--wait", "--timeout", "1")
+        rc, out, err = self.lead("watch", "--wait", "--timeout", "1")
         self.assertEqual(rc, 3, out + err)
         self.assertNotIn("Rename the column?", out)
 
@@ -104,7 +104,7 @@ class LostLaneTests(WatchCase):
         self.run_with_member()
         self.clock.t = self.t0 + 85 * 60  # still within progress.stale_agent_minutes (90)
         self.world()
-        rc, out, err = dev("watch", "--wait", "--timeout", "30")
+        rc, out, err = self.lead("watch", "--wait", "--timeout", "30")
         self.assertEqual(rc, 0, out + err)
         lines = self.lost_line(out)
         self.assertEqual(len(lines), 1, out)

@@ -19,7 +19,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, bugs, canary, core, hooks, identity, lanescope, progress as pg, registry, stubs, work  # noqa: E402,E501
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
+from devkit import audit, bugs, canary, core, hooks, lanescope, progress as pg, registry, stubs, work  # noqa: E402,E501
 from test_language_neutral_hooks import HookCase  # noqa: E402
 from test_progress import gates_passed, launch  # noqa: E402
 import test_threaded_turn_endings as turns  # noqa: E402  (its TurnCase fixture; its tests run in their own module)
@@ -151,7 +155,8 @@ class ClaimedTaskTests(WiringCase):
 
     def test_this_macs_presence_under_its_former_hostname_is_not_another_machine_at_the_session_start(self):
         # presence this Mac wrote as mac-158 is its own, not someone "also working on this project"; another Mac is
-        # named by its hostname, the label of its machine id
+        # named by its machine id, never by the hostname an older devkit still publishes as its label (a hostname
+        # often names the person, and the context lands in transcripts)
         handoff_of(self, self.root / "handoff")
         pid = core.project_identity(self.repo, "")[0]
         with mock.patch("socket.gethostname", return_value="Mac-158.lan"):
@@ -168,7 +173,8 @@ class ClaimedTaskTests(WiringCase):
                     str(p)).startswith(repo) else real(p)):  # the network renamed the Mac
             text = hooks.context_for(repo, "claude")
         busy = next((ln for ln in text.splitlines() if ln.startswith("Also working on this project")), "")
-        self.assertIn("bob@bob-mbp (claude, main)", busy)
+        self.assertIn("bob@m-0b0b0b0b0b0b (claude, main)", busy)
+        self.assertNotIn("bob-mbp", busy)
         self.assertNotIn("mac-158", busy)
 
     def test_another_macs_presence_reaches_the_model_only_in_plain_words(self):
@@ -235,12 +241,12 @@ class FailOpenTests(WiringCase):
         call = self.bash('dev progress step "parser done" --check "3 tests"', aid="a_tank")
         with mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
             out = self.hook("pre-tool", call)
-        spec = json.loads(out)["hookSpecificOutput"]
+        spec = (json.loads(out) if out.strip() else {}).get("hookSpecificOutput") or {}
         self.assertNotIn("permissionDecision", spec)
-        command = spec["updatedInput"]["command"]
-        # no bypass mode in the payload: the plain form, the token right before dev
-        self.assertRegex(command, r"\ADEVKIT_FROM_AGENT=a_tank DEVKIT_CALL=toolu_1\.[A-Za-z0-9_-]{22} dev progress step ")
-        self.assertTrue(identity.strip_token(command).startswith("DEVKIT_FROM_AGENT=a_tank dev progress step"), out)
+        # no bypass mode in the payload: the call goes out as written, and its entry still names the lane
+        self.assertNotIn("updatedInput", spec)
+        entry = pg.call_entry(call)
+        self.assertEqual((entry["caller"], entry["pin_by"]), ("a_tank", "text"))
 
 
 class MainSessionTests(WiringCase):
@@ -495,6 +501,27 @@ class ConfigTests(unittest.TestCase):
         for tool in ("Bash", "Edit", "WebFetch", "mcp__slack__send_message", "mcp__claude_ai_Gmail__create_draft"):
             with self.subTest(tool=tool):
                 self.assertTrue(any(re.fullmatch(m, tool) for m in matchers), matchers)
+
+
+    # every event devkit handles is registered in the settings it ships, under its own event, and nothing else is:
+    # a handler nothing calls never runs, and a registration without a handler does nothing
+    def test_the_shipped_settings_register_exactly_the_events_devkit_handles(self):
+        conf = json.loads((HOME / "config" / "claude" / "settings.json").read_text())
+        names = {"session-start": "SessionStart", "session-end": "SessionEnd", "pre-tool": "PreToolUse",
+                 "stop": "Stop", "config-change": "ConfigChange", "instructions-loaded": "InstructionsLoaded",
+                 "prompt": "UserPromptSubmit", "post-tool": "PostToolUse", "post-tool-failure": "PostToolUseFailure",
+                 "subagent-start": "SubagentStart", "subagent-stop": "SubagentStop", "pre-compact": "PreCompact",
+                 "post-compact": "PostCompact", "permission-denied": "PermissionDenied"}
+        registered = {}
+        for event, groups in conf["hooks"].items():
+            for g in groups:
+                for h in g.get("hooks") or []:
+                    found = re.search(r"/bin/dev' hook ([a-z-]+) --agent claude$", h.get("command", ""))
+                    self.assertTrue(found, h)
+                    registered.setdefault(found.group(1), set()).add(event)
+        handled = set(hooks.HANDLERS) - {"guard", "statusline"}  # pre-tool's older name; the status line's setting
+        self.assertEqual(set(registered), handled)
+        self.assertEqual({k: v for k, v in registered.items() if v != {names[k]}}, {})
 
 
 class StatusPathTests(WiringCase):

@@ -5,8 +5,9 @@
 Playwright starts Chromium detached, in a process group of its own, with its profile under TMPDIR, so stopping node
 alone leaves the browser running, with its DevTools port and its profile. `run` gives the driver a session of its own
 and TMPDIR in a private folder: a new 0700 folder, deleted when the run ends, or the caller's own. When the driver
-does not end within its timeout, fails, or is interrupted, `stop` stops the driver's process group and every process
-group whose command line names that folder: the browser's, which names its profile there.
+does not end within its timeout, fails, or is interrupted, `stop` stops the driver's process group, the
+group of each of its children (the capture's detector, started detached), and every process group whose command
+line names that folder: the browser's, which names its profile there.
 
 The marks (judge.py), the comparison (compare.py), and the crawl and the walk (map.py) run their drivers through it;
 store.py's capture runs capture.cjs the same way.
@@ -17,8 +18,9 @@ Interface:
       -> subprocess.CompletedProcess (text); raises subprocess.TimeoutExpired once the driver is stopped, OSError
       when it does not start, and ValueError, before it starts, when `tmpdir` is not an absolute folder below the
       root. `cwd` defaults to the folder; `env` to this process's environment, with TMPDIR set.
-  stop(proc, folder)     SIGKILL to the driver's process group and to each process group that names `folder` as a
-                         path; ValueError, before it stops anything, when `folder` is not absolute or is the root
+  stop(proc, folder)     SIGKILL to the driver's process group, to the group of each of the driver's children, and to
+                         each process group that names `folder` as a path; ValueError, before it stops anything,
+                         when `folder` is not absolute or is the root
 """
 from __future__ import annotations
 
@@ -46,21 +48,26 @@ def _as_path(folder) -> re.Pattern:
 
 
 def stop(proc, folder: str) -> None:
-    """Stop the driver's process group, and every process group whose command line names the run's folder as a path:
-    the browser, which Playwright starts detached (a group of its own), with its profile in TMPDIR. A browser that
+    """Stop the driver's process group, the process group of each of the driver's children, and every process group
+    whose command line names the run's folder as a path: the browser, which Playwright starts detached (a group of its
+    own), with its profile in TMPDIR, and the design detector, which the capture starts detached. A browser that
     outlived its driver would keep its DevTools port open. A folder that is not absolute is refused (ValueError)
     before anything is stopped."""
     named = _as_path(folder)
     groups = {proc.pid}
+    # listed before the driver is stopped: once it ends, its children are no longer its own
     try:
-        out = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,pgid=,command="], capture_output=True, text=True,
+        out = subprocess.run(["ps", "-A", "-ww", "-o", "pid=,ppid=,pgid=,command="], capture_output=True, text=True,
                              timeout=10).stdout
     except (OSError, subprocess.TimeoutExpired):
         out = ""
     for line in out.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) == 3 and named.search(parts[2]) and parts[1].isdigit():
-            groups.add(int(parts[1]))
+        parts = line.split(None, 3)
+        if len(parts) < 3 or not parts[1].isdigit() or not parts[2].isdigit():
+            continue
+        # a child the driver started detached (the capture's detector) leads a group that does not name the folder
+        if int(parts[1]) == proc.pid or (len(parts) == 4 and named.search(parts[3])):
+            groups.add(int(parts[2]))
     for group in groups - {0, 1, os.getpgrp()}:
         try:
             os.killpg(group, signal.SIGKILL)

@@ -222,6 +222,11 @@ project, for example `e2e/.auth/clerk.json`.
    - Changed regions outside the finding's anchor become new `changed-region` signals, numbered on the new capture.
      They are the regressions next to the fix: triage them like any other signal.
    - The findings that name this one as their `--root` are checked on the same new capture.
+   - Records sync between Macs, pictures do not. When the finding's capture was taken on another Mac, its picture
+     before is not here: verify captures the recipe again on this Mac and lets the check decide on the new capture,
+     with nothing compared. The verification records `compared: false`, and the outcome says so and names the Mac
+     the picture is on (`studio (m-0000beef)`). A judgment finding then waits for a reviewer who looks at the new
+     capture and accepts it with `dev visual verify VF-… --accept --why "…"`.
    - A structure finding is decided by `dev visual map check`: verify first walks again the journey its signal is
      on, with a capture of each step, or crawls the map again from its start screen, then checks.
    - When the recapture fails because the app is down or a step finds nothing, the finding keeps its status, and
@@ -578,7 +583,8 @@ runs, and a marker inside the text is printed escaped (`<\<`), so the block ends
 | `The page of VC-… lays out differently now: … Nothing was changed.` | The page changed since the capture, so new signals would not sit on its picture. Take a new capture: `dev visual capture --again VC-…` |
 | `"button.primary" matches 3 elements` | Use a selector that matches one element, or `--element E<n>` |
 | `Mark 14 is not on the marked copy` | Run `dev visual marks VC-…` again and cite a mark it shows |
-| `The description of VC-… is not on this Mac` · `The picture of VC-… is not on this Mac` | The capture was taken on another Mac, or its files were pruned. Capture it again here: `dev visual capture --again VC-…` |
+| `The description of VC-… is not on this Mac: it was taken on studio (m-0000beef).` · `The picture of VC-… is not on this Mac: …` | The capture was taken on the Mac the message names (its name as the dashboard shows it, with its machine id), or its files were pruned. Capture it again here: `dev visual capture --again VC-…` |
+| `The picture of VC-… is no longer in this Mac's store` · `The description of VC-… is no longer in this Mac's store` | This Mac took the capture and later pruned its files. `describe` and `marks` say to capture it again here (`dev visual capture --again VC-…`); `share` shares nothing; `verify` compares nothing and lets the checks decide on a new capture |
 | `The picture of VC-… does not match its record` | The local picture changed after the capture. Capture it again; marks are drawn only on the picture the record names |
 | `VC-…'s recipe names the storage state …, outside this project` | A replay reads files only from the project. Save the storage state inside the project and capture again |
 | `The document … that VC-…'s recipe names is not in this project` · `2 files of this project are named …` | Put the document back, or capture the one you mean again: `dev visual capture <file>` |
@@ -588,9 +594,10 @@ runs, and a marker inside the text is printed escaped (`<\<`), so the block ends
 | `VC-… is cut at 16,384 CSS px, the bound for a picture's height` | The page is taller than a picture holds. The picture, its description, and its signals stop there, and the record keeps the page's full height. Review the rest in a state that shows it higher up (a filter, a page of results, a collapsed section), or split the page |
 | `The capture took longer than 90 s, the bound for one capture … Nothing was recorded.` | The steps and checks of one capture take at most 90 s. Use fewer steps, or wait for what the page shows instead of a fixed time |
 | `VF-… is still there: overlap fires again on VC-…. Status: reopened.` | The fix did not remove what the check measured, which the command prints below the line as data. Look at the difference picture the command printed, fix again, then verify again |
+| `VF-…  verified · overlap no longer fires on VC-… · nothing compared: the picture before was taken on studio (m-0000beef) and is not on this Mac` | The check decided on a new capture of the recipe here; the pictures were not compared, since the one before is on the Mac named. To see the difference too, run `dev visual verify VF-…` on that Mac |
 | `Could not verify VF-…: … Status: fixed.` | The recapture or the comparison failed; the finding is unchanged. Fix what the message names (start the app, fix the step), then verify again |
 | `… are captures of different recipes (viewport differ)` | `dev visual compare` takes two captures of one recipe. Capture the recipe again with `dev visual capture --again VC-…` and compare those |
-| `The map changed to v5 on mac-studio.` | Another Mac changed the map. Run the command again |
+| `The map changed to v5 on studio (m-0000beef).` | Another Mac changed the map; the message names it by the name its presence publishes, with its machine id, or as `another Mac (m-…)`. Run the command again |
 
 See also [Skills and plugins](skills-and-plugins.md), [The crew](crew.md), [Testing](testing.md), and
 [Diagrams](diagrams.md).

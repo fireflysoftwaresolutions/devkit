@@ -226,28 +226,44 @@ class SameFileWritersTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["go", "settings.json"])
 
 
-    # Two `dev ci --run` of one project record their steps in one file: no save fails, and no step one of them
+    CI_STEP_WRITER = """
+        import types
+        from devkit import gitx
+        core.STATE, errors = Path({state!r}), 0
+        c = types.SimpleNamespace(pid="acme/widget", top={top!r})
+        for i in range(100):
+            try:
+                gitx._save_step(c, "{who} › %d" % i, {{"rc": 0}})
+            except OSError:
+                errors += 1
+        print(errors)
+        """
+
+    # Two `dev ci --run` of one checkout record their steps in one file: no save fails, and no step one of them
     # recorded is lost to the other's save
     def test_ci_steps_saved_at_once_never_fail_and_keep_every_step(self):
         import json
-        state = self.dir / "state"
-        writer = """
-            import types
-            from devkit import gitx
-            core.STATE, errors = Path({state!r}), 0
-            c = types.SimpleNamespace(pid="acme/widget")
-            for i in range(100):
-                try:
-                    gitx._save_step(c, "{who} › %d" % i, {{"rc": 0}})
-                except OSError:
-                    errors += 1
-            print(errors)
-            """
-        out = together([writer.format(state=str(state), who=w) for w in ("ana", "bob")], self.dir)
+        state, top = self.dir / "state", str(self.dir / "widget")
+        out = together([self.CI_STEP_WRITER.format(state=str(state), top=top, who=w) for w in ("ana", "bob")], self.dir)
         self.assertEqual([o.strip() for o in out], ["0", "0"], "saves that failed, per process")
-        steps = json.loads((state / "ci" / "steps" / "acme__widget.json").read_text())["steps"]
+        files = list((state / "ci" / "steps").glob("*.json"))
+        self.assertEqual(len(files), 1, files)
+        steps = json.loads(files[0].read_text())["steps"]
         self.assertEqual(len(steps), 200, "steps lost to the other process's save")
-        self.assertEqual(sorted(p.name for p in (state / "ci" / "steps").iterdir()), ["acme__widget.json"])
+
+    # Two checkouts of one project (the main checkout and a worktree) saving at once keep a file each, with only their
+    # own steps: a run in one never changes what --resume keeps in the other
+    def test_ci_steps_of_two_checkouts_saved_at_once_keep_a_file_each(self):
+        import json
+        state = self.dir / "state"
+        out = together([self.CI_STEP_WRITER.format(state=str(state), top=str(self.dir / top), who=w)
+                        for w, top in (("ana", "widget"), ("bob", "widget-wt"))], self.dir)
+        self.assertEqual([o.strip() for o in out], ["0", "0"], "saves that failed, per process")
+        files = sorted((state / "ci" / "steps").glob("*.json"))
+        self.assertEqual(len(files), 2, files)
+        owners = sorted(sorted({key.split(" › ")[0] for key in json.loads(f.read_text())["steps"]}) for f in files)
+        self.assertEqual(owners, [["ana"], ["bob"]])
+        self.assertEqual([len(json.loads(f.read_text())["steps"]) for f in files], [100, 100])
 
     # Two installs record the installed copy at once: no write fails, and the record is one writer's whole JSON
     def test_install_records_written_at_once_never_fail_and_leave_valid_json(self):
@@ -444,32 +460,46 @@ class SessionLogTests(unittest.TestCase):
         return self.dir / "sessions" / "acme" / "widget" / f"{time.strftime('%Y-%m')}.md"
 
     def test_a_session_line_rewritten_on_every_turn_never_drops_a_line_another_session_appends(self):
-        # Session A rewrites its own line 60 times (the Stop hook) while session B appends lines (dev handoff --log)
-        # until A is done: every line B appended is kept, and A's line is there once, as A last wrote it.
-        done = self.dir / "a-done"
+        # Session A rewrites its own line (the Stop hook) while session B appends lines (dev handoff --log): every line
+        # B appended is kept, and A's line is there once, as A last wrote it. A keeps rewriting until B has appended
+        # more than 20 lines since A's first rewrite, so the two overlap however busy the Mac is; a B that
+        # cannot append that many within the bound fails the test by name instead of passing with no overlap.
+        appends = 20
+        done, ticks = self.dir / "a-done", self.dir / "b-ticks"
         setup = f"""
             from devkit import work
             work.SESSIONS = Path({str(self.dir / 'sessions')!r})
+            def appended():
+                return Path({str(ticks)!r}).stat().st_size if Path({str(ticks)!r}).exists() else 0
             """
         rewrite = setup + f"""
-            for i in range(60):
-                work.replace_session_line("acme/widget", "<!-- s:sA -->", f"session A turn {{i}} <!-- s:sA -->")
+            deadline, turns, first = time.monotonic() + {TIMEOUT // 2}, 0, None
+            while first is None or appended() - first <= {appends}:
+                if time.monotonic() > deadline:
+                    raise SystemExit("session B appended %d lines in {TIMEOUT // 2} s of session A's %d rewrites, "
+                                     "not more than {appends}" % (appended() - first, turns))
+                work.replace_session_line("acme/widget", "<!-- s:sA -->", f"session A turn {{turns}} <!-- s:sA -->")
+                first = appended() if first is None else first
+                turns += 1
             Path({str(done)!r}).touch()
+            print(turns)
             """
         append = setup + f"""
             n = 0
             while not Path({str(done)!r}).exists():
                 work.log_session("acme/widget", f"bob line {{n}}")
                 n += 1
+                with open({str(ticks)!r}, "a") as t:
+                    t.write(".")
             print(n)
             """
-        written = int(together([rewrite, append], self.dir)[1])
+        turns, written = (int(o) for o in together([rewrite, append], self.dir))
         text = self.month().read_text()
-        self.assertGreater(written, 20)
-        self.assertEqual(len([ln for ln in text.splitlines() if ln.startswith("- bob line ")]), written,
-                         "lines of session B were lost")
+        self.assertGreater(written, appends, "session B did not append while session A rewrote its line")
+        self.assertEqual(sorted(ln for ln in text.splitlines() if ln.startswith("- bob line ")),
+                         sorted(f"- bob line {n}" for n in range(written)), "lines of session B were lost")
         self.assertEqual([ln for ln in text.splitlines() if "<!-- s:sA -->" in ln],
-                         ["- session A turn 59 <!-- s:sA -->"])
+                         [f"- session A turn {turns - 1} <!-- s:sA -->"])
 
     def test_a_session_line_is_appended_when_the_month_has_none_and_replaced_in_place_when_it_has_one(self):
         from devkit import work

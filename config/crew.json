@@ -1186,6 +1186,10 @@
         "frontend-design",
         "superpowers:test-driven-development",
         "impeccable",
+        "mobile",
+        "swiftui-pro",
+        "android-permissions-security",
+        "jetpack-compose-performance",
         "testing",
         "superpowers:verification-before-completion",
         "communicating"
@@ -1236,10 +1240,11 @@
         },
         {
           "phase": "Build",
-          "do": "Build with the project's framework and patterns; behavior tests first.",
+          "do": "Build with the project's framework and patterns; behavior tests first. Load `mobile` for the platform checklists; SwiftUI code also needs `swiftui-pro`, and an Android manifest `android-permissions-security`.",
           "skills": [
             "superpowers:test-driven-development",
-            "impeccable"
+            "impeccable",
+            "mobile"
           ],
           "devkit": [
             "dev test"

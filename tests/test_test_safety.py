@@ -505,5 +505,93 @@ class OlderCopyTests(Folders):
         self.assertIn("devkit", trips[1])
 
 
+
+class BackgroundPipelineTests(unittest.TestCase):
+    # The detached-sync guard reads a shell line only (_hermetic.detached_sync on an audit event's arguments): it
+    # starts nothing. The `dev` is this checkout's bin/dev, which imports devkit.
+    dev = str(TREE / "bin" / "dev")
+
+    def sync(self, shell, line):
+        return _hermetic.detached_sync("subprocess.Popen", (shell, [shell, "-c", line], None, None))
+
+    def test_every_command_of_a_pipeline_sent_to_the_background_is_detached(self):
+        for line in (f"{self.dev} sync 2>&1 | tee log &", f"{self.dev} sync | cat &",
+                     f"{self.dev} sync | cat & echo queued"):
+            with self.subTest(line=line):
+                self.assertRegex(self.sync("/bin/sh", line), r"^dev sync\b")
+        # the same pipelines in the foreground, and an & that only redirects or chains, start no detached sync
+        for line in (f"{self.dev} sync 2>&1 | tee log", f"{self.dev} sync >&2 | cat; echo done &",
+                     f"{self.dev} sync && echo done &&  true"):
+            with self.subTest(line=line):
+                self.assertEqual("", self.sync("/bin/sh", line))
+
+    def test_an_ampersand_joined_to_the_next_separator_still_sends_the_command_to_the_background(self):
+        # the shell splitter joins & with a new line, a ) or a ; into one token: each is still a background
+        for line in (f"{self.dev} sync &\necho queued", f"({self.dev} sync &)", f"{self.dev} sync &; echo queued",
+                     f"({self.dev} sync)&"):
+            with self.subTest(line=line):
+                self.assertRegex(self.sync("/bin/sh", line), r"^dev sync\b")
+        self.assertEqual("", self.sync("/bin/sh", f"{self.dev} sync &&\necho done"))
+
+    def test_an_ampersand_before_a_redirect_sends_the_command_to_the_background(self):
+        self.assertRegex(self.sync("/bin/bash", f"{self.dev} sync &2>/dev/null"), r"^dev sync\b")
+
+    def test_ampersand_greater_is_a_background_under_sh_and_a_redirect_under_bash_and_zsh(self):
+        self.assertRegex(self.sync("/bin/sh", f"{self.dev} sync &>/dev/null"), r"^dev sync\b")
+        self.assertRegex(self.sync("/bin/dash", f"{self.dev} sync &>/dev/null"), r"^dev sync\b")
+        self.assertRegex(_hermetic.detached_sync("os.system", (f"{self.dev} sync &>/dev/null",)), r"^dev sync\b")
+        for shell in ("/bin/bash", "/bin/zsh"):
+            with self.subTest(shell=shell):
+                self.assertEqual("", self.sync(shell, f"{self.dev} sync &>/dev/null"))
+
+
+
+def _helper_modules() -> list:
+    """The test modules other code imports by name (`from test_work import TwoMacs`): a probe imports them by path."""
+    import re
+    names = set()
+    for f in sorted((TREE / "tests").glob("*.py")):
+        names |= set(re.findall(r"(?m)^\s*(?:from (test_\w+) import|import (test_\w+))",
+                                f.read_text(encoding="utf-8")))  # inside a test too
+    return sorted({a or b for a, b in names})
+
+
+class HelperImportIsolationTests(unittest.TestCase):
+    # tests/__init__.py isolates the run only when the suite runs as a package. A probe, or a module that imports a
+    # helper by path (sys.path.insert(0, "tests"); from test_work import TwoMacs), ran against the real home: a probe
+    # wrote the real handoff's audit policy, and a handoff push scenario wrote "the handoff push failed" into the
+    # session records of live sessions. Every helper module isolates the run when it is imported.
+    def test_a_probe_that_imports_a_helper_by_path_gets_the_temporary_home(self):
+        # the probe's own home stands for the developer's (the run refuses a start with the real one)
+        real = tempfile.mkdtemp(prefix="probe-home-", dir=_hermetic.home_base())
+        self.addCleanup(shutil.rmtree, real, True)
+        env = {k: v for k, v in os.environ.items() if k != _hermetic.MARK}  # a probe outside the run
+        env["HOME"] = real
+        code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import test_work; from pathlib import Path; "
+                "from devkit import core; print(json.dumps([str(Path.home()), str(core.STATE), str(core.HANDOFF)]))")
+        p = subprocess.run([sys.executable, "-c", code, str(TREE / "tests")], env=env, capture_output=True, text=True,
+                           timeout=120, cwd=str(TREE))
+        self.assertEqual(0, p.returncode, p.stderr[-2000:])
+        home, state, handoff = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertNotEqual(os.path.realpath(home), os.path.realpath(real))
+        self.assertIn("devkit-hermetic-", home)
+        for path in (state, handoff):
+            self.assertTrue(path.startswith(home), (path, home))
+
+    def test_every_helper_module_isolates_the_run_before_it_imports_devkit(self):
+        import re
+        late = []
+        for name in _helper_modules():
+            text = (TREE / "tests" / f"{name}.py").read_text(encoding="utf-8")
+            if not re.search(r"(?m)^\s*(?:from devkit\b|import devkit\b|import subprocess\b)", text):
+                continue  # data only (test_language_samples): it reaches no home
+            first_devkit = re.search(r"(?m)^(?:from devkit\b|import devkit\b)", text)
+            # its own activation, or an import of a helper module that activates (checked here too)
+            isolates = re.search(r"(?m)^_hermetic\.activate\(\)|^from test_\w+ import|^import test_\w+", text)
+            if not isolates or (first_devkit and first_devkit.start() < isolates.start()):
+                late.append(name)
+        self.assertEqual([], late)
+
+
 if __name__ == "__main__":
     unittest.main()

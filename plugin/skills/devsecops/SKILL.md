@@ -43,8 +43,11 @@ Record the threats and mitigations in the plan or the initiative's Decisions.
   per-rule wall-clock timeout, and incomplete on any error, rule timeout, fixpoint timeout, or skipped rule. The scan
   names each one by type, path and rule (8, then a count). Two registry rules that only match code importing their
   package (boto3 or botocore; flask) are left out of a tree that never imports it, and the scan says so.
-- `dev sec scan` waives nothing: a finding the repository reviewed and accepted still shows here. Its disposition
-  lives in the repository's own qualification gate (devkit's: `scripts/security_corpus.py`).
+- `dev sec scan` lists a Semgrep finding the repository reviewed and accepted as reviewed, and it does not fail the
+  scan. The disposition lives in the repository's own qualification gate (devkit's: `REVIEWED_DISPOSITIONS` in
+  `scripts/security_corpus.py`); the scan reads it as committed and matches the finding's rule, path, a context found
+  once, and its exact span. Add a disposition only after a review, and commit it: one only in the working tree
+  reviews nothing.
 - Missing optional tools are reported and skipped; a successful exit does not prove coverage of those checks.
   OSV's legitimate no-packages result remains accepted without JSON output. Semgrep informational findings alone
   do not fail the scan. Record these limits when reporting security verification.

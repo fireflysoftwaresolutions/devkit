@@ -43,6 +43,12 @@ Bumps:
 The test gate is exactly what CI runs (`dev ci --commands`), and it runs locally before the one push. For the
 changelog, use Keep a Changelog sections generated with git-cliff from Conventional Commits, edited for readers.
 
+**Change fragments.** When branches run in parallel, a `changes/` folder (with a `changes/README.md` that explains the
+format) stops them colliding on `CHANGELOG.md`: each branch writes its lines to `changes/<branch>.md` (`/` as `-`)
+under `### Added`, `### Changed`, `### Deprecated`, `### Removed`, `### Fixed` or `### Security`, as `-` entries,
+and never edits `CHANGELOG.md`; `dev ci --run` fails a branch that does, unless it is a `release/`, `hotfix/` or
+`integration/` branch, and fails a fragment it cannot read.
+
 ## 3. Record it, and turn the gaps into work
 
 ```bash
@@ -65,7 +71,11 @@ repository administrator's right) and names the setting on other hosts, and `dev
 
 1. **Integrate.** Bring everything that ships into `release/<version>` from an up-to-date `origin/<default>`.
 2. **Run the test gate locally,** then push once and open one PR.
-3. **Bump the version files the policy names,** and write the CHANGELOG section in the same branch.
+3. **Bump the version files the policy names,** and write the CHANGELOG section in the same branch. With change
+   fragments, `dev release` on the release branch writes them into the version's section and removes them, staged
+   for the release commit, and tags nothing there (`--dry-run` lists them first; an `integration/<topic>` or
+   `hotfix/<topic>` branch names the version with `--version`); `dev release` on the default branch refuses while a
+   fragment is left.
 4. **Reconcile the work items:** `dev task reconcile`, then close (`--apply`) or reopen what it lists. `dev release` and
    `--dry-run` refuse while items of branches merged since the previous tag are open. `--why "…"` releases anyway and
    is recorded in the audit and the output: use it only for an item that truly stays open.

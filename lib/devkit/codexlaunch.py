@@ -98,7 +98,7 @@ def lifecycle_events(path, thread_id: str, agent_ids) -> dict:
         if b'"SubAgentActivity"' not in line:
             continue
         try:
-            rec = json.loads(line)
+            rec = core.load_json(line)
             payload = rec.get("payload") if isinstance(rec, dict) else None
             if rec.get("type") != "event_msg" or not isinstance(payload, dict) or \
                     payload.get("type") != "item_completed" or payload.get("thread_id") != thread_id:
@@ -158,7 +158,7 @@ def session_meta(path) -> dict:
     try:
         with open(path, "rb") as fh:
             line = fh.readline(CODEX_META_MAX)
-        rec = json.loads(line) if line.strip() else {}
+        rec = core.load_json(line) if line.strip() else {}
     except (OSError, TypeError, ValueError):
         return {}
     meta = rec.get("payload") if isinstance(rec, dict) and rec.get("type") == "session_meta" else None
@@ -209,7 +209,7 @@ def spawn_calls(path, expected_meta=None, diagnostics=None) -> tuple:
         with open(path, "rb") as stream:
             before = os.fstat(stream.fileno())
             lines = _snapshot_lines(stream, before.st_size, deadline, CODEX_META_MAX)
-            first = json.loads(next(lines))
+            first = core.load_json(next(lines))
             meta = first.get("payload") if first.get("type") == "session_meta" else None
             if not isinstance(meta, dict) or expected_meta is not None and meta != expected_meta:
                 return incomplete("parent metadata changed or is incomplete")
@@ -217,7 +217,7 @@ def spawn_calls(path, expected_meta=None, diagnostics=None) -> tuple:
             for line in lines:
                 if b'"spawn_agent"' not in line and b'"SubAgentActivity"' not in line:
                     continue  # most of a rollout is neither; parsing it all would spend the deadline
-                record = json.loads(line)
+                record = core.load_json(line)
                 if time.monotonic() >= deadline:
                     raise ValueError("native recovery deadline exhausted during parsing")
                 if _timestamp(record) < created:
@@ -228,7 +228,7 @@ def spawn_calls(path, expected_meta=None, diagnostics=None) -> tuple:
                     cid = p.get("call_id")
                     if not cid or cid in seen:
                         return incomplete("duplicate or incomplete native launch call")
-                    args = json.loads(p.get("arguments") or "{}")
+                    args = core.load_json(p.get("arguments") or "{}")
                     if not isinstance(cid, str) or not isinstance(args, dict):
                         return incomplete("malformed native launch arguments")
                     seen.add(cid)
@@ -489,8 +489,7 @@ def brief_context(agent: str, data: dict, launch: dict, project: str) -> str:
     its launch bound to. '' when there is nothing to add."""
     from . import progress, skillguard
     run, _ = progress.lane_of(agent, str(data.get("session_id") or ""), str(data.get("agent_id") or ""))
-    step = next((s for s in (run or {}).get("plan") or [] if s.get("owner") == data.get("agent_id")
-                 and s.get("state") not in progress.DONE), None) or {}
+    step = progress.launch_step(run, str(data.get("agent_id") or "")) or {}  # never a step that only joined its lane
     out = skillguard.on_agent_brief(agent, {"description": launch["label"], "prompt": ""}, project,
                                     activity=str(step.get("activity") or ""), files=step.get("scope") or None)
     return str((out or {}).get("prompt") or "").strip()
@@ -499,9 +498,11 @@ def brief_context(agent: str, data: dict, launch: dict, project: str) -> str:
 # --------------------------------------------------------------------------- Codex scratch folders
 #
 # A Codex session's scratch folders come from its registered session record, never from a tool call's workdir: the
-# ChatGPT app's work/ and outputs/ (a member's work/scratchpad/<member>/), or the CLI's TMP/codex/<session>/scratchpad/
-# <member or main>/. codex_scratch_context keeps them for one hook event (APP_SCRATCH), so the hook makes a member's
-# folder and the read-only classifier counts a redirect there as no write (app_scratch_allows).
+# ChatGPT app's work/ and outputs/ (a member lane's work/scratchpad/<member>-<step>/ and <member>/), or the CLI's
+# TMP/codex/<session>/scratchpad/<the same folders, or main>/, by the rule progress.session_scratchpad and
+# progress.lane_scratch own.
+# codex_scratch_context keeps them for one hook event (APP_SCRATCH), so the hook makes a member lane's own folder and
+# the read-only classifier counts a redirect there as no write (app_scratch_allows).
 APP_SCRATCH = contextvars.ContextVar("devkit_codex_scratch", default=None)
 
 
@@ -537,8 +538,7 @@ def _codex_scratch_registration(agent, data):
         if isinstance(rec, dict) and rec.get("agent") == agent and rec.get("session") == sid:
             root = rec.get("cwd")
             if isinstance(root, str) and os.path.isabs(root) and root == os.path.normpath(root) == real(root):
-                app = is_under(root, core.HOME / "Documents" / "Codex") and \
-                    root != real(core.HOME / "Documents" / "Codex")
+                app = progress.codex_app_folder(root)
                 bound_checkout = data.get("cwd") != root
                 if bound_checkout and (not app or not _codex_registered_checkout(rec, data.get("cwd"))):
                     return None
@@ -552,7 +552,7 @@ def _codex_scratch_registration(agent, data):
                     if not pid or not top or real(main or top) != str(core.canonical_path(pid)) or \
                             not (top == str(core.canonical_path(pid)) or is_under(top, core.WT_ROOT)):
                         return None
-                aid, member = data.get("agent_id"), ""
+                aid, member, names = data.get("agent_id"), "", []
                 if bound_checkout and aid is not None and not isinstance(aid, str):
                     return None
                 if aid:
@@ -560,23 +560,26 @@ def _codex_scratch_registration(agent, data):
                     run, lane = progress.lane_of(agent, sid, aid) if isinstance(aid, str) else (None, None)
                     if lane:
                         member = hooks._member_folder(run, aid)
+                        names = progress.lane_scratch(run, aid)  # its lane's own folder first, then its member's
                     if (not app or bound_checkout) and \
                             (not run or run.get("agent") != agent or run.get("session") != sid):
                         return None
                     if bound_checkout and run.get("project") != rec.get("project"):
                         return None
-                    if not re.fullmatch(r"[A-Za-z0-9_-]+", member):
+                    if not names or not re.fullmatch(r"[A-Za-z0-9_-]+", member):
                         member = ""
                 if not aid or member:
+                    pad = progress.session_scratchpad(agent, sid, root=root)
+                    if not pad and (member or not app):  # the app's own work/ and outputs/ need no scratchpad
+                        return None
                     if app:
-                        folders = (str(Path(root) / "work" / "scratchpad" / member),) if member else \
+                        folders = tuple(str(Path(pad) / n) for n in names) if member else \
                             (str(Path(root) / "work"), str(Path(root) / "outputs"))
                     else:
                         root = str(core.TMP_ROOT / "codex")
-                        folder = str(Path(root) / sid / "scratchpad" / (member or "main"))
-                        if root != real(root) or folder != real(folder):
+                        folders = tuple(str(Path(pad) / n) for n in (names if member else ["main"]))
+                        if root != real(root) or any(folder != real(folder) for folder in folders):
                             return None
-                        folders = (folder,)
                     value = (root, folders, member)
     return value
 

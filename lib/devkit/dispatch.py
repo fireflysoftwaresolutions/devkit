@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
 import time
+import unicodedata
 
-from . import coord, core, progress
+from . import coord, core, messaging, progress
 from .progress import StepError, _find_step, _lane, _log_change, _new_step, load_run, normalize, current_session
 
 # files that say who should do the work (globs on the repo-relative path)
@@ -144,20 +146,132 @@ def _member_name(ref: str):
     return None
 
 
+SCOPE_HELP = ("--scope takes repository-relative paths or globs, such as lib/** or tests/test_x.py, separated by "
+              "commas")
+
+
+# Characters no path in the repository holds that a scope could hide: controls, format characters (U+202E turns
+# the text around where it is shown, U+200B shows nothing), surrogates, private-use characters, line and paragraph
+# separators, and every space but the plain one (U+0020): a no-break, thin or ideographic space shows as a plain one.
+# Code points with no character assigned (Cn) are not among them, and which those are depends on the Unicode version
+# of the Python that reads the scope: a format character a newer version added (U+0890, in Unicode 14) is Cn, and so
+# kept, on a Python whose Unicode is older.
+_INVISIBLE = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# Letters, symbols and marks that show as nothing or as a space: the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0),
+# the blank Braille pattern (U+2800), and the nonspacing marks that draw nothing: the combining grapheme joiner
+# (U+034F), the Khmer inherent vowels (U+17B4, U+17B5), the Mongolian free variation selectors (U+180B to U+180D,
+# U+180F) and the variation selectors (U+FE00 to U+FE0F, U+E0100 to U+E01EF). Their categories (Lo, So, Mn) hold real
+# path characters, such as the combining acute accent (U+0301) of a name macOS stores decomposed, so they are named
+# one by one, which also refuses them on a Python whose Unicode is older than one (U+180F came in Unicode 14).
+_BLANK = frozenset("\u115f\u1160\u3164\uffa0\u2800\u034f\u17b4\u17b5\u180b\u180c\u180d\u180f").union(
+    map(chr, range(0xFE00, 0xFE10)), map(chr, range(0xE0100, 0xE01F0)))
+
+
+def _lookalike(c: str) -> bool:
+    """A space separator (Zs) other than the plain space, or a blank letter, symbol or mark (_BLANK): it shows as a
+    plain space, or as nothing, while the path holds another character."""
+    return c in _BLANK or (c != " " and unicodedata.category(c) == "Zs")
+
+
+def _scope_entries(scope: str) -> list:
+    """The paths or globs of a step's --scope (delegate, dev progress assign), each one repository-relative or an
+    absolute path that _repository_globs turns into one. Raises StepError, quoting none of the text, for a scope that
+    holds a secret or an entry that cannot be a path in the repository: a URL or a remote (any ":"), a ".." segment,
+    or a control, invisible or look-alike character (_INVISIBLE, _lookalike). The step keeps its scope, so text that
+    is not a path would be saved in the run unchecked."""
+    if messaging.secret_shaped(scope):
+        raise StepError(f"{SCOPE_HELP}; this one holds a secret, so devkit saved nothing")
+    entries = [x.strip() for x in scope.split(",") if x.strip()]
+    for x in entries:
+        if ":" in x or ".." in x.split("/") or any(unicodedata.category(c) in _INVISIBLE or _lookalike(c)
+                                                   for c in x):
+            raise StepError(f"{SCOPE_HELP}; one entry is a URL, a remote, a path outside the repository or text "
+                            f"with a control, invisible or look-alike character, so devkit saved nothing")
+    return entries
+
+
+def _plans_folder(project: str) -> str:
+    """This project's plans folder in the handoff repository, the real path of plans/ joined with the project id;
+    '' for no project or an id with an empty, . or .. part."""
+    if not project or any(p in ("", ".", "..") for p in project.split("/")):
+        return ""
+    return os.path.join(core.real(core.HANDOFF / "plans"), project)
+
+
+def _outside_folders(project: str, member: str, session: tuple, step: str = "") -> list:
+    """The only folders outside the repository a step's scope may name: this project's plans folder (_plans_folder),
+    where the Software architect and the Technical writer write specs, and the scratch folders of the member the
+    step goes to in the session scratchpad (progress.session_scratchpad): the lane folder of step `step`,
+    scratchpad/<member id>-<step>/, and the member's plain scratchpad/<member id>/ (progress.scratch_names, the
+    folders its lane writes in). Each is the real path of its parent joined with its own name, unresolved: a link in
+    place of the folder leads out of it, so the real path of no entry is under it."""
+    out = [_plans_folder(project)]
+    names = progress.scratch_names(member, step)
+    pad = progress.session_scratchpad(*session) if names else ""
+    out += [os.path.join(core.real(pad), name) for name in names] if pad else []
+    return [f for f in out if f]
+
+
+def _in_outside_folder(glob: str, folders: list) -> str:
+    """The absolute or ~ glob in the form a step keeps when its fixed folder (the part before the first wildcard),
+    links and .. resolved, lies in one of `folders` (_outside_folders): that real folder with the rest of the glob,
+    the very path the rule judged. '' when it lies in none: a link out of the folder, a wildcard that reaches past
+    it (plans/acme/ap*/**), its parent."""
+    ga = os.path.expanduser(glob)
+    parts = ga.rstrip("/").split("/")
+    k = next((i for i, p in enumerate(parts) if re.search(r"[*?\[]", p)), len(parts))
+    fixed, rest = core.real("/".join(parts[:k]) or "/"), "/".join(parts[k:])
+    if not any(fixed == f or fixed.startswith(f + "/") for f in folders):
+        return ""
+    return "/".join(x for x in (fixed, rest) if x) + ("/" if ga.endswith("/") and not rest else "")
+
+
+def _repository_globs(entries: list, project: str, cwd: str | None, member: str = "",
+                      session: tuple = ("", ""), step: str = "") -> tuple:
+    """The globs a step keeps for the checked entries of its --scope (_scope_entries): an absolute or ~ path inside
+    one checkout of the run's repository in its repository-relative form (progress._scope_globs), and one in this
+    project's plans folder or in a scratch folder of `member` (the id of the member the step goes to) for step `step`
+    (its name) in the scratchpad of `session` ((agent, session id)) by its real path (_outside_folders) -> (globs,
+    rewrites). Raises StepError, quoting none of the text, for an entry that names any other files outside every
+    checkout of the repository; delegate and dev progress assign refuse a scope by this one rule."""
+    globs, rewrites = progress._scope_globs(entries, project, cwd)
+    if not any(g.startswith(("/", "~")) for g in globs):
+        return globs, rewrites
+    folders, kept = _outside_folders(project, member, session, step), []
+    for g in globs:
+        if g.startswith(("/", "~")):
+            g = _in_outside_folder(g, folders)
+            if not g:
+                plans = _plans_folder(project)
+                where = f"{core.tilde(plans)}/ (this project's plans)" if plans else "this project's plans folder"
+                raise StepError(f"{SCOPE_HELP}; one entry names files outside the repository, where a scope may name "
+                                f"only {where} or a scratch folder of the member the step goes to "
+                                f"(scratchpad/<member id>-<step>/ or scratchpad/<member id>/ in the session "
+                                f"scratchpad), so devkit saved nothing")
+        kept.append(g)
+    return list(dict.fromkeys(kept)), rewrites
+
+
 def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: str = "", est: str = "",
              from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
-    """Add a step for another crew member. -> {"step", "member", "routed", "lane"} (lane: the working lane it
-    joined, or None when Morpheus has to launch the member)."""
+    """Add a step for another crew member, and tell the lane that takes it, or the tech lead, in the same save: a
+    notice that cannot be sent (progress._ask_in) refuses the whole command, nothing saved. Its scope is
+    repository-relative paths or globs (_scope_entries), or paths in this project's plans folder or the member's own
+    scratch folders for the step (_repository_globs). -> {"step", "member", "routed", "lane"} (lane: the
+    working lane it joined, or None when Morpheus has to launch the member)."""
     now = now or time.time()
+    if not (task or "").strip():
+        raise StepError("say what to do: dev crew delegate \"<task>\" --to <member>")
+    messaging.validate_body(task)  # the whole task the step keeps, whoever is told: its notice quotes only part
+    entries = _scope_entries(scope or "")
     from_agent = progress._as_lane(from_agent, cwd)  # a member's call names the member, whatever the variables say
     agent, sid = current_session(cwd)
-    with progress._tx(agent, sid):
+    call, notice = progress._request_call(cwd), None
+    with progress._audits_held(), progress._tx(agent, sid):  # a refused notice leaves no record of the claim
         run = load_run(agent, sid)
         if not run:
             raise StepError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        if not (task or "").strip():
-            raise StepError("say what to do: dev crew delegate \"<task>\" --to <member>")
         routed = None
         if not to or to.lower() == "auto":
             ranked = route(task, files)
@@ -170,13 +284,14 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
                 raise StepError(f"no crew member “{to}”: dev crew lists them")
         name = re.sub(r"\s+", " ", task.strip())[:60]
         base, i = name, 2
-        while any(s["name"].lower() == name.lower() for s in run["plan"]):
+        while any(s["name"].lower() == name.lower() for s in run["plan"]) or progress.folder_twin(run["plan"], name):
             name, i = f"{base} ({i})", i + 1
         s = _new_step(name, progress.parse_minutes(est) or None)
         s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500], added=round(now, 1))
-        if scope:  # repository-relative, as dev progress assign keeps it: the form the edit advice matches
-            globs, rewrites = progress._scope_globs([x.strip() for x in scope.split(",") if x.strip()],
-                                                    run.get("project") or "", cwd)
+        if entries:  # as dev progress assign keeps it: repository-relative, the form the edit advice matches, or the
+            # real path in this project's plans folder or the member's own scratch folders for this step
+            globs, rewrites = _repository_globs(entries, run.get("project") or "", cwd, member=m["id"],
+                                                session=(agent, sid), step=name)
             s["scope"] = globs
             progress._tell_rewrites(run, name, rewrites, now)
         if after:
@@ -206,35 +321,43 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
                     run["agents"][lane_id]["scope"] = held
             else:
                 before = progress._closes_before(run, lane_id, s)
+        from . import crew
+        text = f"{crew.who(by)} delegates “{task.strip()[:200]}” to {crew.who(m)} (step “{name}”)"
+        recipient = ""
+        if lane_id and s.get("owner") == lane_id:
+            recipient = lane_id
+            text += (f". It is in your lane now: record it with dev progress step \"…\" --step \"{name}\" --check "
+                     f"\"…\", or your report's ✓ does not close it; if you cannot take it: dev crew decline "
+                     f"\"{name}\" --why \"…\"")
+        elif before:
+            recipient = lane_id
+            text += (f". It joins your lane once {progress._quoted_and(before)} close{'s' if len(before) == 1 else ''} "
+                     f"(dev progress step \"…\" --step \"{before[0]}\" --check \"…\"), and its files become your "
+                     f"scope then; if you cannot take it: dev crew decline \"{name}\" --why \"…\"")
+        elif from_agent:
+            recipient = "main"
+            text += f". Launch {crew.who(m)} when it is ready: dev crew next"
+        if recipient:  # saved with the step, or neither: a notice that cannot be sent refuses the delegation
+            key = progress._message_request_key("", cwd, ("crew ask", "notice", recipient, False, text), call)
+            sent, new = progress._ask_in(run, text, recipient, from_agent or "main", now, "notice", key)
+            notice = sent if new else None
         progress._save(run, touch_session=False)
     progress._audit("crew.delegate", f"{by} → {m['name']}", task.strip()[:300], project=run.get("project") or "",
                     step=name, routed="yes" if routed else "no")
-    from . import crew
-    text = f"{crew.who(by)} delegates “{task.strip()[:200]}” to {crew.who(m)} (step “{name}”)"
-    if lane_id and s.get("owner") == lane_id:
-        progress.crew_ask(text + f". It is in your lane now: record it with dev progress step \"…\" --step \"{name}\" "
-                          f"--check \"…\", or your report's ✓ does not close it; if you cannot take it: dev crew "
-                          f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now,
-                          kind="notice")
-    elif before:
-        progress.crew_ask(text + f". It joins your lane once {progress._quoted_and(before)} "
-                          f"close{'s' if len(before) == 1 else ''} (dev progress step \"…\" --step \"{before[0]}\" "
-                          f"--check \"…\"), and its files become your scope then; if you cannot take it: dev crew "
-                          f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now,
-                          kind="notice")
-    elif from_agent:
-        progress.crew_ask(text + f". Launch {crew.who(m)} when it is ready: dev crew next", to="main",
-                          from_agent=from_agent, cwd=cwd, now=now, kind="notice")
+    if notice:
+        progress._asked(agent, sid, run, notice, "notice")
     return {"step": s, "member": m, "routed": routed, "lane": lane_id if s.get("owner") == lane_id else None}
 
 
 def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None):
-    """A member hands a delegated step back: unassigned, pending, and Morpheus is told why."""
+    """A member hands a delegated step back: unassigned, pending, and Morpheus is told why in the same save: a notice
+    that cannot be sent (progress._ask_in) refuses the decline, and the step stays the member's."""
     now = now or time.time()
     if not (why or "").strip():
         raise StepError("say why: --why \"…\"")
     from_agent = progress._as_lane(from_agent, cwd)  # a lane variable counts only for a member whose call is open
     agent, sid = current_session(cwd)
+    call = progress._request_call(cwd)
     with progress._tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         s = _find_step(run, which)
@@ -244,13 +367,17 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
             raise StepError(f"step “{s['name']}” is not yours")
         old = s.get("state")
         who = s.get("label") or "the member"
+        from . import crew
+        text = f"{crew.who(who)} declined “{s['name']}”: {why}. Route it again: dev crew route \"{s['name']}\""
+        sent, new = progress._ask_in(run, text, "main", from_agent or "main", now, "notice",
+                                     progress._message_request_key("", cwd, ("crew ask", "notice", "main", False, text),
+                                                                   call))
         s.update(state="pending", owner="main", label="", started=None)
         _log_change(run, s, old, "pending", from_agent or "main", f"declined by {who}: {why}", now)
-        progress._audit("crew.decline", who, why[:300], project=run.get("project") or "", step=s["name"])
         progress._save(run, touch_session=False)
-    from . import crew
-    progress.crew_ask(f"{crew.who(who)} declined “{s['name']}”: {why}. Route it again: dev crew route \"{s['name']}\"",
-                      to="main", from_agent=from_agent, cwd=cwd, now=now, kind="notice")
+    progress._audit("crew.decline", who, why[:300], project=run.get("project") or "", step=s["name"])
+    if new:
+        progress._asked(agent, sid, run, sent, "notice")
     return s
 
 
@@ -352,6 +479,68 @@ def ready(run, now: float | None = None) -> dict:
     return {"launch": launch, "queued": queued, "waiting": waiting, "busy": busy,
             "free": int(free) if float(free).is_integer() else round(free, 2), "limit": b["limit"], "slots": b,
             "why": reasons}
+
+
+def _responsible(s: dict):
+    """The crew member who takes step `s`: the member its label names, else the first member the crew's RACI makes
+    Responsible for the kind of work it declares (progress.declared_responsible, the rule the tech lead's own steps
+    follow); None when nothing says, or when the tech lead is Responsible: the step is his own."""
+    from . import approvals, crew
+    try:
+        if s.get("label"):
+            return crew._for_label(s["label"])
+        ids = progress.declared_responsible(s)
+        return crew.member(ids[0]) if ids and approvals.MAIN not in ids else None
+    except Exception:
+        return None  # a roster that cannot be read: no hint
+
+
+def parallel_hint(run, now: float | None = None) -> list:
+    """What `dev progress start` and `dev progress add` print when more than one step is ready for the crew and crew
+    slots are free: a line that says to launch them in parallel, in one message, then each ready step with the member
+    the RACI makes Responsible for it and the command that gives it to them (its `dev crew brief` line once it is
+    assigned). Only steps still waiting are listed: not one that runs, one for the tech lead (it declares no kind of
+    work, or one he is Responsible for, as _responsible reads it), one whose dependencies are open, nor one whose
+    member already works (it joins that lane). [] when fewer than two steps are ready or no slot is free, and when
+    anything fails: both commands print it after the run is saved, so a failure prints nothing and fails neither."""
+    try:
+        return _parallel_hint(run, now)
+    except Exception:
+        return []
+
+
+def _parallel_hint(run, now: float | None = None) -> list:
+    import shlex
+    from . import approvals, crew
+    run = normalize(run)
+    sess = core.read_json(progress.session_path(run.get("agent") or "", run.get("session") or ""), {}) or {}
+    b = progress.slot_budget(run.get("agent") or "claude", run, sess, now)
+    free = int(max(0.0, b["limit"] - b["reserve"] - b["used"]))
+    if free < 1:
+        return []
+    busy = progress.working_agents(run, now)
+    rows = []
+    for s in run.get("plan") or []:
+        if s.get("state") != "pending" or (s.get("owner") or "main") != "main" or progress.deps_open(run, s):
+            continue
+        mem = _responsible(s)
+        if not mem or mem["id"] == approvals.MAIN or any(progress._label_matches(mem["name"], v) for _, v in busy):
+            continue
+        rows.append((s, mem))
+    if len(rows) < 2:
+        return []
+    some = "" if free >= len(rows) else f" (the first {free}; the rest wait for a slot)"
+    lines = [f"  {len(rows)} steps are ready and {free} crew slot{'s are' if free != 1 else ' is'} free: launch them in "
+             f"parallel, in one message{some}"]
+    for s, mem in rows:
+        cmd = launch_line(s) if s.get("label") else \
+            f"dev progress assign {shlex.quote(s['name'])} --to {mem['id']}" + \
+            (f" --activity {s['activity']}" if s.get("activity") else "")
+        lines.append(f"    {s['name']} · {crew.who(mem)} · {cmd}")
+    if any(not s.get("label") for s, _ in rows):
+        lines.append("  then brief each with dev crew brief <member> \"<task>\" --step <step> and launch them together "
+                     "(dev crew next lists them)")
+    return lines
 
 
 def order_why(which: str, why: str, from_agent: str | None = None, cwd: str | None = None,

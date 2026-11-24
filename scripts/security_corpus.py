@@ -76,13 +76,13 @@ def _directory(path, *, create=False):
                 child = os.open(name, flags, dir_fd=fd)
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise StateBusy("unsafe state path: symbolic link or non-directory") from None
+                    raise StateBusy("unsafe state path: symbolic link or non-directory", code=2) from None
                 raise
             os.close(fd)
             fd = child
             info = os.fstat(fd)
             if info.st_uid not in (0, os.getuid()) or (active and info.st_uid != os.getuid()):
-                raise StateBusy("unsafe state directory: owner mismatch")
+                raise StateBusy("unsafe state directory: owner mismatch", code=2)
             if create and active:
                 os.fchmod(fd, 0o700)
         yield fd
@@ -122,14 +122,14 @@ def _open_base(path, pins, create):
     fd = os.open(str(real), os.O_RDONLY | os.O_DIRECTORY)
     if os.fstat(fd).st_uid not in (0, os.getuid()):
         os.close(fd)
-        raise StateBusy("unsafe state directory: owner mismatch")
+        raise StateBusy("unsafe state directory: owner mismatch", code=2)
     return root, fd
 '''
 REVIEWED_STATE_WRITE = '''def _write(path: Path, doc: dict, indent, durable=False, max_bytes=None):
     text = json.dumps(doc, indent=indent, ensure_ascii=not durable,
                       separators=(",", ":") if durable and indent is None else None)
     if max_bytes is not None and len(text.encode("utf-8")) > max_bytes:
-        raise StateBusy("capacity: record exceeds the storage limit")
+        raise StateBusy("capacity: record exceeds the storage limit", code=2)
     if durable or "messaging-v2" in path.parts:
         with _directory(path.parent, create=True) as directory:
             _record_info(directory, path.name)
@@ -229,13 +229,14 @@ REVIEWED_DISPOSITIONS = (
      "expressions": (r'''folder''', r'''profile'''),
      "reason": "the capture's private TMPDIR folder and the Playwright profile folder found in it by its fixed prefix"},
     {"rule": CHILD_PROCESS_RULE, "path": "lib/devkit/visual/capture.cjs",
-     "context": r'''      child = spawn(command, args, { cwd: req.cwd, env: process.env, stdio: ['ignore', 'pipe', 'ignore'] });
+     "context": r'''      child = spawn(command, args, { cwd: req.cwd, env: process.env, stdio: ['ignore', 'pipe', 'ignore'],
+        detached: true });
 ''',
      "required_contexts": (r'''  const [command, ...rest] = req.impeccable.command;
 ''',),
      "expressions": (r'''command''',),
      "reason": "an argument list with no shell; the command is devkit's own `dev impeccable` (store._impeccable, a "
-               "verified engine)"},
+               "verified engine), detached in a process group of its own so the capture's bound stops what it starts"},
     {"rule": PATH_JOIN_RULE, "path": "lib/devkit/visual/capture.cjs",
      "context": r'''  const final = path.join(folder, name);
 ''',
@@ -291,6 +292,12 @@ REVIEWED_DISPOSITIONS = (
 ''',
      "expressions": (r'''os.chmod(path, 0o700)''',),
      "reason": "owner-only 0700 on a folder this function just created; it adds no permission"},
+    {"rule": REVIEWED_RULE, "path": "lib/devkit/visual/capture.cjs",
+     "context": r'''  const named = new RegExp(`(?:^|[\\s=])${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/|\\s|$)`);
+''',
+     "expressions": (r'''new RegExp(`(?:^|[\\s=])${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/|\\s|$)`)''',),
+     "reason": "the capture's own temporary folder, every regex metacharacter escaped, between fixed anchors: the "
+               "pattern has no repetition an input could make backtrack"},
     {"rule": REVIEWED_RULE, "path": "lib/devkit/visual/crawl.cjs",
      "context": r'''      out += ch.replace(/[\\^$.|+()[\]{}]/g, '\\$&');
     }
@@ -662,32 +669,9 @@ def scan_errors(report: dict, replacements=None) -> list:
 
 
 def finding_disposition(finding: dict, qualified: Path):
-    """A reviewed rule/path alone grants nothing: context and exact span must match."""
-    start, end = finding.get("start", {}), finding.get("end", {})
-    for review in REVIEWED_DISPOSITIONS:
-        if finding.get("check_id") != review["rule"] or finding.get("path") != review["path"]:
-            continue
-        text = (qualified / review["path"]).read_text(encoding="utf-8")
-        context = review["context"]
-        required = review.get("required_contexts", ())
-        if text.count(context) != 1 or any(text.count(dependency) != 1 for dependency in required):
-            continue
-        for expression in review["expressions"]:
-            offset = text.index(context) + context.index(expression)
-            line = text[:offset].count("\n") + 1
-            col = offset - text.rfind("\n", 0, offset)
-            # a span can cross lines (a form, a call wrapped over two lines): its end is where the expression ends
-            stop = offset + len(expression)
-            end_line = text[:stop].count("\n") + 1
-            end_col = stop - text.rfind("\n", 0, stop)
-            if (start.get("line"), start.get("col"), end.get("line"), end.get("col")) == (
-                    line, col, end_line, end_col):
-                return {"check_id": review["rule"], "path": review["path"], "start": start, "end": end,
-                        "expression": expression, "reason": review["reason"],
-                        "context_sha256": hashlib.sha256(context.encode()).hexdigest(),
-                        "required_context_sha256": [hashlib.sha256(dependency.encode()).hexdigest()
-                                                    for dependency in required]}
-    return None
+    """A reviewed rule/path alone grants nothing: context and exact span must match (security.disposition, the rule
+    `dev sec scan` applies to the same dispositions)."""
+    return security.disposition(finding, qualified, REVIEWED_DISPOSITIONS)
 
 
 def reviewed_finding(finding: dict, qualified: Path) -> bool:

@@ -590,12 +590,28 @@ def fake_api(path):
     return None, "gh: Not Found (HTTP 404)"
 
 
+def history_api(runs: list, workflow="ci.yml"):
+    """fake_api plus the last successful runs of `workflow` in acme/app: each run a list of (job name, minutes,
+    conclusion), as GitHub's REST API lists them."""
+    def api(path):
+        if path == f"repos/acme/app/actions/workflows/{workflow}/runs?status=success&per_page=20":
+            return {"workflow_runs": [{"id": 100 + k} for k in range(len(runs))]}, None
+        m = re.fullmatch(r"repos/acme/app/actions/runs/(\d+)/jobs\?per_page=100", path)
+        if m:
+            return {"jobs": [{"name": name, "conclusion": end, "started_at": "2026-11-20T10:00:00Z",
+                              "completed_at": f"2026-11-20T{10 + mins // 60:02d}:{mins % 60:02d}:00Z"}
+                             for name, mins, end in runs[int(m.group(1)) - 100]]}, None
+        return fake_api(path)
+    return api
+
+
 class FixTests(unittest.TestCase):
     def test_fixes_keep_comments_reaudit_clean_and_are_idempotent(self):
         r = repo({".github/workflows/ci.yml": FIXABLE, "Makefile": "test:\n\tpytest\n"})
         rep = run_audit(r)
         self.assertTrue({"permissions-missing", "no-auto-cancel", "no-job-timeout", "action-not-pinned"} <= ids(rep))
-        res = P.apply_fixes(r, rep, api=fake_api)
+        api = history_api([[("test", 8, "success")]])
+        res = P.apply_fixes(r, rep, api=api, slug="acme/app")
         self.assertEqual(res["changed"], [".github/workflows/ci.yml"])
         text = (r / ".github/workflows/ci.yml").read_text()
         for comment in ("# The fixture's CI: comments must survive the fixes.", "# the jobs", "# the runner"):
@@ -608,16 +624,100 @@ class FixTests(unittest.TestCase):
         self.assertIn("permissions:\n  contents: read", text)
         self.assertLess(text.index("permissions:"), text.index("# the jobs"))  # above the jobs' comment
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", text)
-        self.assertIn("    runs-on: ubuntu-24.04  # the runner\n    timeout-minutes: 30\n", text)
+        self.assertIn("    runs-on: ubuntu-24.04  # the runner\n"
+                      "    timeout-minutes: 30 # longest recent green run: 8 min\n", text)  # 8 x 1.5 is under 30
         self.assertNotIn("timeout-minutes", text.split("  reuse:")[1])  # reusable workflow jobs cannot have one
         P.load_yaml(text)
         after = run_audit(r)
         self.assertFalse({"permissions-missing", "no-auto-cancel", "no-job-timeout"} & ids(after))
         branch_line = text.splitlines().index("      - uses: other/thing@main") + 1
         self.assertEqual([f["line"] for f in after["findings"] if f["id"] == "action-not-pinned"], [branch_line])
-        again = P.apply_fixes(r, after, api=fake_api)
+        again = P.apply_fixes(r, after, api=api, slug="acme/app")
         self.assertEqual(again["changed"], [])
         self.assertEqual((r / ".github/workflows/ci.yml").read_text(), text)
+
+    def test_a_timeout_from_history_is_one_and_a_half_times_the_longest_green_run(self):
+        cases = [([46 * 60, 20 * 60], 30, 70), ([10 * 60], 30, 30), ([40 * 60], 30, 60), ([41 * 60], 30, 65),
+                 ([5 * 60], 12, 12), ([], 30, None), ([0], 30, None)]
+        for durations, floor, want in cases:
+            with self.subTest(durations=durations, floor=floor):
+                self.assertEqual(P.timeout_from_history(durations, floor), want)
+
+    def test_the_timeout_fix_sizes_each_job_from_its_green_runs(self):
+        wf = ("on: push\npermissions:\n  contents: read\njobs:\n"
+              "  check:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make check\n"
+              "  matrix:\n    name: Test\n    strategy:\n      matrix:\n        os: [ubuntu-24.04, macos-15]\n"
+              "    runs-on: ${{ matrix.os }}\n    steps:\n      - run: make test\n"
+              "  fresh:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make new\n")
+        runs = [[("check", 46, "success"), ("Test (ubuntu-24.04)", 12, "success"), ("Test (macos-15)", 30, "success"),
+                 ("check-docs", 100, "success")],
+                [("check", 31, "success"), ("check", 200, "skipped"), ("Test (macos-15)", 25, "success")]]
+        r = repo({".github/workflows/ci.yml": wf})
+        res = P.apply_fixes(r, run_audit(r), api=history_api(runs), slug="acme/app")
+        tree = P.load_yaml((r / ".github/workflows/ci.yml").read_text())
+        self.assertEqual(tree["jobs"]["check"]["timeout-minutes"], 70)  # 46 min x 1.5, rounded up to 5
+        self.assertEqual(tree["jobs"]["matrix"]["timeout-minutes"], 45)  # its slowest leg took 30 min
+        self.assertNotIn("timeout-minutes", tree["jobs"]["fresh"])  # no green run: no number to base it on
+        self.assertTrue(any("`fresh`" in s and "no successful run" in s for s in res["skipped"]), res["skipped"])
+        self.assertIn("no-job-timeout", ids(run_audit(r)))  # the finding stays for the job left to the developer
+
+    def test_one_run_whose_jobs_cannot_be_read_leaves_every_timeout_to_the_developer(self):
+        # the history without that run could miss the slowest one, and a timeout sized on it would cancel a green run
+        good = history_api([[("test", 8, "success")], [("test", 50, "success")]])
+
+        def api(path):
+            if path == "repos/acme/app/actions/runs/101/jobs?per_page=100":
+                return None, "gh: Server Error (HTTP 502)"
+            return good(path)
+        r = repo({".github/workflows/ci.yml": FIXABLE})
+        res = P.apply_fixes(r, run_audit(r), api=api, slug="acme/app")
+        self.assertNotIn("timeout-minutes", (r / ".github/workflows/ci.yml").read_text())
+        self.assertTrue(any("`test`" in s and "the jobs of run 101 could not be read" in s for s in res["skipped"]),
+                        res["skipped"])
+
+    def test_a_run_id_that_is_not_a_number_never_reaches_the_api_path(self):
+        for bad in ("../../../user/keys", None, True, 0, -1):
+            with self.subTest(id=bad):
+                asked, good = [], history_api([[("test", 8, "success")]])
+
+                def api(path):
+                    asked.append(path)
+                    if path.endswith("/runs?status=success&per_page=20"):
+                        return {"workflow_runs": [{"id": 100}, {"id": bad}]}, None
+                    return good(path)
+                r = repo({".github/workflows/ci.yml": FIXABLE})
+                res = P.apply_fixes(r, run_audit(r), api=api, slug="acme/app")
+                self.assertEqual([p for p in asked if f"/runs/{bad}/" in p], [])
+                self.assertNotIn("timeout-minutes", (r / ".github/workflows/ci.yml").read_text())  # history unknown
+                self.assertTrue(any("`test`" in s and "id is not a number" in s for s in res["skipped"]),
+                                res["skipped"])
+
+    def test_a_workflow_file_name_goes_quoted_into_the_api_path(self):
+        # unquoted, the `#` ends the path and the space splits it: GitHub would answer for another resource
+        r = repo({".github/workflows/ci #1.yml": FIXABLE})
+        res = P.apply_fixes(r, run_audit(r), api=history_api([[("test", 8, "success")]], workflow="ci%20%231.yml"),
+                            slug="acme/app")
+        self.assertIn("timeout-minutes: 30 # longest recent green run: 8 min",
+                      (r / ".github/workflows/ci #1.yml").read_text(), res["skipped"])
+
+    def test_a_job_named_only_by_an_expression_gets_its_own_reason(self):
+        wf = ("on: push\npermissions:\n  contents: read\njobs:\n"
+              "  build:\n    name: ${{ github.workflow }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make\n")
+        r = repo({".github/workflows/ci.yml": wf})
+        res = P.apply_fixes(r, run_audit(r), api=history_api([[("ci", 8, "success")]]), slug="acme/app")
+        self.assertNotIn("timeout-minutes", (r / ".github/workflows/ci.yml").read_text())
+        why = [s for s in res["skipped"] if "`build`" in s]
+        self.assertEqual(len(why), 1, res["skipped"])
+        self.assertIn("its `name:` is only an expression", why[0])
+        self.assertNotIn("no successful run", why[0])  # it has green runs; devkit cannot tell which are its own
+
+    def test_without_run_history_the_timeout_is_left_to_the_developer(self):
+        r = repo({".github/workflows/ci.yml": FIXABLE})
+        res = P.apply_fixes(r, run_audit(r), api=fake_api)  # no GitHub remote: no history to read
+        text = (r / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("timeout-minutes", text)
+        self.assertIn("permissions:", text)  # the other fixes still apply
+        self.assertTrue(any("`test`" in s and "1.5 times its longest" in s for s in res["skipped"]), res["skipped"])
 
     def test_offline_pins_are_skipped_and_the_rest_applied(self):
         r = repo({".github/workflows/ci.yml": FIXABLE})
@@ -630,9 +730,10 @@ class FixTests(unittest.TestCase):
     def test_policy_timeout_and_only_pull_request_workflows(self):
         wf = "on: pull_request\njobs:\n  t:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make test\n"
         r = repo({".github/workflows/ci.yml": wf})
-        P.apply_fixes(r, run_audit(r), policy={"job_timeout_minutes": 12}, api=fake_api)
+        P.apply_fixes(r, run_audit(r), policy={"job_timeout_minutes": 12}, api=history_api([[("t", 5, "success")]]),
+                      slug="acme/app")
         text = (r / ".github/workflows/ci.yml").read_text()
-        self.assertIn("timeout-minutes: 12", text)
+        self.assertIn("timeout-minutes: 12 #", text)  # the policy's timeout is the least it writes
         self.assertIn("cancel-in-progress: true", text)  # nothing else triggers it
 
     def test_resolve_pin_problems(self):
@@ -728,9 +829,42 @@ class InitTests(unittest.TestCase):
     def test_tag_triggers_follow_the_policy(self):
         r = repo(STACKS["go"])
         gh, _ = P.generate(r, "github", policy={"tag_format": "YY.MM.PATCH"})
-        self.assertIn('tags: ["[0-9]+.[0-9]+.[0-9]+"]', gh[".github/workflows/release.yml"])
+        self.assertIn('    tags:\n      - "[0-9]+.[0-9]+.[0-9]+"\n', gh[".github/workflows/release.yml"])
         gl, _ = P.generate(r, "gitlab", policy={"tag_format": "vMAJOR.MINOR.PATCH"})
-        self.assertIn("$CI_COMMIT_TAG =~ /^v\\d+\\.\\d+\\.\\d+$/", gl[".gitlab-ci.yml"])
+        self.assertIn("$CI_COMMIT_TAG =~ /^v\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/", gl[".gitlab-ci.yml"])
+
+    # the release workflow ran on X.Y.Z tags only, so a PEP 440 release such as v0.1.0a17 or a SemVer pre-release such
+    # as v1.2.3-rc.1, which the policy takes, started no release
+    def test_the_release_triggers_take_every_tag_of_the_scheme_and_no_other(self):
+        from devkit import delivery
+        r = repo(STACKS["go"])
+        cases = (("vYY.MM.PATCH", ["v26.11.0", "v26.11.12"],
+                  ["26.11.0", "v26.11.0-rc.1", "v26.11.0a1", "v26.11", "v26.11.0junk", "v26.11.0.1"]),
+                 ("MAJOR.MINOR.PATCH", ["1.2.3", "1.2.3-rc.1", "1.2.3-alpha", "10.0.0-beta.2"],
+                  ["v1.2.3", "1.2.3junk", "1.2.3.4", "1.2.3-", "1.2.3a1", "1.2.3-rc.1+b5", "1.2.3-rc_1",
+                   "1.2.3-a!b"]),
+                 ("vMAJOR.MINOR.PATCH", ["v1.2.3", "v1.2.3-rc.1"],
+                  ["1.2.3", "v1.2.3junk", "v1.2.3-", "v1.2.3-rc.1+b5", "v1.2.3-rc_1"]),
+                 ("v" + delivery.PEP440_FORMAT,
+                  ["v0.1.0", "v0.1.0a17", "v0.1.0b2", "v0.1.0rc1", "v1.0.0.post1", "v2.0.0.dev3", "v1.0.0a1.post2.dev3",
+                   "v1.0.0rc1.dev1", "v1.0.0.post1.dev2"],
+                  ["0.1.0a17", "v1.2.3junk", "v0.1.0a", "v0.1.0-rc.1", "v0.1.0alpha1", "v1.0.0.post",
+                   "v1.0.0.dev1.post1", "v0.1.0a17junk"]))
+        for fmt, run, skip in cases:
+            policy = {"tag_format": fmt}
+            gh, _ = P.generate(r, "github", policy=policy)
+            gl, _ = P.generate(r, "gitlab", policy=policy)
+            globs = P.load_yaml(gh[".github/workflows/release.yml"])["on"]["push"]["tags"]
+            rx = re.search(r"\$CI_COMMIT_TAG =~ /(.+)/", gl[".gitlab-ci.yml"]).group(1)
+            for tag in run + skip:
+                with self.subTest(fmt=fmt, tag=tag):
+                    self.assertEqual(any(P.gh_glob(g, tag) for g in globs), tag in run, globs)
+                    self.assertEqual(bool(re.search(rx, tag)), tag in run, rx)
+            for provider, gen in (("github", gh), ("gitlab", gl)):
+                with self.subTest(fmt=fmt, provider=provider):
+                    rep = P.audit(r, provider=provider, policy=policy, only=set(gen), overlay=gen, external=False)
+                    self.assertEqual(loud(rep), [])
+                    self.assertNotIn("tag-format-mismatch", ids(rep))
 
     def test_cmd_init_writes_refuses_and_dry_runs(self):
         r = repo(STACKS["python"])
@@ -876,11 +1010,52 @@ class DraftGateTests(unittest.TestCase):
         text = (r / ".github/workflows/ci.yml").read_text()
         self.assertIn("types: [opened, synchronize, reopened, ready_for_review]", text)
         self.assertNotIn("draft == false", text)  # the jobs keep the gate they have
-        listed = DRAFTY.replace("  pull_request: # every PR event\n",
-                                "  pull_request:\n    types:\n      - opened\n      - synchronize\n")
+        listed = gated.replace("  pull_request: # every PR event\n",
+                               "  pull_request:\n    types:\n      - opened\n      - synchronize\n")
         new, applied, _ = P.draft_gate(listed, jobs=False)
         self.assertIn("      - synchronize\n      - ready_for_review\n", new)
         self.assertEqual(applied, ["`ready_for_review` in on.pull_request.types"])
+
+    def test_jobs_that_skip_every_pull_request_are_not_draft_gates(self):
+        main_only = DRAFTY + ("  publish:\n    if: github.event_name != 'pull_request'\n    runs-on: ubuntu-24.04\n"
+                              "    steps:\n      - run: make publish\n"
+                              "  deploy:\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n"
+                              "    runs-on: ubuntu-24.04\n    steps:\n      - run: make deploy\n")
+        r = repo({".github/workflows/ci.yml": main_only})
+        rep = run_audit(r)
+        hit = [f for f in rep["findings"] if f["id"] in ("full-ci-on-draft", "draft-gate-no-ready")]
+        self.assertEqual([f["id"] for f in hit], ["full-ci-on-draft"])  # lint, test and notify run on drafts
+        self.assertIn("3 job(s)", hit[0]["message"])  # publish and deploy never run on a pull request
+        P.apply_fixes(r, rep, api=fake_api)
+        tree = P.load_yaml((r / ".github/workflows/ci.yml").read_text())
+        self.assertEqual(tree["jobs"]["publish"]["if"], "github.event_name != 'pull_request'")  # left as it was
+        self.assertEqual(P.job_results(tree, READY), {"lint": True, "test": True, "notify": True, "publish": False,
+                                                      "deploy": False})
+        self.assertEqual(set(P.job_results(tree, P._DRAFT_CTX).values()), {False})
+
+    def test_the_ready_trigger_is_added_only_when_it_starts_what_drafts_skipped(self):
+        pr_less = ("on:\n  pull_request:\n  push:\n    branches: [main]\njobs:\n"
+                   "  build:\n    if: github.event_name != 'pull_request'\n    runs-on: ubuntu-24.04\n"
+                   "    steps:\n      - run: make\n")
+        r = repo({".github/workflows/ci.yml": pr_less})
+        self.assertFalse({"full-ci-on-draft", "draft-gate-no-ready"} & ids(run_audit(r)))
+        for text, jobs in ((pr_less, True), (pr_less, False), (DRAFTY, False)):
+            with self.subTest(jobs=jobs, text=text[:40]):
+                new, applied, skipped = P.draft_gate(text, jobs=jobs)
+                self.assertNotIn("ready_for_review", new)  # it would start nothing, or re-run what drafts ran
+                self.assertEqual((applied, skipped), ([], []))
+
+    def test_a_gate_left_to_the_developer_names_the_ready_trigger_unless_the_fix_adds_it(self):
+        folded = ("on:\n  pull_request:\njobs:\n  test:\n    if: >-\n      github.actor != 'bot'\n"
+                  "    runs-on: ubuntu-24.04\n    steps:\n      - run: make test\n")
+        new, applied, skipped = P.draft_gate(folded)  # its folded `if:` is left to the developer, so is the type
+        self.assertEqual((new, applied), (folded, []))
+        self.assertEqual(skipped, [f"job `test`: add `&& {P.DRAFT_GATE}` to its `if:` and `ready_for_review` to "
+                                   "`on.pull_request.types` by hand"])
+        with_lint = folded + "  lint:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: make lint\n"
+        new, applied, skipped = P.draft_gate(with_lint)  # lint gets the gate, and the type comes with it
+        self.assertIn("`ready_for_review` in on.pull_request.types", applied)
+        self.assertEqual(skipped, [f"job `test`: add `&& {P.DRAFT_GATE}` to its `if:` by hand"])
 
     def test_init_writes_the_gate_and_devkit_own_ci_has_it(self):
         gen, _ = P.generate(repo(PY_PROJECT), "github")

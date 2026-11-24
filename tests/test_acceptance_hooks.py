@@ -256,6 +256,8 @@ class EveryRegisteredEvent(Sandbox):
             "post-tool": mk("PostToolUse", tool_response="ok\n" if agent == "codex" else
                             {"stdout": "ok\n", "stderr": "", "interrupted": False}, **bash),
             "post-tool-failure": mk("PostToolUseFailure", error="Exit code 1", **bash),
+            # Claude Code's auto mode refused a call (2.1.330: tool_name, tool_input, tool_use_id, reason)
+            "permission-denied": mk("PermissionDenied", reason="Permission denied", **bash),
             "subagent-start": mk("SubagentStart", **member),
             "subagent-stop": mk("SubagentStop", stop_hook_active=False, agent_transcript_path=str(self.rollout),
                                 last_assistant_message="**[Firefly> DevKit · Lookup scout (Sparks)]** api · x",
@@ -294,7 +296,7 @@ class EveryRegisteredEvent(Sandbox):
         outs = self.run_all("claude")
         self.assertIn("route each to its Responsible member", outs["prompt"]["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(decision(outs["pre-tool"]), "allow")
-        self.assertEqual(len(config_events("claude")), 13)  # docs/agents.md: Claude Code registers 13 events
+        self.assertEqual(len(config_events("claude")), 14)  # docs/agents.md: Claude Code registers 14 events
         self.assertIn("devkit · workspace context", outs["session-start"]["hookSpecificOutput"]["additionalContext"])
         self.assertNotIn("decision", outs["stop"])
         self.assertEqual([r["evidence"]["rule"] for r in self.audit("canary.remind")], ["status"])

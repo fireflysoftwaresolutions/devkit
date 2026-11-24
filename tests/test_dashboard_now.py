@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+import dashfixture as fx  # noqa: E402  (the Now fixture's facts the goldens do not carry)
 import now_contract  # noqa: E402  (the contract check the server's tests share)
 import test_dashboard as T  # noqa: E402  (the browser harness, the fixture and the stand-in server)
 from devkit import dashboard, dashserver, progress as pg  # noqa: E402
@@ -56,6 +57,9 @@ def with_doc(data: dict, name: str) -> dict:
     d, now = json.loads(json.dumps(data)), doc(name)
     d["since"] = dict(d.get("since") or {}, **now.pop("since"))
     d.update(now, generated=CLOCK)
+    if any(r.get("id") == "claude-7f3a" for r in d.get("runs") or []):
+        # a run file has no branch: the page takes its session's, which this Mac's registry knows
+        next(x for x in d["people"] if x["host"] == d["host"])["sessions"] += fx.this_macs_sessions()
     return d
 
 
@@ -239,13 +243,13 @@ class NowScreenTests(unittest.TestCase):
         self.assertEqual(out["rest"], "+89 done")
 
     def test_runs_name_where_they_run_and_open_todays_run_drawer(self):
-        def here(d):   # a run file has no branch: this Mac's presence names the session's (the golden's run carries none)
+        def gone(d):   # a run file has no branch: the page takes the session's, which this Mac no longer knows here
             me = next(x for x in d["people"] if x["host"] == d["host"])
-            me["sessions"].append({"agent": "claude", "session": "7f3a", "branch": "feat/invoice-export", "project": "acme/lending-core"})
+            me["sessions"] = [s for s in me["sessions"] if s.get("session") != "7f3a"]
         steps = """out.blocks = $$(".now-run").map(text); out.team = text($(".now-team"));
             $(".now-run a").click(); await tick(200); out.open = $("#modal").open; out.title = text($("#modal-title")); out.hash = location.hash;"""
-        self.assertIn("Invoice export · lending-core guided · Claude Code", self.probe(steps)["blocks"][0])   # no session known: no branch
-        out = self.probe(steps, change=here)
+        self.assertIn("Invoice export · lending-core guided · Claude Code", self.probe(steps, change=gone)["blocks"][0])   # no session known: no branch
+        out = self.probe(steps)
         self.assertIn("Invoice export · lending-core", out["blocks"][0])
         self.assertIn("feat/invoice-export · guided · Claude Code", out["blocks"][0])
         self.assertIn("3 of 6 steps · paused on you 9 min", out["blocks"][0])
@@ -504,6 +508,320 @@ class NowSnapshotTests(unittest.TestCase):
         self.assertFalse(out["d1"])
         self.assertEqual((out["open"], out["title"], out["hash"]), (True, "Invoice export", "#/now?modal=run%3Aclaude-s1"))
         self.assertEqual(out["focus"], [True, "All3"])                   # the same control, though controls above it left
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowRemoteRunTests(unittest.TestCase):
+    """A run on another Mac reaches Now as the summary its presence publishes: the step counts, the steps running now
+    (its plan holds only those) and how many crew members work. Its block says how far it is from those counts."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def remote(self, change=None) -> dict:
+        d = with_doc(self.base, "example")
+        if change:
+            change(next(r for r in d["runs"] if r["machine"]))
+        self.assertEqual(now_contract.check(areas(d)), [])
+        with utc():
+            out = T.browse(frozen(dashboard.page(d)), """const r = $$(".now-run")[1]; out.row = text(r); out.status = text($(".now-status", r));
+                out.current = $(".now-current", r) ? text($(".now-current", r)) : null; out.label = $(".now-strip", r).getAttribute("aria-label");
+                out.glyphs = $$(".now-step", r).map(g => g.getAttribute("data-state")); out.rest = $(".now-rest", r) ? text($(".now-rest", r)) : null;""",
+                           1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        return out
+
+    def test_the_block_counts_the_steps_and_names_the_current_ones_and_the_crew(self):
+        out = self.remote()
+        self.assertEqual(out["status"], "2 of 4 steps · 48 min of about 1 h 30 · 2 crew members working")
+        self.assertEqual(out["current"], "Current steps: rate tables, parity tests")
+        self.assertEqual(out["glyphs"], ["done", "done", "running", "running"])   # its done steps, then the ones running now
+        self.assertEqual(out["label"], "2 of 4 steps done. Lands 15:55–16:10")
+
+    def test_a_long_run_counts_its_done_steps_and_more_current_steps(self):
+        out = self.remote(lambda r: r.update(steps_done=40, steps_total=60, steps_skipped=2, current_more=2, crew=1,
+                                             current=["rate tables", "parity tests", "fees"],
+                                             plan=r["plan"] + [dict(r["plan"][0], name="fees", state="blocked")]))
+        self.assertTrue(out["status"].startswith("40 of 60 steps · "), out["status"])
+        self.assertTrue(out["status"].endswith(" · 1 crew member working"), out["status"])
+        self.assertEqual(out["current"], "Current steps: rate tables, parity tests, fees and 2 more")
+        self.assertEqual((out["glyphs"][0], out["rest"]), ("done", "+39 done"))
+        self.assertEqual(out["glyphs"][1:4], ["running", "running", "blocked"])
+
+    def test_an_unknown_count_shows_a_dash_and_no_crew_says_nothing(self):
+        out = self.remote(lambda r: r.update(steps_done=None, crew=0, current=[], plan=[]))
+        self.assertTrue(out["status"].startswith("— of 4 steps · "), out["status"])
+        self.assertNotIn("crew", out["status"])
+        self.assertIsNone(out["current"])
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowHighlightTests(unittest.TestCase):
+    """The first row of Needs you carries the screen's only amber bar (UX spec, Now): with two decisions waiting, the
+    second keeps its waiting glyph and word but no bar."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_only_the_first_of_two_waiting_decisions_has_the_amber_bar(self):
+        d = with_doc(self.base, "example")
+        items = d["attention"]["items"]
+        second = dict(json.loads(json.dumps(items[0])), id="decision:claude-7f3a:D3", title="D3@7f3a · Ship the CSV with a header row?",
+                      type_to_answer=["dev crew decide D3@7f3a A", "dev crew decide D3@7f3a B"])
+        items.insert(1, second)
+        d["attention"]["total"] = len(items)
+        d["attention"]["headline"].update(count=3, text="3 things need you")
+        self.assertEqual(now_contract.check(areas(d)), [])
+        with utc():
+            out = T.browse(frozen(dashboard.page(d)), """out.rows = $$(".now-item").map(r => [r.getAttribute("data-key"), r.classList.contains("you"),
+                getComputedStyle(r, "::before").content !== "none" && getComputedStyle(r, "::before").width !== "auto",
+                $(".now-glyph", r) ? $(".now-glyph", r).getAttribute("aria-label") : null]);""", 1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual([r[:3] for r in out["rows"][:3]], [["decision:claude-7f3a:D1", True, True], ["decision:claude-7f3a:D3", True, False],
+                                                           [out["rows"][2][0], False, False]])
+        self.assertEqual([r[3] for r in out["rows"][:2]], ["Waits for you", "Waits for you"])   # the word stays on both
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowOneBarTests(unittest.TestCase):
+    """The amber bar is the screen's, not a list's: an escalation between sessions, drawn above Needs you, is the first
+    thing that waits for the developer, so it alone has the bar; the decision that heads Needs you keeps its glyph and
+    word."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_an_escalation_above_needs_you_takes_the_only_amber_bar(self):
+        d = with_doc(self.base, "example")
+        d["peers"] = {"groups": [], "claims": [], "overlaps": [], "live": 0, "idle": 0, "escalations": [
+            {"id": "E-7k2m", "question": "Which session ships the release?", "since": CLOCK - 600, "recommend": "A",
+             "from": {"agent_name": "Claude Code", "prefix": "@4d1cffc7", "project": "acme/api", "branch": "main"}, "parties": [],
+             "options": ["A: This session", "B: The other one"], "type": "settle E-7k2m: A"}]}
+        with utc():
+            out = T.browse(frozen(dashboard.page(d)), """out.rows = $$(".now-item").map(r => [r.getAttribute("data-key"),
+                getComputedStyle(r, "::before").content !== "none" && getComputedStyle(r, "::before").width !== "auto",
+                $(".now-glyph", r) ? $(".now-glyph", r).getAttribute("aria-label") : null]);""", 1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual(out["rows"][:2], [["escalation:E-7k2m", True, "Waits for you"], ["decision:claude-7f3a:D1", False, "Waits for you"]])
+        self.assertEqual([r[0] for r in out["rows"] if r[1]], ["escalation:E-7k2m"])
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowPolishTests(unittest.TestCase):
+    """The shared copy toast says what to do with a command, the first-run screen names each section once, a command pill
+    shows its whole command on a phone, and the live footer reads the 24-hour clock the rest of the page uses."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def probe(self, steps, name="example", width=1440, hash_="#/now"):
+        with utc():
+            out = T.browse(frozen(dashboard.page(with_doc(self.base, name))), steps, width, hash_)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        return out
+
+    def test_the_copy_toast_says_to_run_a_command_and_names_a_copied_path(self):
+        out = self.probe("""navigator.clipboard.writeText = t => Promise.resolve();
+            $('[data-key^="ci_failed:"] button').click(); await tick(100); out.cmd = text($("#toast"));
+            await go("#/explorer?f=projects/acme/old.md"); $$("main button").find(b => text(b) === "Copy path").click(); await tick(100);
+            out.path = text($("#toast"));""")
+        self.assertEqual(out["cmd"], "Copied. Run it in your terminal.")
+        self.assertEqual(out["path"], "Copied the path.")
+
+    def test_the_first_run_screen_labels_each_section_by_its_own_heading(self):
+        out = self.probe("""const ids = $$("main [id]").map(e => e.id); out.dup = ids.filter((x, i) => ids.indexOf(x) !== i);
+            out.labels = $$("main section[aria-labelledby]").map(s => text(document.getElementById(s.getAttribute("aria-labelledby"))));""", name="welcome")
+        self.assertEqual(out["dup"], [])
+        self.assertIn("Get started", out["labels"])
+        self.assertIn("Sessions on this Mac", out["labels"])
+
+    def test_a_command_pill_shows_its_whole_command_on_a_phone(self):
+        out = self.probe("""out.pills = $$(".now-item .now-cmd").map(b => { const c = $("code", b), r = b.getBoundingClientRect();
+            return [text(c), c.scrollWidth <= c.clientWidth + 1, r.right <= document.documentElement.clientWidth]; });""", width=390)
+        self.assertEqual(out["pills"], [["cd -- /Users/ana/Development/acme/lending-rules && dev run view 14 --failed", True, True],
+                                        ["gh pr view 45 -R acme/lending-core --comments", True, True]])
+
+    def test_the_live_footer_reads_the_24_hour_clock(self):
+        data = dict(with_doc(self.base, "example"), live=True, snapshot=1)
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", frozen(dashboard.page(data)).replace(
+                    "</body>", T.PROBE % 'await tick(1500); out.ticker = text($("#ticker"));' + "</body>").encode()
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", b"retry: 60000\n\n"
+            if path == "/api/v1/files":
+                return 200, "application/json", b'{"files": [], "meta": {}}'
+            if path == "/api/v1/health":
+                return 200, "application/json", json.dumps({"ok": True, "version": data["version"]}).encode()
+            return 404, "application/problem+json", b'{"title": "Not found"}'
+        with utc():
+            out = T.chrome(T.LivePageTests.serve(self, routes) + "/#/now", 1440, budget=8000)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertRegex(out["ticker"], r"^Data from ([01]\d|2[0-3]):[0-5]\d:[0-5]\d$")   # 24-hour, no AM or PM
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class TimeFormatTests(unittest.TestCase):
+    """A date with its time (fmt: the task drawer's Created line, a lock's end, a run's start and about twenty more) reads
+    the 24-hour clock the rest of the page uses, also in a browser whose language writes 12-hour times (US English)."""
+    US_ENGLISH = ('<script>(() => { const L = Date.prototype.toLocaleString; '
+                  'Date.prototype.toLocaleString = function (loc, o) { return L.call(this, loc || "en-US", o); }; })();</script>')
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_a_date_and_time_reads_the_24_hour_clock_in_a_us_english_browser(self):
+        page = dashboard.page(self.base).replace("<head>", "<head>" + self.US_ENGLISH, 1)
+        out = T.browse(page, """await go("#/tasks?task=T-a1"); out.created = text($$("#modal dt").find(dt => text(dt) === "Created").nextElementSibling);""",
+                       1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertRegex(out["created"], r"^[A-Z][a-z]{2} \d{1,2}, ([01]\d|2[0-3]):[0-5]\d by me@testmac$")   # no AM or PM
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class CopyToastPlaceholderTests(unittest.TestCase):
+    """The copy toast names three or more placeholders as a list, with "and" before the last one only, and a value the
+    command quotes as data (shlex.quote wraps it in single quotes) is never a placeholder, even a branch named feat/<x>."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def said(self, command):
+        d = with_doc(self.base, "example")
+        next(i for i in d["attention"]["items"] if i["kind"] == "ci_failed")["copy"] = command
+        with utc():
+            out = T.browse(frozen(dashboard.page(d)), """out.copied = []; navigator.clipboard.writeText = t => { out.copied.push(t); return Promise.resolve(); };
+                $('[data-key^="ci_failed:"] button').click(); await tick(100); out.said = text($("#toast"));""", 1440, "#/now")
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual(out["copied"], [command])
+        return out["said"]
+
+    def test_three_placeholders_read_as_a_list_with_and_before_the_last_one_only(self):
+        self.assertEqual(self.said("git remote add <name> <url> && git push -u <name> <branch>"),
+                         "Copied. Replace <name>, <url>, and <branch>, then run it.")
+        self.assertEqual(self.said("git remote add <name> <url>"), "Copied. Replace <name> and <url>, then run it.")
+
+    # an apostrophe in the data is quoted as '"'"' (shq, shlex.quote): the value stays one piece of data around it
+    def test_a_single_quoted_value_is_data_and_never_a_placeholder(self):
+        self.assertEqual(self.said("dev wt rm 'feat/<x>'"), "Copied. Run it in your terminal.")
+        self.assertEqual(self.said("""dev wt rm 'it'"'"'s <x>'"""), "Copied. Run it in your terminal.")
+        self.assertEqual(self.said("""dev task add 'parse <y> as it'"'"'s "…"' --why <why>"""), "Copied. Replace <why>, then run it.")
+
+    # quotes are read by kind, as the shell reads them: an apostrophe inside double quotes opens no value, so the
+    # <why> after it is still to be replaced; a double quote inside a single-quoted value is data, and so is a value
+    # around the '\'' that POSIX shells write for an apostrophe
+    def test_quotes_are_read_by_kind_so_an_apostrophe_in_double_quotes_hides_no_placeholder(self):
+        self.assertEqual(self.said("""dev task add "don't" --why <why> && echo 'x'"""), "Copied. Replace <why>, then run it.")
+        self.assertEqual(self.said("""dev wt rm 'say "<x>"' && git push <remote>"""), "Copied. Replace <remote>, then run it.")
+        self.assertEqual(self.said("""dev wt rm 'it'\\''s <x>'"""), "Copied. Run it in your terminal.")
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class DollarQuoteCopyToastTests(unittest.TestCase):
+    # bash and zsh read $'…' as one quoted value in which a backslash escapes the next character: $'it\'s <x>' is one
+    # value of data, so its <x> is no placeholder, and the quote after an escaped backslash ($'a\\') ends the value. Inside
+    # double quotes, $' is two letters
+    setUpClass = CopyToastPlaceholderTests.__dict__["setUpClass"]
+    tearDownClass = CopyToastPlaceholderTests.__dict__["tearDownClass"]
+    said = CopyToastPlaceholderTests.said
+
+    def test_a_dollar_quoted_value_is_one_value_in_which_a_backslash_escapes(self):
+        self.assertEqual(self.said("dev x $'it\\'s <x>'"), "Copied. Run it in your terminal.")
+        self.assertEqual(self.said("dev x $'a\\\\' <b>"), "Copied. Replace <b>, then run it.")
+        self.assertEqual(self.said('dev x "$\'<a>\'" <b>'), "Copied. Replace <a> and <b>, then run it.")
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class CopyToastTests(unittest.TestCase):
+    """The copy toast says what was copied when it is no command to run as it is: a path says it is a path, and a command
+    with a placeholder says what to put in its place first."""
+    CLIPBOARD = "out.copied = []; navigator.clipboard.writeText = t => { out.copied.push(t); return Promise.resolve(); };"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_a_task_path_and_the_commands_with_a_placeholder_say_what_was_copied(self):
+        d = json.loads(json.dumps(self.base))
+        next(p for p in d["projects"] if p["id"] == "acme/widget").update(
+            remote="", github=None, branches=[T.branch_row("main", "no_remote", "no remote is configured", default=True, current=True, where="local only", upstream=None)])
+        out = T.browse(dashboard.page(d), self.CLIPBOARD + """const said = async (hs, label) => { await go(hs);
+                $$("button").find(b => (b.getAttribute("aria-label") || "").startsWith(label)).click(); await tick(100); return text($("#toast")); };
+            out.path = await said("#/tasks?task=T-a1", "Copy path:");
+            out.remote = await said("#/projects/acme/widget?tab=branches", "Copy the command that adds a remote:");
+            out.clone = await said("#/initiatives/lending?tab=projects", "dev clone <owner/repo> (copy command)");
+            out.member = await said("#/initiatives/lending", "Copy command to add a member project:");
+            out.task = await said("#/initiatives/lending", "Copy command to add a task:");""", 1440, "#/now", now=T.NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual(out["copied"], [d["handoff"] + "/items/acme/widget/T-a1.md", "git remote add origin <url>", "dev clone <owner/repo>",
+                                         "dev initiative add lending <owner/repo>", 'dev task -i lending add "…" --now'])
+        self.assertEqual(out["path"], "Copied the path.")
+        self.assertEqual(out["remote"], "Copied. Replace <url> with the remote's address, then run it.")
+        self.assertEqual(out["clone"], "Copied. Replace <owner/repo> with the project, then run it.")
+        # any other command with a placeholder names what to replace, whichever button copied it
+        self.assertEqual(out["member"], "Copied. Replace <owner/repo>, then run it.")
+        self.assertEqual(out["task"], 'Copied. Replace "…", then run it.')
+
+    def test_a_jobs_log_path_says_it_is_a_path(self):
+        data = dict(self.base, live=True, snapshot=1)
+        job = dict(next(j for j in data["jobs"] if j["name"] == "doctor"), history=[], log=["2 checks failed"], log_path="/Users/t/Library/Logs/devkit/doctor.log")
+        probe = self.CLIPBOARD + """await tick(1500); $$("#modal button").find(b => (b.getAttribute("aria-label") || "").startsWith("Copy the log path:")).click();
+            await tick(100); out.said = text($("#toast"));"""
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", dashboard.page(data).replace("</body>", T.PROBE % probe + "</body>").encode()
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", b"retry: 60000\n\n"
+            return {"/api/v1/jobs/doctor": (200, "application/json", json.dumps(job).encode()),
+                    "/api/v1/jobs": (200, "application/json", b'{"jobs": []}'), "/api/v1/files": (200, "application/json", b'{"files": [], "meta": {}}'),
+                    "/api/v1/health": (200, "application/json", json.dumps({"ok": True, "version": data["version"]}).encode())}.get(
+                path, (404, "application/problem+json", b'{"title": "Not found"}'))
+        out = T.chrome(T.LivePageTests.serve(self, routes) + "/#/background?modal=job%3Adoctor", 1440, budget=8000)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertEqual((out["copied"], out["said"]), (["/Users/t/Library/Logs/devkit/doctor.log"], "Copied the path."))
 
 
 class NowJobRowTests(unittest.TestCase):

@@ -48,10 +48,12 @@ change: `dev branch new ci/<topic>`, `dev commit`, `dev ci --run`, `dev push`, `
 - **Secrets the hosts need for releases:** on Bitbucket, `BITBUCKET_ACCESS_TOKEN`; Bitbucket and Azure sign with cosign
   (`COSIGN_PRIVATE_KEY`, `COSIGN_PASSWORD`, `COSIGN_PUBLIC_KEY` in secured variables); GitLab signs keyless with its
   OIDC token.
-- `dev ci audit --strict` fails on medium findings too (default: high and critical). The delivery policy's
-  `job_timeout_minutes` (default 30) is the timeout that `--fix` writes and `init` generates, and the policy's test
-  gate is what a generated test job runs. `dev ci --run` gives each local step its workflow's limit: the step's own
-  `timeout-minutes`, else its job's, else 1.5 times its longest local pass when that is over 30 minutes, else 30.
+- `dev ci audit --strict` fails on medium findings too (default: high and critical). `--fix` writes a job's timeout
+  from its last 20 successful runs on GitHub (1.5 times the longest, rounded up to 5 minutes), never under the
+  delivery policy's `job_timeout_minutes` (default 30), which is also what `init` generates; without readable runs it
+  writes none and the finding stays for you. The policy's test gate is what a generated test job runs. `dev ci --run`
+  gives each local step its workflow's limit: the step's own `timeout-minutes`, else its job's, else 1.5 times its
+  longest local pass when that is over 30 minutes, else 30.
 - **A timeout or concurrency change needs no new local run.** When every file changed since the last local run is a
   GitHub workflow that differs only in `timeout-minutes`, `concurrency` (`group`, `cancel-in-progress`) or comments,
   with no YAML anchors, aliases, merge keys or tags, the evidence carries over once `actionlint` and `dev ci audit`

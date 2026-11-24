@@ -60,5 +60,36 @@ class CiCommandTests(unittest.TestCase):
         self.assertEqual(out["foot"], [[WIDGET, "Copy dev run view 18562211 --failed"]])
 
 
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class QuotedNeedsCommandTests(unittest.TestCase):
+    """The commands the page builds from a failed CI run's id and a failed job's name (the command palette, the list of
+    what needs you, the job drawer) quote them for the shell, as the Now queue's server does: a value with a space or a
+    `;` stays one argument and never runs a second command."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        d = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
+        d["ci"]["watches"][0]["failures"][0]["id"] = "14;touch pwn"
+        next(j for j in d["jobs"] if j["name"] == "doctor")["name"] = "night doctor"
+        cls.page = dashboard.page(d)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_palette_and_the_job_drawer_copy_quoted_commands(self):
+        out = T.browse(self.page, """document.dispatchEvent(new KeyboardEvent("keydown", {key: "k", metaKey: true, bubbles: true})); await tick(100);
+            const inp = $("#palette input"); inp.value = "Copy: dev"; inp.dispatchEvent(new Event("input", {bubbles: true})); await tick(100);
+            out.palette = $$("#pal-list li").map(text).filter(t => t.includes("run view") || t.includes("jobs run"));
+            await go("#/background?modal=job%3Anight%20doctor"); out.job = $$("#modal button[title]").map(b => b.title).filter(t => t.startsWith("dev jobs"));""",
+                       1440, "#/now", now=T.NOW)
+        self.assertIsNone(out.get("probeError") or out.get("pageError"))
+        self.assertIn("Copy: cd -- /Users/t/Development/acme/widget && dev run view '14;touch pwn' --failed", " ".join(out["palette"]))
+        self.assertIn("Copy: dev jobs run 'night doctor'", " ".join(out["palette"]))
+        self.assertTrue(out["job"], out)
+        self.assertEqual([c for c in out["job"] if "night doctor" in c and "'night doctor'" not in c], [])
+
+
 if __name__ == "__main__":
     unittest.main()

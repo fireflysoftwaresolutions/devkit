@@ -53,6 +53,7 @@ Errors are VisualError (a ValueError): the message says what happened and what t
 """
 from __future__ import annotations
 
+import calendar
 import difflib
 import gzip
 import json
@@ -222,6 +223,19 @@ def _session() -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", f"{agent}-{sid}")[:120]
 
 
+def _lane(hint: bool = True):
+    """The lane running this command (the crew member's agent id), or None for the tech lead and the developer. The
+    crew members of one agent session share its session id, so the lane tells their open audits apart. VisualError
+    when devkit cannot tell which lane runs it: guessing would take another lane's audit. The refusal names --audit
+    when `hint`, for the commands that take it."""
+    from .. import progress
+    try:
+        lane = progress._as_lane(os.environ.get(identity.LANE_VAR) or None)
+    except identity.IdentityError as e:
+        raise VisualError(f"{e}." + (" Or name the audit: --audit VA-…." if hint else "")) from None
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(lane))[:80] if lane else None
+
+
 def _user():
     """The developer's GitHub login (configured, else gh's), or None. Never the Mac's own login ($USER): records sync
     to the handoff repository."""
@@ -234,8 +248,48 @@ def who() -> str:
 
 
 def actor() -> dict:
-    """A record's `by`: the crew member (or None), the user, this Mac, and the session."""
-    return {"member": _member(), "user": _user(), "host": identity.hostname(), "session": _session()}
+    """A record's `by`: the crew member (or None), the user, this Mac by its machine id (or None), and the session."""
+    return {"member": _member(), "user": _user(), "host": vmap.this_mac(), "session": _session()}
+
+
+def _where():
+    """Where a capture's picture stays: `local:<machine id>` (the local store of that Mac), or None when this Mac has
+    no machine id."""
+    mac = vmap.this_mac()
+    return f"local:{mac}" if mac else None
+
+
+def taken_here(c: dict) -> bool:
+    """Did this Mac take capture `c`? Then a picture or description of it missing from the local store was pruned
+    here, not left on another Mac. The picture's `where` names the Mac: this Mac's machine id, or, for a capture from
+    before the machine id (or from a Mac without one, which identity.machine names by its hostname), a hostname this
+    Mac carried when the capture was taken (identity.was_this_mac at its `taken` time, as work.mine reads an older
+    record). Another Mac may carry that name, now or at the same time, so a hostname names this Mac only when the
+    record's user is this user too, as work.mine requires."""
+    on = str((c.get("image") or {}).get("where") or "").removeprefix("local:")
+    if not on:
+        return False
+    m = identity.machine()
+    if identity.MACHINE_ID.fullmatch(on):
+        return on == m.id
+    user = _user()
+    if not user or str((c.get("by") or {}).get("user") or "") != user:
+        return False
+    try:
+        at = calendar.timegm(time.strptime(str(c.get("taken")), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return on == m.id  # no time to read a hostname at
+    return on == m.id or identity.was_this_mac(on, at, m)
+
+
+def not_here(c: dict, what: str) -> str:
+    """The sentence a person reads when capture `c`'s `what` (its picture, or its description) is not in this Mac's
+    store: pruned from it when this Mac took the capture (taken_here), else on the Mac that took it, named as the
+    dashboard names it (map.mac_name). The caller adds what to do next."""
+    if taken_here(c):
+        return f"The {what} of {c['id']} is no longer in this Mac's store"
+    mac = vmap.mac_name(str((c.get("image") or {}).get("where") or "").removeprefix("local:"))
+    return f"The {what} of {c['id']} is not on this Mac: it was taken on {mac}"
 
 
 # --------------------------------------------------------------------------- records
@@ -253,7 +307,7 @@ def load(project: str, rid: str) -> dict:
     """The record `rid` (an audit, a capture, or a finding), its text stripped of control characters."""
     path = _path(project, rid)
     try:
-        doc = clean_record(json.loads(path.read_text(encoding="utf-8")))
+        doc = clean_record(core.load_json(path.read_text(encoding="utf-8")))
     except FileNotFoundError:
         raise VisualError(f"No {KINDS[rid[:2]][1]} {rid} in {project}.") from None
     except ValueError:
@@ -288,7 +342,7 @@ def _all(project: str, kind: str) -> list:
     out = []
     for path in sorted((records_dir(project) / KINDS[kind][0]).glob(f"{kind}-*.json")):
         try:
-            doc = clean_record(json.loads(path.read_text(encoding="utf-8")))
+            doc = clean_record(core.load_json(path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             continue
         if isinstance(doc, dict) and doc.get("id") == path.stem:
@@ -316,12 +370,15 @@ def _text(value, option: str, required: bool = True):
 
 # --------------------------------------------------------------------------- the session's audit
 
-def _session_file(project: str) -> Path:
-    return store_dir(project) / "sessions" / f"{_session()}.json"
+def _session_file(project: str, hint: bool = True) -> Path:
+    """Where the session keeps its open audit: one file for the tech lead and the developer, and one for each crew
+    lane, so a member's capture or bulk dismissal without --audit never lands in another lane's audit."""
+    lane = _lane(hint)
+    return store_dir(project) / "sessions" / (f"{_session()}.lane-{lane}.json" if lane else f"{_session()}.json")
 
 
 def open_audit(project: str):
-    """The audit open in this session for the project, or None."""
+    """The audit open in this session's lane for the project, or None."""
     try:
         aid = json.loads(_session_file(project).read_text()).get("audit")
     except (OSError, ValueError, AttributeError):
@@ -329,8 +386,9 @@ def open_audit(project: str):
     return aid if isinstance(aid, str) and ID.fullmatch(aid) and _path(project, aid).is_file() else None
 
 
-def _open(project: str, aid: str) -> None:
-    _private_write(_session_file(project), json.dumps({"audit": aid, "at": _now()}).encode())
+def _open(project: str, aid: str, session: Path = None) -> None:
+    """Open `aid` in this session's lane: in `session`, its session file found before (start), else found now."""
+    _private_write(session or _session_file(project), json.dumps({"audit": aid, "at": _now()}).encode())
 
 
 # --------------------------------------------------------------------------- audits (R18, R57)
@@ -385,6 +443,7 @@ def start(project: str, scope: str, question: str, *, task=None, mode=None, view
     if within is not None:
         scope_text = _clean([within])[0]
     version = vmap.load(project)["version"]
+    session = _session_file(project, hint=False)  # before the record: a lane devkit cannot tell leaves no audit
     audit = {"id": new_id("VA", project), "scope": scope, "question": task_text[0], "task": task_text[1] or None,
              "mode": mode, "matrix": {"viewports": sizes or [list(DEFAULT_VIEWPORT)], "themes": looks or ["light"],
                                       "states": [s for s in _clean([str(s) for s in states or ()])]},
@@ -392,7 +451,7 @@ def start(project: str, scope: str, question: str, *, task=None, mode=None, view
              "element": element, "include": list(include or ()), "commit": _git(cwd)["commit"], "taken": _now(),
              "by": actor(), "passes": {}, "signals": []}
     save(project, audit)
-    _open(project, audit["id"])
+    _open(project, audit["id"], session)
     return audit
 
 
@@ -646,7 +705,7 @@ def _record(project, cid, aid, rec, placed, again_of, cwd) -> dict:
             "reproducible": bool(rec.get("reproducible")), "experiment": bool(rec.get("experiment")),
             "again_of": again_of, "env": env, "taken": _now(), "by": actor(),
             "image": {"sha256": image.get("sha256"), "width": image.get("width"), "height": image.get("height"),
-                      "fold": image.get("fold"), "scale": image.get("scale"), "where": f"local:{identity.hostname()}",
+                      "fold": image.get("fold"), "scale": image.get("scale"), "where": _where(),
                       "truncated": bool(image.get("truncated")), "page_height": image.get("page_height")},
             "description": rec.get("description"), "redaction": rec.get("redaction"), "checks": rec.get("checks"),
             "marks": None, "judgment": [], "passes": {}}
@@ -1095,8 +1154,8 @@ def add_finding(project: str, capture_id=None, *, element=None, mark=None, selec
             element = mark_element(c, mark)
         if element or selector:
             if desc is None:
-                raise VisualError(f"The description of {c['id']} is not on this Mac, so its elements cannot be "
-                                  f"read. Capture it here: dev visual capture --again {c['id']}")
+                raise VisualError(f"{not_here(c, 'description')}, so its elements cannot be read. Capture it "
+                                  f"here: dev visual capture --again {c['id']}")
             if element:
                 e = next((e for e in elements if e.get("id") == element), None)
                 if e is None:
@@ -1547,7 +1606,7 @@ def _outcome(doc: dict, result: str, message: str) -> dict:
 def _verification(capture=None, check="none", **fields) -> dict:
     v = {"capture": capture, "check": check, "inside": None, "outside": None, "new_signals": [], "accepted_by": None,
          "diff": None, "anchor": None, "measured": None, "error": None, "commit": None, "map_version": None,
-         "review": None, "at": _now(), "by": who()}
+         "review": None, "compared": None, "at": _now(), "by": who()}
     v.update(fields)
     return v
 
@@ -1565,31 +1624,57 @@ def _failed(project: str, f: dict, message: str, commit, capture=None) -> dict:
     return _outcome(doc, "error", f"Could not verify {f['id']}: {error}{on}. Status: {doc['status']}.")
 
 
-def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = None) -> dict:
+def _settle(project: str, f: dict, v: dict, result: str, what: str, note: str = None, before_on=None,
+            pruned: bool = False) -> dict:
     """Keep the verification and move the status: verified when the check no longer fires; reopened when it still
     fires on a finding that was fixed or verified, else the status stays (R24). When the anchor was found by its old
     position only, the message and the history say so: what sits there now may be another element, so a check that
-    no longer fires there never verifies the finding (`result` is then "none"); a reviewer accepts it instead."""
+    no longer fires there never verifies the finding (`result` is then "none"); a reviewer accepts it instead. When
+    the picture before is not on this Mac (`v["compared"]` is False), nothing was compared: the history names the
+    Mac that took it by its machine id (`before_on`, as the record does), the message by its name (map.mac_name).
+    When that Mac is this one (`pruned`, taken_here), the picture was pruned from its store: the message says so,
+    and that nothing was compared; it offers no new capture, since capture --again takes the page as it is now and
+    cannot bring the picture before back. The history says this Mac, by its machine id, no longer has it."""
     check = (f.get("source") or "").partition(":")[2]
     only = f" · {OLD_POSITION}" if (v.get("anchor") or {}).get("found_by") == "region" else ""
+    away = v.get("compared") is False
+    taken = "picture before was taken on {} and is " + ("no longer in its store" if pruned else "not on this Mac")
+    said = ("picture before is no longer in this Mac's store, so nothing was compared" if pruned
+            else taken.format(vmap.mac_name(before_on)))
+    # the record's words name a Mac by its machine id only: an older capture's hostname would sync with the history.
+    # This Mac without a machine id (identity.machine names it by its hostname) has none to give, so the words say the
+    # Mac that took the picture no longer has it, never that another Mac took it
+    mine = vmap.this_mac() if pruned else None
+    if pruned and not mine:
+        recorded = "picture before is no longer in the store of the Mac that took it"
+    else:
+        recorded = taken.format((mine if pruned else before_on if identity.MACHINE_ID.fullmatch(str(before_on or ""))
+                                 else None) or "another Mac")
+    kept = f" · nothing compared: the {recorded}" if away else ""
+    # the words a person reads
+    nothing = (f" · the {said}" if pruned else f" · nothing compared: the {said}") if away else ""
 
     def fn(doc):
         doc["verification"] = v
         cur = doc.get("status")
         if result == "pass":
             doc["status"] = "verified"
-            _history(doc, "verified", f"{check} no longer fires on {what}{only}")
+            _history(doc, "verified", f"{check} no longer fires on {what}{only}{kept}")
         elif result == "fail":
             doc["status"] = "reopened" if cur in REOPENS else cur
-            _history(doc, "reopened" if doc["status"] != cur else "verify", f"still there on {what}: {check}{only}")
+            _history(doc, "reopened" if doc["status"] != cur else "verify", f"still there on {what}: {check}{only}{kept}")
         else:
-            _history(doc, "verify", note)
+            _history(doc, "verify", f"{note}{kept}" if note else note)
     doc = _update(project, f["id"], fn)
     fid = doc["id"]
+    note = f"{note}{nothing}" if note else note
     if result == "pass":
-        message = f"{fid}  verified · {check} no longer fires on {what}{only}"
+        message = f"{fid}  verified · {check} no longer fires on {what}{only}{nothing}"
     elif result == "fail":
-        message = f"{fid} is still there: {check} fires again on {what}{only}. Status: {doc['status']}."
+        message = f"{fid} is still there: {check} fires again on {what}{only}{nothing}. Status: {doc['status']}."
+    elif f.get("source") == "judgment" and away:
+        message = (f"{fid} came from judgment, and its {said}. Look at {what}, then accept it: dev visual verify {fid} "
+                   f"--accept --why \"…\"")
     elif f.get("source") == "judgment":
         message = (f"{fid} came from judgment. Before and after are in the report; accept with dev visual verify "
                    f"{fid} --accept --why \"…\"")
@@ -1610,9 +1695,16 @@ def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: li
         if box and list(box) not in boxes:
             boxes.append(list(box))
     commit = (after.get("env") or {}).get("commit")
+    # the picture before can be on the Mac that took it only (records sync, pictures do not): then the check decides
+    # on the new capture alone, and nothing is compared
+    sha = (before.get("image") or {}).get("sha256")
+    here = isinstance(sha, str) and (store_dir(project) / "blobs" / f"{sha}.png").is_file()
+    before_on = None if here else str((before.get("image") or {}).get("where") or "").removeprefix("local:") or None
     try:
         cmp = vcompare.compare_captures(records_dir(project), store_dir(project), before["id"], after["id"],
-                                        boxes or None)
+                                        boxes or None) if here else \
+            {"inside": None, "outside": None, "diff": None, "signals": [], "pixels": None, "changed": None,
+             "regions_total": None}
     except vcompare.CompareError as e:
         return _failed(project, f, str(e), commit, capture=after["id"])
     source = f.get("source") or ""
@@ -1635,8 +1727,8 @@ def _judge_screen(project: str, f: dict, before: dict, after: dict, elements: li
         note = f"before and after are {before['id']} and {after['id']}; waiting for a reviewer"
     refs = _number_regions(project, after["id"], cmp["signals"]) if regions and cmp["signals"] else []
     v = _verification(after["id"], result, inside=cmp["inside"], outside=cmp["outside"], new_signals=refs,
-                      diff=cmp["diff"], anchor=at, measured=measured, commit=commit, review=review)
-    out = _settle(project, f, v, result, after["id"], note)
+                      diff=cmp["diff"], anchor=at, measured=measured, commit=commit, review=review, compared=here)
+    out = _settle(project, f, v, result, after["id"], note, before_on, pruned=not here and taken_here(before))
     out["numbers"] = {k: cmp[k] for k in ("pixels", "changed", "regions_total")}
     return out
 
@@ -1897,9 +1989,10 @@ def share(project: str, rid: str) -> dict:
         try:
             data = blob.read_bytes()
         except OSError:
-            where = (c.get("image") or {}).get("where") or "another Mac"
-            raise VisualError(f"The picture of {cid} is not on this Mac ({where}). Share it from there, or capture "
-                              f"it here: dev visual capture --again {cid}") from None
+            # pruned here, a new capture would be another picture: share names none
+            then = "Nothing was shared." if taken_here(c) else \
+                f"Share it from there, or capture it here: dev visual capture --again {cid}"
+            raise VisualError(f"{not_here(c, 'picture')}. {then}") from None
         if hashlib.sha256(data).hexdigest() != sha:
             raise VisualError(f"The picture of {cid} does not match its record (SHA-256 {sha[:12]}…). Nothing was "
                               f"shared. Capture it again: dev visual capture --again {cid}")
@@ -1926,5 +2019,5 @@ def share(project: str, rid: str) -> dict:
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     shas = [sha for _c, sha, _b in pictures]
-    _update(project, rid, lambda d: _history(d, "shared", None, pictures=shas, host=identity.hostname()))
+    _update(project, rid, lambda d: _history(d, "shared", None, pictures=shas, host=vmap.this_mac()))
     return {"media": out, "bytes": sum(sizes.values())}

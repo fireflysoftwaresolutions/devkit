@@ -142,7 +142,8 @@ if args[:1] == ["setup"]:
             mock.patch.object(core, "_ancestry", return_value=["/bin/zsh"]), \
             mock.patch.object(providers, "status", status), \
             mock.patch.object(wizard, "package_status",
-                              lambda groups: [("core", [("jq", "brew", False), ("tree", "brew", False)])]), \
+                              lambda groups, folder=None:
+                              [("core", [("jq", "brew", False), ("tree", "brew", False)])]), \
             mock.patch.object(wizard._Wizard, "_package_plan", lambda self: dict(plan)), \
             mock.patch.object(wizard, "_npm_globals", lambda groups: []), \
             mock.patch.object(wizard, "detect_docker", lambda: {"colima": True, "running": True}):

@@ -28,6 +28,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import core, gitx, testx  # noqa: E402
 import test_gitx as G  # noqa: E402  (its Sandbox and dev() drive `dev ci`)
 
@@ -372,6 +377,32 @@ class BlastRadiusTests(unittest.TestCase):
             r = e.repo(files, branch=None)
             return testx.blast_radius(str(r), changed)
 
+    # A production module whose name looks like a test (app/test_probe.py, app/probe_test.py) is no test file where
+    # pytest's configuration would never collect it: outside its testpaths, or named against its python_files. pytest
+    # collects any file named on its command line, so selecting it ran its functions as tests (missing fixtures);
+    # a change to it selects the tests that import it instead.
+    def test_a_module_pytest_would_not_collect_is_no_test_file(self):
+        app = {"app/__init__.py": "", "app/test_probe.py": "def test_db(session):\n    return session\n",
+               "app/probe_test.py": "def test_cache(cache):\n    return cache\n",
+               "tests/test_app.py": "from app import probe_test, test_probe\n\n\ndef test_probes():\n"
+                                    "    assert test_probe.test_db(1) == probe_test.test_cache(1)\n"}
+        both = ["app/test_probe.py", "app/probe_test.py"]
+        for name, cfg, changed in (("pyproject.toml", '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n', both),
+                                   ("pyproject.toml", '[tool.pytest]\ntestpaths = [\n  "tests",  # unit\n]\n', both),
+                                   ("pytest.ini", "[pytest]\ntestpaths = tests\n", both),
+                                   ("setup.cfg", "[metadata]\nname = app\n\n[tool:pytest]\ntestpaths =\n    tests\n", both),
+                                   ("tox.ini", "[pytest]\npython_files = test_*.py\n", ["app/probe_test.py"]),
+                                   ("pyproject.toml", "[tool.pytest.ini_options]\npython_files = ['test_*.py']\n",
+                                    ["app/probe_test.py"])):
+            with self.subTest(config=name, text=cfg):
+                res = self.radius({**app, name: cfg}, changed)
+                self.assertEqual((res["mode"], res["tests"]), ("some", ["tests/test_app.py"]))
+        # with no testpaths, or none that exists, pytest collects test_*.py anywhere: the module is a test file there
+        for cfg in ("[pytest]\n", "[pytest]\ntestpaths = spec\n"):
+            with self.subTest(text=cfg):
+                res = self.radius({**app, "pytest.ini": cfg}, ["app/test_probe.py"])
+                self.assertEqual(res["tests"], ["app/test_probe.py"])
+
     def test_python_source_selects_its_importers_transitively(self):
         res = self.radius(PY_PROJECT, ["pkg/core.py"])
         self.assertEqual(res["mode"], "some")
@@ -511,6 +542,24 @@ class CommandTests(unittest.TestCase):
         cmd = testx.build_command(top, rn, ids=["tests/test_a.py::test_x"], report="R")
         self.assertEqual(cmd["argv"][-1], "tests/test_a.py::test_x")
 
+    # A separately packaged Python project inside this one (a worker with its own pyproject and tests) has a runner of
+    # its own. pytest run for the whole suite with no file arguments walks into it and collects its tests in the outer
+    # process, where its test modules clash with the outer ones by name (import file mismatch) and its imports do not
+    # resolve: the outer run leaves every nested project's folder out, and each nested runner runs its own.
+    def test_the_whole_pytest_suite_leaves_out_nested_python_projects(self):
+        top, rn = self.runner({"pyproject.toml": "[tool.pytest.ini_options]\naddopts = '-q'\n",
+                               "tests/test_api.py": "def test_api():\n    pass\n",
+                               "services/worker/pyproject.toml": "[tool.pytest.ini_options]\n",
+                               "services/worker/tests/test_api.py": "def test_api():\n    pass\n",
+                               "tools/lint/setup.py": "", "tools/lint/test_rules.py": "def test_rules():\n    pass\n",
+                               "docs/test_snippets.py": "def test_snippet():\n    pass\n"}, "pytest")
+        self.assertEqual(testx.build_command(top, rn, all_=True)["argv"],
+                         [PY, "-m", "pytest", "-q", "--ignore=services/worker", "--ignore=tools/lint"])
+        self.assertEqual(testx.build_command(top, rn, files=["tests/test_api.py"])["argv"],
+                         [PY, "-m", "pytest", "-q", "tests/test_api.py"])
+        worker = {(x["name"], x["root"]): x for x in testx.detect(top)}[("pytest", "services/worker")]
+        self.assertEqual(testx.build_command(top, worker, all_=True)["argv"], [PY, "-m", "pytest", "-q"])
+
     def test_unittest_module_names_from_the_start_dir(self):
         top, rn = self.runner({"tests/test_calc.py": ""}, "unittest")
         cmd = testx.build_command(top, rn, files=["tests/test_calc.py"])
@@ -549,6 +598,155 @@ class CommandTests(unittest.TestCase):
         cmd = testx.build_command(top, rn, related=["web/src/a.ts"], report="R")
         self.assertEqual(cmd["argv"][:4], ["yarn", "vitest", "related", "--run"])
         self.assertEqual(cmd["argv"][-1], "src/a.ts")
+
+    # Playwright browser specs, in the testDir of a playwright.config, run with Playwright: vitest excludes them and
+    # ran 0 tests, so a browser test could never be proven. The unit tests beside them keep vitest. Playwright writes
+    # its JUnit report to the file its environment names; a recorded failure reruns by its title.
+    def test_playwright_specs_run_with_playwright_and_unit_tests_with_vitest(self):
+        top, pw = self.runner({"package.json": json.dumps({"scripts": {"test": "vitest"}, "devDependencies": {
+                                   "vitest": "^5", "@playwright/test": "^1.64"}}),
+                               "playwright.config.ts": "import { defineConfig } from '@playwright/test';\n"
+                                                       "export default defineConfig({\n  testDir: './e2e',\n});\n",
+                               "e2e/home.spec.ts": "import { test } from './fixtures';\n",
+                               "src/sum.test.ts": "import { it } from 'vitest';\n"}, "playwright")
+        runners = testx.detect(top)
+        self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("e2e/home.spec.ts", "src/sum.test.ts")},
+                         {"e2e/home.spec.ts": "playwright", "src/sum.test.ts": "vitest"})
+        cmd = testx.build_command(top, pw, files=["e2e/home.spec.ts"], report="R")
+        self.assertEqual((cmd["argv"], cmd["env"]["PLAYWRIGHT_JUNIT_OUTPUT_FILE"], cmd["cwd"]),
+                         (["npx", "--no-install", "playwright", "test", "--reporter=list,junit", "e2e/home.spec.ts"],
+                          "R", top))
+        cmd = testx.build_command(top, pw, ids=["e2e/home.spec.ts::home › opens (the) menu"])
+        self.assertEqual(cmd["argv"][-3:], ["e2e/home.spec.ts", "--grep", r"opens \(the\) menu"])
+
+    # a playwright.config without a testDir finds specs from its own folder: there Playwright runs the specs that use
+    # it, and a unit test beside them stays vitest's
+    def test_playwright_without_a_test_folder_runs_only_the_specs_that_use_it(self):
+        top, pw = self.runner({"package.json": json.dumps({"devDependencies": {"vitest": "^5", "@playwright/test": "1"}}),
+                               "playwright.config.js": "module.exports = { use: { headless: true } };\n",
+                               "tests/home.spec.js": "const { test } = require('@playwright/test');\n",
+                               "tests/sum.spec.js": "import { it } from 'vitest';\n"}, "playwright")
+        runners = testx.detect(top)
+        self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("tests/home.spec.js", "tests/sum.spec.js")},
+                         {"tests/home.spec.js": "playwright", "tests/sum.spec.js": "vitest"})
+
+    # a testDir that is the config's own folder ('.' or './') is the same search as no testDir: only the specs that
+    # use Playwright are its own, and the unit tests beside them stay vitest's
+    def test_a_test_folder_that_is_the_configs_own_takes_only_the_specs_that_use_playwright(self):
+        for test_dir in (".", "./"):
+            with self.subTest(testDir=test_dir):
+                top, pw = self.runner({
+                    "web/package.json": json.dumps({"devDependencies": {"vitest": "^5", "@playwright/test": "1"}}),
+                    "web/playwright.config.ts": f"export default {{ testDir: '{test_dir}' }};\n",
+                    "web/e2e/home.spec.ts": "import { test } from '@playwright/test';\n",
+                    "web/src/sum.test.ts": "import { it } from 'vitest';\n"}, "playwright", "web")
+                runners = testx.detect(top)
+                self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("web/e2e/home.spec.ts",
+                                                                              "web/src/sum.test.ts")},
+                                 {"web/e2e/home.spec.ts": "playwright", "web/src/sum.test.ts": "vitest"})
+
+    # a testDir in a comment is no setting: Playwright searches its own folder, and a unit test in the commented-out
+    # folder stays vitest's
+    def test_a_commented_out_test_folder_claims_nothing(self):
+        for config in ("export default {\n  // testDir: './e2e',\n  use: { headless: true },\n};\n",
+                       "export default {\n  /* testDir: './e2e',\n  retries: 2, */\n  use: {},\n};\n",
+                       "/** testDir: './e2e' */\nexport default { use: { baseURL: 'http://localhost/*' } };\n"):
+            with self.subTest(config=config):
+                top, pw = self.runner({
+                    "package.json": json.dumps({"devDependencies": {"vitest": "^5", "@playwright/test": "1"}}),
+                    "playwright.config.ts": config,
+                    "e2e/home.spec.ts": "import { test } from '@playwright/test';\n",
+                    "e2e/menu.test.ts": "import { it } from 'vitest';\n"}, "playwright")
+                runners = testx.detect(top)
+                self.assertEqual(pw["claims"], [])
+                self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("e2e/home.spec.ts", "e2e/menu.test.ts")},
+                                 {"e2e/home.spec.ts": "playwright", "e2e/menu.test.ts": "vitest"})
+
+    # a spec takes `test` from a local fixtures module that extends Playwright's: it uses Playwright through that
+    # module (also through a second one), while a unit test with a local helper of its own stays vitest's
+    def test_a_spec_that_takes_test_from_a_local_fixtures_module_is_playwrights(self):
+        top, pw = self.runner({
+            "package.json": json.dumps({"devDependencies": {"vitest": "^5", "@playwright/test": "1"}}),
+            "playwright.config.ts": "export default { use: { headless: true } };\n",
+            "tests/fixtures.ts": "import { test as base } from '@playwright/test';\nexport const test = base;\n",
+            "tests/more/fixtures/index.ts": "export { test } from '../../fixtures';\n",
+            "tests/home.spec.ts": "import { test, expect } from './fixtures';\n",
+            "tests/more/cart.spec.ts": "import { test } from './fixtures';\n",
+            "tests/helpers.ts": "// not '@playwright/test'\nexport const two = 2;\n",
+            "tests/sum.spec.ts": "import { it } from 'vitest';\nimport { two } from './helpers';\n"}, "playwright")
+        runners = testx.detect(top)
+        self.assertEqual({f: testx.owner(runners, f)["name"] for f in ("tests/home.spec.ts", "tests/more/cart.spec.ts",
+                                                                      "tests/sum.spec.ts")},
+                         {"tests/home.spec.ts": "playwright", "tests/more/cart.spec.ts": "playwright",
+                          "tests/sum.spec.ts": "vitest"})
+
+    # Angular unit tests built by the unit-test builder (Vitest runner) run through `ng test`, which builds them with
+    # the workspace's TypeScript paths, setup and providers; bare vitest loses them. Each project runs its own specs:
+    # those under its source root and those its include option names elsewhere.
+    def test_angular_unit_test_builder_projects_run_through_ng_test(self):
+        unit = {"builder": "@angular/build:unit-test"}
+        top, _ = self.runner({"package.json": json.dumps({"devDependencies": {"vitest": "^5", "@angular/build": "22"}}),
+                              "angular.json": json.dumps({"version": 1, "projects": {
+                                  "shop": {"root": "projects/shop", "sourceRoot": "projects/shop/src",
+                                           "architect": {"test": {**unit, "options": {
+                                               "include": ["**/*.spec.ts", "../widgets/**/*.spec.ts"]}}}},
+                                  "admin": {"root": "projects/admin", "architect": {"test": unit}},
+                                  "legacy": {"root": "projects/legacy", "architect": {"test": {
+                                      "builder": "@angular/build:unit-test", "options": {"runner": "karma"}}}}}}),
+                              "projects/shop/src/cart.spec.ts": "", "projects/shop/widgets/tag.spec.ts": "",
+                              "projects/admin/src/users.spec.ts": "", "projects/legacy/src/old.spec.ts": "",
+                              "tools/lint.test.ts": ""}, "vitest")
+        runners = testx.detect(top)
+        shop = next(r for r in runners if r.get("project") == "shop")
+        self.assertEqual({f: (testx.owner(runners, f)["name"], testx.owner(runners, f).get("project"))
+                          for f in ("projects/shop/src/cart.spec.ts", "projects/shop/widgets/tag.spec.ts",
+                                    "projects/admin/src/users.spec.ts", "projects/legacy/src/old.spec.ts",
+                                    "tools/lint.test.ts")},
+                         {"projects/shop/src/cart.spec.ts": ("ng", "shop"),
+                          "projects/shop/widgets/tag.spec.ts": ("ng", "shop"),
+                          "projects/admin/src/users.spec.ts": ("ng", "admin"),
+                          "projects/legacy/src/old.spec.ts": ("vitest", None), "tools/lint.test.ts": ("vitest", None)})
+        cmd = testx.build_command(top, shop, report="R",
+                                  files=["projects/shop/src/cart.spec.ts", "projects/shop/widgets/tag.spec.ts"])
+        self.assertEqual(cmd["argv"], ["npx", "--no-install", "ng", "test", "shop", "--watch=false",
+                                       "--reporters=default", "--reporters=json", "--output-file=R",
+                                       "--include", "projects/shop/src/cart.spec.ts",
+                                       "--include", "projects/shop/widgets/tag.spec.ts"])
+        self.assertEqual(testx.build_command(top, shop, all_=True, report="R")["argv"][-1], "--output-file=R")
+
+    # an include pattern names files, not only a folder: a test under the folder that the pattern does not match is
+    # not the project's (ng test would not run it) and stays with the package's runner
+    def test_angular_include_patterns_match_file_names_not_only_folders(self):
+        unit = {"builder": "@angular/build:unit-test"}
+        top, _ = self.runner({"package.json": json.dumps({"devDependencies": {"vitest": "^5", "@angular/build": "22"}}),
+                              "angular.json": json.dumps({"projects": {"shop": {
+                                  "root": "shop", "sourceRoot": "shop/src", "architect": {"test": {**unit, "options": {
+                                      "include": ["app/**/*.{spec,test}.ts", "../widgets/*.spec.ts"]}}}}}}),
+                              "shop/src/app/cart.spec.ts": "", "shop/src/app/deep/cart.test.ts": "",
+                              "shop/src/app/cart.bench.ts": "", "shop/src/main.spec.ts": "",
+                              "shop/widgets/tag.spec.ts": "", "shop/widgets/tag.test.ts": "",
+                              "shop/widgets/sub/tag.spec.ts": ""}, "ng", ".")
+        runners = testx.detect(top)
+        self.assertEqual({f: testx.owner(runners, f)["name"] for f in (
+            "shop/src/app/cart.spec.ts", "shop/src/app/deep/cart.test.ts", "shop/src/main.spec.ts",
+            "shop/widgets/tag.spec.ts", "shop/widgets/tag.test.ts", "shop/widgets/sub/tag.spec.ts")},
+                         {"shop/src/app/cart.spec.ts": "ng", "shop/src/app/deep/cart.test.ts": "ng",
+                          "shop/src/main.spec.ts": "vitest", "shop/widgets/tag.spec.ts": "ng",
+                          "shop/widgets/tag.test.ts": "vitest", "shop/widgets/sub/tag.spec.ts": "vitest"})
+
+    # the projects of one Angular workspace share its folder: a recorded failure reruns with its own file's project
+    def test_a_recorded_angular_failure_reruns_with_its_own_project(self):
+        unit = {"test": {"builder": "@angular/build:unit-test"}}
+        top, _ = self.runner({"package.json": json.dumps({"devDependencies": {"@angular/build": "22"}}),
+                              "angular.json": json.dumps({"projects": {"shop": {"root": "shop", "architect": unit},
+                                                                       "admin": {"root": "admin", "architect": unit}}}),
+                              "shop/src/cart.spec.ts": "", "admin/src/users.spec.ts": ""}, "ng", ".")
+        failed = {"runner": "ng", "root": ".", "id": "admin/src/users.spec.ts::users lists them",
+                  "file": "admin/src/users.spec.ts"}
+        groups = testx._failed_groups(top, testx.detect(top), {"failures": {top: [failed]}})
+        self.assertEqual([(r["project"], [f["id"] for f in fs]) for r, fs in groups], [("admin", [failed["id"]])])
+        cmd = testx.build_command(top, groups[0][0], ids=groups[0][1])
+        self.assertEqual(cmd["argv"][-4:], ["--include", "admin/src/users.spec.ts", "--filter", "users lists them"])
 
     def test_maven_units_and_integration_tests(self):
         top, rn = self.runner({"pom.xml": "<project/>", "mvnw": ""}, "maven")
@@ -853,6 +1051,39 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(failures(cases), [("src/b.test.ts::b adds", "src/b.test.ts", 5,
                                             "Error: expect(received).toBe(expected)")])
         self.assertEqual(len(cases), 2)
+
+    # Playwright's JUnit report, as Playwright 1.64 writes it: a case's classname is its file relative to the testDir,
+    # its name the describe titles and the test's title joined by ' › '; the failure's stack names the file and line
+    def test_playwright_junit(self):
+        write(self.top, {"web/e2e/home.spec.ts": ""})
+        e2e = self.top / "web" / "e2e"
+        xml = f"""<testsuites id="" name="" tests="3" failures="1" skipped="1" errors="0" time="1.25">
+<testsuite name="home.spec.ts" timestamp="2026-11-23T06:02:43.273Z" hostname="" tests="3" failures="1" skipped="0">
+<testcase name="home › adds numbers" classname="home.spec.ts" time="0.013">
+</testcase>
+<testcase name="home › fails on purpose" classname="home.spec.ts" time="0.002">
+<failure message="expect(received).toBe(expected) // Object.is equality" type="expect.toBe">
+<![CDATA[  home.spec.ts:4:3 › home › fails on purpose ───────────
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 2
+    Received: 1
+        at {e2e}/home.spec.ts:4:46
+]]>
+</failure>
+</testcase>
+<testcase name="top level" classname="home.spec.ts" time="0"><skipped/></testcase>
+</testsuite>
+</testsuites>"""
+        rn = {"name": "playwright", "root": "web", "claims": ["web/e2e"]}
+        cases = testx.parse_playwright_junit(xml, str(self.top), str(self.top / "web"), rn)
+        self.assertEqual([(c["id"], c["file"], c["status"], c["name"]) for c in cases], [
+            ("web/e2e/home.spec.ts::home › adds numbers", "web/e2e/home.spec.ts", "passed", "home › adds numbers"),
+            ("web/e2e/home.spec.ts::home › fails on purpose", "web/e2e/home.spec.ts", "failed",
+             "home › fails on purpose"),
+            ("web/e2e/home.spec.ts::top level", "web/e2e/home.spec.ts", "skipped", "top level")])
+        self.assertEqual(failures(cases), [("web/e2e/home.spec.ts::home › fails on purpose", "web/e2e/home.spec.ts", 4,
+                                            "expect(received).toBe(expected) // Object.is equality")])
 
     def test_unittest_output_new_and_old_formats(self):
         rn = {"name": "unittest", "root": ".", "start": "tests"}
@@ -1925,6 +2156,103 @@ def main(argv):
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 '''
+# Stand-ins for Playwright and the Angular CLI, so their specs run where neither is installed (node is enough). A
+# shared runtime registers test()/it() and describe(), runs each file given, and reports what each tool reports:
+# `playwright test [--reporter=…] <files>` writes Playwright's JUnit report (classname: the file relative to e2e/, name:
+# the titles joined by ' › ') to $PLAYWRIGHT_JUNIT_OUTPUT_FILE; `ng test <project> --include <file>… --output-file=R`
+# sets the globals the unit-test builder sets and writes Vitest's JSON report to R. Both exit 1 when a test failed.
+STANDIN_JS = {
+    "node_modules/devkit-standin/runtime.mjs": """
+        import path from 'node:path';
+        import { pathToFileURL } from 'node:url';
+
+        const tests = [];
+        const prefix = [];
+        export function test(title, fn) { tests.push({ titles: [...prefix, title], fn }); }
+        export function describe(title, fn) { prefix.push(title); try { fn(); } finally { prefix.pop(); } }
+        test.describe = describe;
+        export const it = test;
+        export function expect(actual) {
+          return { toBe(expected) { if (!Object.is(actual, expected)) throw new Error(`expected ${actual} to be ${expected}`); } };
+        }
+        export async function run(files) {
+          const results = [];
+          for (const file of files) {
+            await import(pathToFileURL(path.resolve(file)).href);
+            for (const t of tests.splice(0)) {
+              try { await t.fn({}); results.push({ file, titles: t.titles, ok: true, message: '' }); }
+              catch (e) { results.push({ file, titles: t.titles, ok: false, message: String(e && e.message) }); }
+            }
+          }
+          return results;
+        }
+        """,
+    "node_modules/devkit-standin/playwright.mjs": """
+        import { writeFileSync } from 'node:fs';
+        import path from 'node:path';
+        import { run } from './runtime.mjs';
+
+        const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        export async function main(args) {
+          const files = [];
+          for (let i = 0; i < args.length; i++) {
+            if (args[i] === '--grep' || args[i] === '-g') i++;
+            else if (args[i] !== 'test' && !args[i].startsWith('-')) files.push(args[i]);
+          }
+          const results = await run(files);
+          const cases = results.map((r) => `<testcase name="${esc(r.titles.join(' › '))}" classname="${esc(path.relative('e2e', r.file))}">` +
+            (r.ok ? '' : `<failure message="${esc(r.message)}"/>`) + '</testcase>');
+          if (process.env.PLAYWRIGHT_JUNIT_OUTPUT_FILE) {
+            writeFileSync(process.env.PLAYWRIGHT_JUNIT_OUTPUT_FILE, `<testsuites><testsuite name="specs">${cases.join('')}</testsuite></testsuites>`);
+          }
+          if (!results.length) console.log('Error: No tests found');
+          process.exitCode = results.length && results.every((r) => r.ok) ? 0 : 1;
+        }
+        """,
+    "node_modules/devkit-standin/ng.mjs": """
+        import { writeFileSync } from 'node:fs';
+        import path from 'node:path';
+        import { describe, expect, it, run } from './runtime.mjs';
+
+        export async function main(args) {
+          Object.assign(globalThis, { describe, it, expect });
+          const files = [];
+          let out = '';
+          for (let i = 0; i < args.length; i++) {
+            if (args[i] === '--include') files.push(args[++i]);
+            else if (args[i].startsWith('--output-file=')) out = args[i].slice('--output-file='.length);
+          }
+          const results = await run(files);
+          const byFile = new Map();
+          for (const r of results) {
+            if (!byFile.has(r.file)) byFile.set(r.file, []);
+            byFile.get(r.file).push({ ancestorTitles: r.titles.slice(0, -1), title: r.titles[r.titles.length - 1],
+              fullName: r.titles.join(' '), status: r.ok ? 'passed' : 'failed', failureMessages: r.ok ? [] : [r.message] });
+          }
+          if (out) {
+            writeFileSync(out, JSON.stringify({ testResults: [...byFile].map(([f, a]) => ({ name: path.resolve(f), assertionResults: a })) }));
+          }
+          if (!results.length) console.log('No test files found');
+          process.exitCode = results.length && results.every((r) => r.ok) ? 0 : 1;
+        }
+        """,
+    "node_modules/@playwright/test/package.json": '{"name": "@playwright/test", "type": "module", "exports": "./index.mjs"}\n',
+    "node_modules/@playwright/test/index.mjs": "export { expect, test } from '../../devkit-standin/runtime.mjs';\n",
+}
+for _tool in ("playwright", "ng"):  # npm's bin links: run the tool's module with the arguments
+    STANDIN_JS[f"node_modules/.bin/{_tool}"] = (
+        "#!/usr/bin/env node\nconst { pathToFileURL } = require('url');\n"
+        f"import(pathToFileURL(require('path').join(__dirname, '..', 'devkit-standin', '{_tool}.mjs')).href)\n"
+        "  .then((m) => m.main(process.argv.slice(2)));\n")
+
+
+def standin_js(r):
+    """Put the Playwright and Angular CLI stand-ins in r/node_modules (ignored, so the proof copy links it)."""
+    write(r, STANDIN_JS)
+    for tool in ("playwright", "ng"):
+        (Path(r) / "node_modules" / ".bin" / tool).chmod(0o755)
+
+
 HOSTS_BASE = {
     "pytest.ini": "[pytest]\n",
     "pytest.py": STANDIN_PYTEST,
@@ -2209,6 +2537,27 @@ class LaneScopeTests(unittest.TestCase):
             ran = sorted(f for s in json.loads(out)["steps"] for run in s["runs"] for f in run["files"])
             self.assertEqual(ran, ["tests/test_calc.py", "tests/test_other.py"])
 
+    # a lane's scope counts in the checkout `dev commit` counts it in: a lane bound to a worktree that runs dev test
+    # in the repository's main checkout owns none of the main checkout's changes, which dev commit would refuse
+    def test_a_lane_bound_to_another_checkout_takes_none_of_this_checkouts_files(self):
+        from devkit import gitx
+        with Env() as e:
+            r = self.repo(e)
+            wt = e.root / "wt"
+            subprocess.run(["git", "-C", str(r), "worktree", "add", "-q", "-b", "feat/other", str(wt)], check=True,
+                           capture_output=True)
+            scope = [["calc.py", "tests/test_calc.py"]]
+            # where dev commit counts this lane's scope: the worktree its scope was given in
+            with self.lane(scope[0]), mock.patch.object(gitx, "_commit_lane",
+                                                        side_effect=lambda c: ("a_kid", scope, str(wt))):
+                rc, out, err = dev(r, "--json")
+                self.assertEqual(testx.lane_files(str(r), ["calc.py"]), ([], ["calc.py"]))
+                self.assertEqual(testx.lane_files(str(wt), ["calc.py"]), (["calc.py"], []))
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual([f for s in json.loads(out)["steps"] for run in s["runs"] for f in run["files"]], [])
+            self.assertEqual(json.loads(out)["outside_lane"],
+                             ["calc.py", "other.py", "tests/test_calc.py", "tests/test_other.py"])
+
     def test_dev_test_prove_in_a_lane_proves_the_changed_tests_of_its_own_files(self):
         with Env() as e:
             r = self.repo(e)
@@ -2218,6 +2567,30 @@ class LaneScopeTests(unittest.TestCase):
             data = json.loads(out)
             self.assertEqual([t["id"] for t in data["tests"]], ["test_calc.CalcTests.test_mul"])
             self.assertEqual(data["outside_lane"], ["tests/test_other.py"])
+
+
+class AnotherProjectTests(unittest.TestCase):
+    # dev test -p <name> finds that one project in the map the last dev sync cached, as dev task -p does: building
+    # the whole map runs git in every checkout on the Mac before a test starts
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_startup import Layout, touching  # a Mac's dev root with git and lsof stand-ins that log calls
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.mac = Layout(Path(os.path.realpath(tmp.name)))
+        self.touching = touching
+
+    def test_dev_test_of_another_project_reads_only_that_checkout(self):
+        self.mac.sync()
+        (self.mac.app / "tests").mkdir()
+        (self.mac.app / "tests" / "test_one.py").write_text("import unittest\n\n\nclass One(unittest.TestCase):\n"
+                                                            "    def test_one(self):\n        self.assertEqual(1, 1)\n")
+        rc, out, calls = self.mac.dev("test", "-p", "app", "plan", "--json", cwd=self.mac.home)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("tests/test_one.py", out)
+        self.assertEqual(self.touching(calls, self.mac.api), [], calls)
+        self.assertEqual([c for c in calls if c.startswith("lsof ")], [], calls)
 
 
 def _progress():
@@ -2270,6 +2643,20 @@ class RunFolderSweepTests(unittest.TestCase):
             self.assertEqual(rc, 0, out + err)
             self.assertEqual(sorted(p.name for p in tmp.iterdir()),
                              sorted(names[k] for k in ("running", "young", "other")))
+
+
+def built_install(r, files):
+    """A built (not editable) install of the checkout's package `pkg` in r/.venv, as `uv sync --no-editable` or
+    `pip install .` leaves it: the package's files in site-packages, and a dist-info whose direct_url.json names the
+    checkout and whose RECORD lists those files. Written by hand, so no installer or network is needed."""
+    import venv
+    venv.create(r / ".venv", with_pip=False, symlinks=True)
+    site = next((r / ".venv" / "lib").glob("python*/site-packages"))
+    write(site, files)
+    info = site / "pkg-0.dist-info"
+    info.mkdir()
+    (info / "direct_url.json").write_text(json.dumps({"url": r.as_uri(), "dir_info": {}}))
+    (info / "RECORD").write_text("".join(f"{f},sha256=x,1\n" for f in files) + "pkg-0.dist-info/RECORD,,\n")
 
 
 class ProveTests(unittest.TestCase):
@@ -2554,7 +2941,11 @@ class CalcTests(unittest.TestCase):
                 (r / f"module_{n}.py").write_text("VALUE = 1\n")
             snapshot = testx._proof_snapshot(r)
             self.assertEqual(len(snapshot), 750)
-            for setting, value in (("PROOF_FILES", 749), ("PROOF_BYTES", 100), ("PROOF_SECONDS", -1)):
+            # the bound is work (files and bytes), not wall-clock time: a slow, loaded machine gets the same evidence
+            ticks = iter(range(10**6))
+            with mock.patch.object(testx.time, "monotonic", side_effect=lambda: float(next(ticks))):
+                self.assertEqual(testx._proof_snapshot(r), snapshot)
+            for setting, value in (("PROOF_FILES", 749), ("PROOF_BYTES", 100)):
                 with self.subTest(setting=setting), mock.patch.object(testx, setting, value):
                     self.assertEqual(testx._proof_snapshot(r), {})
             cache = r / "__pycache__"
@@ -2739,6 +3130,47 @@ class CalcTests(unittest.TestCase):
                              [("test_calc.CalcTests.test_sandbox_drops_x", "failed", "proves the change")])
             self.assertIn("{'Y': 2}", data["tests"][0]["message"])
 
+    # a line the change adds inside a helper that was there before is part of that helper's change too
+    def test_a_line_added_inside_a_helper_is_undone_with_the_change(self):
+        with Env() as e:
+            r = e.repo(SANDBOX_BASE)
+            text = (r / "tests" / "test_calc.py").read_text()
+            (r / "tests" / "test_calc.py").write_text(
+                text.replace("    return dict(env)\n",
+                             "    env = {k: v for k, v in env.items() if k != 'X'}\n    return dict(env)\n") +
+                "\n    def test_sandbox_drops_x(self):\n"
+                "        self.assertEqual(sandbox_env({'X': 1, 'Y': 2}), {'Y': 2})\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["test_module_helpers"], ["tests/test_calc.py"])
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in data["tests"]],
+                             [("test_calc.CalcTests.test_sandbox_drops_x", "failed", "proves the change")])
+
+    # a helper of a test class that gains a parameter changes the module outside its helpers' bodies, so the module
+    # keeps its change: restored by halves, its old signature ran the new body, and a test the change does not touch
+    # crashed on a NameError that prove took for proof. Run as it is now, the test the change does not touch passes
+    # and cannot be proven, named by that edit, and the new test proves the production change by its failure.
+    def test_a_helper_comes_back_whole_so_a_test_the_change_does_not_touch_runs_cleanly(self):
+        base = dict(PROVE_BASE, **{"tests/test_calc.py": with_tests().replace(
+            "    def test_add(self):\n        self.assertEqual(calc.add(1, 2), 3)\n",
+            "    def pair(self):\n        a, b = 1, 2\n        return a, b\n\n"
+            "    def test_add(self):\n        self.assertEqual(calc.add(*self.pair()), 3)\n")})
+        with Env() as e:
+            r = e.repo(base)
+            text = (r / "tests" / "test_calc.py").read_text()
+            (r / "tests" / "test_calc.py").write_text(
+                text.replace("    def pair(self):\n        a, b = 1, 2\n",
+                             "    def pair(self, scale=1):\n        a, b = 1, 2\n        a, b = a * scale, b * scale\n")
+                + "\n    def test_mul(self):\n        self.assertEqual(calc.mul(*self.pair(2)), 8)\n")
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertNotIn("NameError", out + err)
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_add", "passed", "cannot be proven: its module keeps a change "
+                               "outside its helpers' bodies: an edited helper `CalcTests.pair` (line 10)"),
+                              ("test_calc.CalcTests.test_mul", "failed", "proves the change")], out + err)
+
     # a test helper the change adds is test code, not the change under test: it stays in the copy, so the new test
     # runs against the old production code. Removed, every test that imports it failed on the import and was
     # reported as proving the change, here a test the change does not touch at all.
@@ -2913,6 +3345,125 @@ class CalcTests(unittest.TestCase):
             self.assertIn("nothing proven", out)
             self.assertNotIn("fail with your change present", out)
 
+    # A fake defined in a test module (a plain class, no TestCase, a name pytest does not collect) may have a method
+    # named test_…; no runner collects it, so it is no changed test: selecting it matched nothing and failed the proof
+    def test_a_fake_classs_test_method_is_not_a_changed_test(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL) + textwrap.dedent("""
+
+
+                class FakeProbe:
+                    def test_connection(self):
+                        return calc.add(1, 1) == 2
+
+
+                class FakeDeepProbe(FakeProbe, object):
+                    def test_route(self):
+                        return True
+                """))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual([(t["id"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_mul", "proves the change")], out + err)
+            self.assertEqual(rc, 0)
+
+    # A production module named test_… outside pytest's testpaths is production code: prove undoes it and proves the
+    # tests that import it, instead of taking it for a test and refusing that only tests changed
+    def test_a_module_outside_pytest_testpaths_is_proven_as_production_code(self):
+        with Env() as e:
+            r = e.repo({"pytest.ini": "[pytest]\ntestpaths = tests\n", "pytest.py": STANDIN_PYTEST,
+                        "diag/__init__.py": "", "diag/test_link.py": "def test_link(host):\n    return host\n",
+                        "tests/test_diag.py": "import sys\nfrom pathlib import Path\n\n"
+                                              "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+                                              "from diag import test_link  # noqa: E402\n\n\n"
+                                              "def test_link_keeps_the_host():\n    assert test_link.test_link('a') == 'a'\n",
+                        ".gitignore": "__pycache__/\n"})
+            (r / "diag" / "test_link.py").write_text("def test_link(host):\n    return host.lower()\n")
+            (r / "tests" / "test_diag.py").write_text((r / "tests" / "test_diag.py").read_text() +
+                                                      "\n\ndef test_link_lowers_the_host():\n"
+                                                      "    assert test_link.test_link('A') == 'a'\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out or "{}")
+            self.assertEqual((data.get("production"), [(t["id"], t["verdict"]) for t in data.get("tests", [])]),
+                             (["diag/test_link.py"],
+                              [("tests/test_diag.py::test_link_lowers_the_host", "proves the change")]), out + err)
+            self.assertEqual(rc, 0)
+
+    # A new Playwright spec is proven with Playwright: vitest, the package's unit runner, excluded it and ran 0 tests
+    @unittest.skipUnless(shutil.which("node") and shutil.which("npx"), "node is not installed, so the stand-in cannot run")
+    def test_a_playwright_spec_is_proven_with_playwright(self):
+        with Env() as e:
+            r = e.repo({"package.json": json.dumps({"scripts": {"test": "vitest"},
+                                                    "devDependencies": {"vitest": "5", "@playwright/test": "1"}}),
+                        "playwright.config.mjs": "export default { testDir: './e2e' };\n",
+                        "src/sum.mjs": "export function sum(a, b) {\n  return a - b;\n}\n",
+                        ".gitignore": "node_modules/\n"})
+            standin_js(r)
+            write(r, {"src/sum.mjs": "export function sum(a, b) {\n  return a + b;\n}\n",
+                      "e2e/sum.spec.mjs": """
+                          import { expect, test } from '@playwright/test';
+                          import { sum } from '../src/sum.mjs';
+
+                          test.describe('sum', () => {
+                            test('adds two numbers', () => {
+                              expect(sum(1, 2)).toBe(3);
+                            });
+                          });
+                          """})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out or "{}")
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"], t["verdict"]) for t in data.get("tests", [])],
+                             [("e2e/sum.spec.mjs::sum › adds two numbers", "1/1", "failed", "proves the change")],
+                             out + err)
+            self.assertEqual(rc, 0)
+
+    # A new unit test of an Angular project built by the unit-test builder is proven through `ng test`
+    @unittest.skipUnless(shutil.which("node") and shutil.which("npx"), "node is not installed, so the stand-in cannot run")
+    def test_an_angular_unit_test_is_proven_through_ng_test(self):
+        with Env() as e:
+            r = e.repo({"package.json": json.dumps({"scripts": {"test": "ng test"},
+                                                    "devDependencies": {"vitest": "5", "@angular/build": "22"}}),
+                        "angular.json": json.dumps({"version": 1, "projects": {"app": {
+                            "root": "", "sourceRoot": "src",  # the stand-in runs plain JavaScript specs
+                            "architect": {"test": {"builder": "@angular/build:unit-test",
+                                                   "options": {"include": ["**/*.spec.mjs"]}}}}}}),
+                        "src/app/sum.mjs": "export function sum(a, b) {\n  return a - b;\n}\n",
+                        ".gitignore": "node_modules/\n"})
+            standin_js(r)
+            write(r, {"src/app/sum.mjs": "export function sum(a, b) {\n  return a + b;\n}\n",
+                      "src/app/sum.spec.mjs": """
+                          import { sum } from './sum.mjs';
+
+                          describe('sum', () => {
+                            it('adds two numbers', () => {
+                              expect(sum(1, 2)).toBe(3);
+                            });
+                          });
+                          """})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            data = json.loads(out or "{}")
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"], t["verdict"]) for t in data.get("tests", [])],
+                             [("src/app/sum.spec.mjs::sum adds two numbers", "1/1", "failed", "proves the change")],
+                             out + err)
+            self.assertEqual(rc, 0)
+
+    # `dev test --since REF prove`: the base named before the subcommand is the base of the proof, as after it
+    def test_since_before_the_subcommand_sets_the_base_of_the_proof(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "calc.py").write_text(MUL)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            git(r, "commit", "-qam", "feat: mul")
+            (r / "calc.py").write_text(MUL + "\n\ndef div(a, b):\n    return a / b\n")
+            (r / "tests" / "test_calc.py").write_text(with_tests(
+                TEST_MUL, "\n    def test_div(self):\n        self.assertEqual(calc.div(6, 3), 2)\n"))
+            rc, out, err = dev(r, "--since", "HEAD", "prove", "--json", "--runs", "1")
+            data = json.loads(out)
+            self.assertEqual((data["base"], [t["id"] for t in data["tests"]]),
+                             ("HEAD", ["test_calc.CalcTests.test_div"]), out + err)
+            self.assertEqual(rc, 0)
+
     def test_needs_a_production_change_and_a_changed_test(self):
         with Env() as e:
             r = e.repo(PROVE_BASE)
@@ -2985,9 +3536,12 @@ class CalcTests(unittest.TestCase):
                 ("test/page.mjs", "2/2", "failed"),
                 ("test/slug.test.mjs::joins words with dashes", "2/2", "failed"),
                 ("test_calc.CalcTests.test_mul", "2/2", "failed")])
+            # a plain script fails by its exit code, never on an assertion: one that reaches a changed helper file
+            # cannot be proven, as the rerun proves only by an assertion failure
             rc, out, err = dev(r, "prove", "--json", "--runs", "1", "test/page.mjs")
-            self.assertEqual(rc, 0, out + err)
-            self.assertEqual([t["id"] for t in json.loads(out)["tests"]], ["test/page.mjs"])
+            self.assertEqual([("test/page.mjs", "cannot be proven: without the change it fails on exit code 1, not on "
+                                                "an assertion")],
+                             [(t["id"], t["verdict"]) for t in json.loads(out)["tests"]], out + err)
             # --runner leaves the node tests out: they are listed, and the plain script is no helper for that
             rc, out, err = dev(r, "prove", "--json", "--runs", "1", "--runner", "unittest")
             self.assertEqual(rc, 0, out + err)
@@ -3065,6 +3619,52 @@ class CalcTests(unittest.TestCase):
             self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in json.loads(out)["tests"]],
                              [("tests.test_mod.ModTests.test_two", "1/1", "failed")])
             self.assertEqual(list((e.root / "devtmp").iterdir()), [])
+
+    # A src layout installed as a built copy: site-packages holds the package built from the changed source, and
+    # nothing leads the copy's Python back to a source folder, so without care the restored code is never run and a
+    # test that proves the change is reported as not testing it. The copy's own src must come first.
+    def test_a_built_install_of_the_checkout_is_proven_against_the_copys_own_source(self):
+        with Env() as e:
+            r = e.repo({"pyproject.toml": '[project]\nname = "pkg"\nversion = "0"\n',
+                        "src/pkg/__init__.py": "", "src/pkg/mod.py": "def value():\n    return 1\n",
+                        "tests/__init__.py": "",
+                        "tests/test_mod.py": "import unittest\n\nfrom pkg import mod\n\n\nclass ModTests(unittest.TestCase):\n"
+                                             "    def test_one(self):\n        self.assertEqual(mod.value() % 1, 0)\n",
+                        ".gitignore": "__pycache__/\n.venv/\n"})
+            changed = "def value():\n    return 2\n"
+            built_install(r, {"pkg/__init__.py": "", "pkg/mod.py": changed})
+            (r / "src" / "pkg" / "mod.py").write_text(changed)
+            (r / "tests" / "test_mod.py").write_text((r / "tests" / "test_mod.py").read_text() +
+                                                     "\n    def test_two(self):\n        self.assertEqual(mod.value(), 2)\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in data["tests"]],
+                             [("tests.test_mod.ModTests.test_two", "1/1", "failed")])
+            self.assertNotIn("built_installs", data)
+
+    # A built copy whose package the checkout keeps under another name (here pkg is built from src/pkg_impl): the copy
+    # has no folder to put first, so prove cannot run the restored code. It says so, names the package, and says how
+    # to make it provable, instead of only calling the test one that does not test the change.
+    def test_a_built_install_the_copy_cannot_replace_is_named_with_the_fix(self):
+        with Env() as e:
+            r = e.repo({"pyproject.toml": '[project]\nname = "pkg"\nversion = "0"\n',
+                        "src/pkg_impl/__init__.py": "", "src/pkg_impl/mod.py": "def value():\n    return 1\n",
+                        "tests/__init__.py": "",
+                        "tests/test_mod.py": "import unittest\n\nfrom pkg import mod\n\n\nclass ModTests(unittest.TestCase):\n"
+                                             "    def test_one(self):\n        self.assertEqual(mod.value() % 1, 0)\n",
+                        ".gitignore": "__pycache__/\n.venv/\n"})
+            changed = "def value():\n    return 2\n"
+            built_install(r, {"pkg/__init__.py": "", "pkg/mod.py": changed})
+            (r / "src" / "pkg_impl" / "mod.py").write_text(changed)
+            (r / "tests" / "test_mod.py").write_text((r / "tests" / "test_mod.py").read_text() +
+                                                     "\n    def test_two(self):\n        self.assertEqual(mod.value(), 2)\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(json.loads(out)["built_installs"], [{"package": "pkg", "environment": ".venv"}])
+            rc, out, err = dev(r, "prove", "--runs", "1")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("built copy of pkg", out)
+            self.assertIn("editable", out)
 
     # a branch cut from a release branch that main does not have yet: its change is what it adds to the release
     # branch, so the release's own tests are not its tests and the release's code stays in the copy without the change
@@ -3434,6 +4034,21 @@ class WiringTests(unittest.TestCase):
         from devkit import cli
         a = cli.build_parser().parse_args(["test", "prove", "--runs", "3"])
         self.assertEqual((a.fn, a.test_cmd, a.runs), (testx.cmd_test, "prove", 3))
+
+    # an option of `dev test` written before the subcommand is kept, not reset by the subcommand's own default; the
+    # same option written after the subcommand still wins
+    def test_options_before_the_subcommand_are_kept(self):
+        from devkit import cli
+        parse = cli.build_parser().parse_args
+        for sub in ("prove", "plan", "run"):
+            with self.subTest(sub=sub):
+                a = parse(["test", "--since", "v1", "--runner", "pytest", "--json", sub])
+                self.assertEqual((a.test_cmd, a.since, a.runner, a.json), (sub, "v1", "pytest", True))
+                self.assertEqual(parse(["test", "--since", "v1", sub, "--since", "v2"]).since, "v2")
+        a = parse(["test", "--failed", "-v", "run"])
+        self.assertEqual((a.failed, a.verbose), (True, True))
+        a = parse(["test", "prove"])
+        self.assertEqual((a.since, a.runner, a.json, a.runs), (None, None, False, testx.RUNS))
 
     def test_dev_test_is_not_audited_as_a_change(self):
         from devkit import audit

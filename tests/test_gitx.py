@@ -20,6 +20,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, cistatus, core, delivery, gitrules, gitx, registry, ui, work  # noqa: E402
 
 GITHUB_URL = "https://github.com/acme/widget.git"
@@ -1266,6 +1271,152 @@ class RunnerSetupInsideACheckTests(unittest.TestCase):
                 self.assertRegex(got[name]["skip"] or "", r"^runner prep \(sudo (tee|dd) ")
                 self.assertFalse(got[name]["blocking"])
 
+    # Any sudo command a check pipes into cannot run here, not only a write: `pytest | sudo cat` was skipped as the
+    # runner's setup, which recorded evidence for tests that never ran. The same sudo commands with no check beside
+    # them, or fed only by a download, stay the runner's setup.
+    def test_a_check_piped_into_any_sudo_command_blocks_the_evidence(self):
+        with Sandbox() as s:
+            got = self.plan_steps(s, {"Root cat": "pytest | sudo cat",
+                                      "Root cat to log": "pytest 2>&1 | sudo cat > /tmp/pytest.log",
+                                      "Root echo": "npm test | sudo echo done",
+                                      "Root chmod": "pytest --junitxml=r.xml | sudo chmod 644 r.xml",
+                                      "Service": "sudo systemctl start postgresql",
+                                      "Apt key": "curl -fsSL https://example.test/key.asc | sudo apt-key add -",
+                                      "Packages": "yes | sudo apt-get install -y jq"})
+        for name, program in (("Root cat", "cat"), ("Root cat to log", "cat"), ("Root echo", "echo"),
+                              ("Root chmod", "chmod")):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", rf"^runs {program} as root \(sudo\)")
+        for name in ("Service", "Apt key", "Packages"):
+            with self.subTest(step=name):
+                self.assertRegex(got[name]["skip"] or "", r"^runner prep \(")
+                self.assertFalse(got[name]["blocking"])
+
+    # A redirect or tee target named by a variable the step set before is the file the variable holds: `LOG=~/.bashrc;
+    # pytest > $LOG` overwrote the developer's shell settings, as `pytest > ~/.bashrc` would. A variable holding a
+    # log in the checkout, or a command's output (unknown here), still runs as written.
+    def test_a_check_written_through_a_variable_into_a_home_dotfile_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Variable": "LOG=~/.bashrc; pytest > $LOG",
+                                      "Exported": 'export LOG="$HOME/.npmrc" && npm test | tee -a "$LOG"',
+                                      "Braced": "OUT=~/.config/tool\npytest > ${OUT}/log.txt 2>&1",
+                                      "Declared": "declare -x LOG=~/.zshrc; pytest 2> $LOG",
+                                      "Checkout": "LOG=pytest.log; pytest > $LOG",
+                                      "Reassigned": "LOG=~/.bashrc; LOG=pytest.log; pytest > $LOG",
+                                      "Output": 'LOG=$(mktemp); pytest > "$LOG"'})
+        for name in ("Variable", "Exported", "Braced", "Declared"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"into a dotfile of the home folder next to a check")
+        for name in ("Checkout", "Reassigned", "Output"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
+    # A redirect or tee target this Mac cannot tell (a command's output, a folder `cd` went to that it cannot follow)
+    # may be any file, ~/.bashrc as well: next to a check it blocks the evidence and says why. A fresh file mktemp
+    # makes lies in a temporary folder, so a log written there still runs as written.
+    def test_a_check_written_to_a_target_this_mac_cannot_tell_blocks_the_evidence(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Assigned": "LOG=$(echo ~/.bashrc); pytest > $LOG",
+                                      "Substituted": 'pytest > "$(echo ~/.bashrc)"',
+                                      "Tee": 'npm test | tee -a "$(dirname ~/.zshrc)/.zshrc"',
+                                      "Unfollowed": 'cd "$(git rev-parse --show-toplevel)/.." && pytest > log.txt',
+                                      "Temp": 'LOG=$(mktemp); pytest > "$LOG"',
+                                      "Temp tee": "LOG=`mktemp -t pytest`; pytest | tee $LOG"})
+        for name in ("Assigned", "Substituted", "Tee", "Unfollowed"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"a path this Mac cannot tell next to a check")
+        for name in ("Temp", "Temp tee"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
+    # A fresh mktemp path counted for its variable after every other assignment of the same command, so
+    # `LOG=$(mktemp) LOG=$(echo ~/.bashrc)` left LOG in the temporary folder and `pytest > "$LOG"` ran into the
+    # developer's shell settings. The words decide in their order, and a mktemp inside a subshell stays there.
+    def test_the_last_assignment_of_a_variable_names_the_file_its_log_goes_to(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Reassigned": 'LOG=$(mktemp) LOG=$(echo ~/.bashrc)\npytest > "$LOG"',
+                                      "Exported": 'export LOG=$(mktemp) LOG=$(echo ~/.bashrc)\npytest > "$LOG"',
+                                      "Subshell": 'LOG=$(echo ~/.bashrc)\n(LOG=$(mktemp))\npytest > "$LOG"',
+                                      "Temp last": 'LOG=$(echo ~/.bashrc) LOG=$(mktemp)\npytest > "$LOG"',
+                                      "Quoted": 'export LOG="$(mktemp -d)" OUT=1\npytest > "$LOG/out.log"'})
+        for name in ("Reassigned", "Exported", "Subshell"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"writes \$LOG, a path this Mac cannot tell next to a check")
+        for name in ("Temp last", "Quoted"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+
+    # `${VAR:-word}` and `${VAR-word}` read as unknown, so `pytest > "${TMPDIR:-/tmp}/pytest.log"` blocked the
+    # evidence. They name the variable's value, or the word when it is unset (or empty, with the colon), as the
+    # shell expands them; a default this Mac cannot tell still blocks.
+    def test_a_default_value_names_the_file_a_log_goes_to(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root), "TMPDIR": tempfile.gettempdir()}):
+            os.environ.pop("NO_LOG_DIR", None)
+            got = self.plan_steps(s, {"Temp": 'pytest > "${TMPDIR:-/tmp}/pytest.log"',
+                                      "Unset": 'pytest > "${NO_LOG_DIR:-/tmp}/pytest.log"',
+                                      "Set": 'OUT=reports\npytest > "${OUT:-$HOME}/.bashrc"',
+                                      "Empty, no colon": 'OUT=\npytest > "${OUT-$HOME/.bashrc}"',
+                                      "Home": 'pytest > "${NO_LOG_DIR:-$HOME}/.bashrc"',
+                                      "Home, no colon": 'pytest | tee "${NO_LOG_DIR-~/.zshrc}"',
+                                      "Empty, colon": 'OUT=\npytest > "${OUT:-$HOME/.bashrc}"',
+                                      "Nested": 'pytest > "${NO_LOG_DIR:-${NO_LOG_DIR-$HOME}/.npmrc}"',
+                                      "Unknown": 'pytest > "${NO_LOG_DIR:-$(echo ~)}/.bashrc"'})
+        for name in ("Temp", "Unset", "Set", "Empty, no colon"):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+        for name in ("Home", "Home, no colon", "Empty, colon", "Nested"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"into a dotfile of the home folder next to a check")
+        self.assertTrue(got["Unknown"]["blocking"], got["Unknown"]["skip"])
+        self.assertRegex(got["Unknown"]["skip"] or "", r"a path this Mac cannot tell next to a check")
+
+    # A variable set by read, mapfile, for or printf -v read as empty, so `read LOG <<< "$HOME/.bashrc"; pytest >
+    # "$LOG"` wrote the log into the checkout as far as devkit could tell, and ran. Its value is not known here.
+    def test_a_variable_set_by_read_for_or_printf_is_a_path_this_mac_cannot_tell(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Read": 'read LOG <<< "$HOME/.bashrc"\npytest > "$LOG"',
+                                      "Read after mktemp": 'LOG=$(mktemp)\nread -r LOG <<< "$HOME/.bashrc"\n'
+                                                           'pytest > "$LOG"',
+                                      "Mapfile": 'mapfile -t LOG < paths.txt\npytest | tee "$LOG"',
+                                      "For": 'for LOG in $(echo ~/.bashrc); do :; done\npytest > "$LOG"',
+                                      "Printf": 'LOG=$(mktemp)\nprintf -v LOG %s ~/.bashrc\npytest > "$LOG"',
+                                      "Printf glued": 'printf -vLOG %s ~/.bashrc\npytest > "$LOG"'})
+        for name in got:
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"writes \$LOG, a path this Mac cannot tell next to a check")
+
+    # cp, mv, dd, ln, install, rsync, mkdir and touch to a target this Mac cannot tell ran as written: only tee and
+    # the shell's redirects were checked. Next to a check such a write blocks the evidence; alone it is left out.
+    def test_every_writing_command_to_a_target_this_mac_cannot_tell_is_held(self):
+        with Sandbox() as s, mock.patch.dict(os.environ, {"HOME": str(s.root)}):
+            got = self.plan_steps(s, {"Copy": 'pytest\ncp out.log "$(echo ~/.bashrc)"',
+                                      "Move": 'pytest && mv out.log "$(echo ~)/.zshrc"',
+                                      "Disk dump": 'pytest; dd if=out.log of="$(echo ~/.bashrc)"',
+                                      "Folder": 'mkdir -p "$(echo ~/.config)/tool"',
+                                      "Copied by the check": 'pytest | cp /dev/stdin "$(echo ~/.bashrc)"',
+                                      "Linked by the check": 'pytest | ln -sf out.log "$(echo ~/.bashrc)"',
+                                      "Into the checkout": 'pytest > out.log\ncp out.log reports/'})
+        for name, written in (("Copy", "cp out.log"), ("Move", "mv out.log"), ("Disk dump", "dd if=out.log")):
+            with self.subTest(step=name):
+                self.assertEqual((got[name]["skip"], got[name]["blocking"]), (None, False))
+                self.assertNotIn(written, got[name]["run"])
+                self.assertIn("pytest", got[name]["run"])
+                self.assertTrue(any(d.startswith(written) for d in got[name]["dropped"]), got[name]["dropped"])
+        self.assertRegex(got["Folder"]["skip"] or "", r"^runner prep \(writes .*, a path this Mac cannot tell\)")
+        self.assertFalse(got["Folder"]["blocking"])
+        for name in ("Copied by the check", "Linked by the check"):
+            with self.subTest(step=name):
+                self.assertTrue(got[name]["blocking"], got[name]["skip"])
+                self.assertRegex(got[name]["skip"] or "", r"a path this Mac cannot tell next to a check")
+        self.assertEqual((got["Into the checkout"]["skip"], got["Into the checkout"]["blocking"],
+                          got["Into the checkout"]["dropped"]), (None, False, []))
+
     def fake_tools(self, d: Path) -> Path:
         """A bin folder with a `brew` that leaves a marker when it runs and a `fakescan` that records its arguments
         and exits with the code in fakescan.rc."""
@@ -2421,6 +2572,65 @@ class ReleaseTests(unittest.TestCase):
             s.branch("feat/x")
             self.assertIn("releases are cut from `main`", dev("release")[2])
 
+    def test_release_tags_the_version_in_the_projects_tag_format_and_its_release_workflow_runs_on_it(self):
+        # dev release tagged v<version> whatever the format, so a repository whose tags have no v never started the
+        # release workflow dev ci init generates for it, which runs on <version> tags only
+        from devkit import pipelines
+        cases = (("a policy without the v", {"versioning": "calver", "tag_format": "YY.MM.PATCH"}, (), "26.11.4"),
+                 ("a policy with the v", {"versioning": "calver", "tag_format": "vYY.MM.PATCH"}, (), "v26.11.4"),
+                 ("nothing recorded or tagged", None, (), "v26.11.4"),
+                 ("no policy, tags without the v", None, ("26.11.3",), "26.11.4"))
+        for name, policy, tags, want in cases:
+            other = want[1:] if want.startswith("v") else "v" + want
+            with self.subTest(name), Sandbox() as s:
+                if policy:
+                    f = delivery.POLICIES / "acme" / "widget.json"
+                    f.parent.mkdir(parents=True)
+                    f.write_text(json.dumps(policy))
+                for t in tags:
+                    git(s.repo, "tag", t)
+                git(s.repo, "push", "-q", "origin", "--tags")
+                dev("ci", "--mark-passed")
+                s.gh.on(["run", "list"], [])
+                s.gh.on(["release", "create"], f"https://github.com/acme/widget/releases/tag/{want}\n")
+                rc, out, err = dev("release", "--version", "26.11.4")
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(s.head(f"{want}^{{commit}}", repo=s.origin), s.head())
+                self.assertEqual(gitx._ref_sha(s.origin, f"refs/tags/{other}"), "")
+                call = s.gh.called("release", "create")[0]
+                self.assertEqual((call[call.index("create") + 1], call[call.index("--title") + 1]), (want, want))
+                self.assertIn(f"released {want} ·", out)
+                workflow = pipelines.generate(s.repo, "github", policy=policy)[0][".github/workflows/release.yml"]
+                globs = pipelines.load_yaml(workflow)["on"]["push"]["tags"]
+                self.assertTrue(any(pipelines.gh_glob(g, want) for g in globs), globs)
+                self.assertFalse(any(pipelines.gh_glob(g, other) for g in globs), globs)
+                rc, _, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 2, err)
+                self.assertIn(f"tag {want} already exists", err)
+
+    def test_a_recorded_tag_format_decides_the_tag_over_the_tags_spelling_and_refuses_the_other_spelling(self):
+        # the policy and the repository's tags disagree: the policy names the new tag, and a version the repository
+        # already shipped in the other spelling is still refused, so it cannot ship twice
+        for fmt, shipped, want, other in (("YY.MM.PATCH", "v26.11.3", "26.11.4", "v26.11.4"),
+                                          ("vYY.MM.PATCH", "26.11.3", "v26.11.4", "26.11.4")):
+            with self.subTest(fmt), Sandbox() as s:
+                f = delivery.POLICIES / "acme" / "widget.json"
+                f.parent.mkdir(parents=True)
+                f.write_text(json.dumps({"versioning": "calver", "tag_format": fmt}))
+                git(s.repo, "tag", shipped)
+                git(s.repo, "push", "-q", "origin", "--tags")
+                dev("ci", "--mark-passed")
+                s.gh.on(["run", "list"], [])
+                rc, out, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 0, out + err)
+                self.assertIn(f"dry run: release {want} (calver)", out)
+                git(s.repo, "tag", other)
+                git(s.repo, "push", "-q", "origin", f"refs/tags/{other}")
+                git(s.repo, "tag", "-d", other)  # shipped from another clone: only origin has it
+                rc, out, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(f"tag {other} already exists", err)
+
     def test_the_recorded_delivery_policy_wins(self):
         with Sandbox() as s:
             dev("ci", "--mark-passed")
@@ -2994,6 +3204,22 @@ class GitPushFlagTests(unittest.TestCase):
                     rc, err = self.push(s, *args)
                     self.assertEqual(rc, 2)
                     self.assertIn("`release-1` is not a SemVer tag", err)
+
+    def test_a_policy_without_a_tag_format_names_the_fix_in_the_spelling_of_the_repositorys_tags(self):
+        # the refusal told a repository whose tags have no v to use vMAJOR.MINOR.PATCH, a tag dev release never makes
+        with Sandbox() as s:
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver"}))
+            git(s.repo, "tag", "1.0.0")
+            git(s.repo, "tag", "release-1")
+            rc, err = self.push(s, "origin", "release-1")
+            self.assertEqual(rc, 2)
+            self.assertIn("`release-1` is not a SemVer tag (MAJOR.MINOR.PATCH). Use MAJOR.MINOR.PATCH,", err)
+            dev("ci", "--mark-passed")
+            rc, _, err = dev("gh", "release", "create", "release-1", "--notes", "x")
+            self.assertEqual(rc, 2)
+            self.assertIn("Use MAJOR.MINOR.PATCH,", err)
 
     def test_follow_tags_follows_the_recorded_tag_format(self):
         # --follow-tags sends the branch and the local tags the remote lacks along with it

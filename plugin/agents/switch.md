@@ -26,14 +26,14 @@ Not yours: web front ends (Trinity). Say so in your report and leave it to the t
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-`root-cause`, `frontend-design`, `superpowers:test-driven-development`, `impeccable`, `testing`, `superpowers:verification-before-completion`, `communicating`
+`root-cause`, `frontend-design`, `superpowers:test-driven-development`, `impeccable`, `mobile`, `swiftui-pro`, `android-permissions-security`, `jetpack-compose-performance`, `testing`, `superpowers:verification-before-completion`, `communicating`
 
 ## Your procedure
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Design in hand.** Start from the design of the UX designer (Sati) and the platform's guidelines. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, which runs the engine devkit installed and checked, never by the launcher's path. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks. skills: `root-cause`, `frontend-design`, `impeccable` · devkit: `dev crew ask` · gate: every state is designed
-2. **Build.** Build with the project's framework and patterns; behavior tests first. skills: `superpowers:test-driven-development`, `impeccable` · devkit: `dev test` · gate: the tests cover the changed flows · proof: `dev test`
+2. **Build.** Build with the project's framework and patterns; behavior tests first. Load `mobile` for the platform checklists; SwiftUI code also needs `swiftui-pro`, and an Android manifest `android-permissions-security`. skills: `superpowers:test-driven-development`, `impeccable`, `mobile` · devkit: `dev test` · gate: the tests cover the changed flows · proof: `dev test`
 3. **Devices.** Test on the smallest and largest supported devices: permissions, offline and slow networks. skills: `testing` · devkit: `dev test` · gate: the flows pass on both sizes
 4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test prove`
 5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`

@@ -23,7 +23,7 @@ the Code tab.
 | | Claude Code in Terminal and IDEs | Claude Desktop's Code tab | Codex CLI | Codex in the ChatGPT app | Claude Desktop chat and Cowork |
 | --- | --- | --- | --- | --- | --- |
 | Reads its setup from | `~/.claude` | `~/.claude` (Local sessions only) | `~/.codex`, `~/.agents/skills` | `~/.codex` | The devkit extension |
-| Hooks | All thirteen events | All thirteen events | Ten events, after Codex trusts them | The same ten events | None |
+| Hooks | All fourteen events | All fourteen events | Ten events, after Codex trusts them | The same ten events | None |
 | Runs devkit from | The pinned copy that `dev install` made | The pinned copy | The pinned copy | The pinned copy | The pinned copy, through the extension's launcher |
 | Pre-tool hook | Records each call, routes crew calls, and adds advice; refuses nothing | The same | The same, for shell commands and `apply_patch` | The same | No pre-tool hook; its two task tools run `dev task`, which checks and audits each change as in a terminal |
 | Crew | Launches members as `devkit:<id>` agents; advises when a launch is past the limits | The same | Records role launches at SubagentStart, binds steps, and counts slots. An over-limit launch is marked after it starts; the host supplies no pre-launch hook | The same; registration and step binding observed live | Shows the crew, who works now, and decisions waiting (`devkit_crew`); launches no one |
@@ -37,10 +37,10 @@ the Code tab.
 | Writes code | Yes | Yes | Yes | Yes | No |
 | Verified in real sessions | Terminal: yes. IDEs: none recorded yet | Yes | Partly, with Codex CLI 0.167.0 (see below) | Partly, on November 10, 2026; gaps and evidence below | The tools have tests; `dev desktop status` checks the install |
 
-The thirteen hook events of Claude Code are SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
-PostToolUseFailure, SubagentStart, SubagentStop, Stop, SessionEnd, ConfigChange, InstructionsLoaded, PreCompact, and
-PostCompact. Codex has no PostToolUseFailure, ConfigChange, or InstructionsLoaded event. [Agents › Hooks](agents.md#hooks) says what each one
-does.
+The fourteen hook events of Claude Code are SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
+PostToolUseFailure, PermissionDenied, SubagentStart, SubagentStop, Stop, SessionEnd, ConfigChange, InstructionsLoaded,
+PreCompact, and PostCompact. Codex has no PostToolUseFailure, PermissionDenied, ConfigChange, or InstructionsLoaded
+event. [Agents › Hooks](agents.md#hooks) says what each one does.
 
 ### What was verified on Codex
 

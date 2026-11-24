@@ -24,6 +24,11 @@ from test_peers import CLAUDE_A, CLAUDE_B, CODEX_A, PeerCase, sender  # noqa: E4
 from test_hooks_wiring import WiringCase  # noqa: E402
 from test_progress import boundary, launch  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import bugs, canary, core, crew, hooks, identity, lessons, peers, work  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 

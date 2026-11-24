@@ -675,8 +675,8 @@ class Server:
             if not line:
                 continue
             try:
-                msg = json.loads(line.decode("utf-8") if isinstance(line, bytes) else line)
-            except ValueError:
+                msg = core.load_json(line.decode("utf-8") if isinstance(line, bytes) else line)
+            except ValueError:  # not JSON, or nested deeper than devkit reads: one parse error, and on to the next
                 self.send(_error(None, PARSE_ERROR, "Parse error: each line must be one JSON-RPC message"))
                 continue
             if isinstance(msg, list):  # a JSON-RPC batch (protocol 2025-03-26): answered together, in order

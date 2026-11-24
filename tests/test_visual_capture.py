@@ -17,11 +17,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,6 +34,9 @@ import _hermetic  # noqa: E402
 
 _hermetic.activate()
 import _sandbox  # noqa: E402  (the net against this Mac's real codex, claude, brew and gh)
+
+sys.path.insert(0, str(ROOT / "lib"))
+from devkit.visual import noderun  # noqa: E402
 
 MODULE = ROOT / "lib" / "devkit" / "visual" / "capture.cjs"
 FIXTURES = ROOT / "tests" / "fixtures" / "visual" / "capture"
@@ -528,7 +533,8 @@ class CommandLine(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0, p.stdout)
         self.assertEqual(p.stdout, "")
         self.assertEqual(self.run_.stored(), [])
-        self.assertEqual(list(self.run_.tmp.iterdir()), [], "the capture's folder is left behind")
+        self.assertEqual([p.name for p in self.run_.tmp.iterdir() if p.name.startswith("devkit-capture-")], [],
+                         "the capture's folder is left behind")
 
     def test_vd_ac_3_the_same_recipe_twice_gives_the_same_picture(self):
         request = self.run_.request(f"{self.server.base}/page.html")
@@ -740,7 +746,8 @@ class CommandLine(unittest.TestCase):
         self.assertIn("Nothing was recorded", out["message"])
         self.assertLess(out["seconds"], 9)
         self.assertEqual(self.run_.stored(), [])
-        self.assertEqual(list(self.run_.tmp.iterdir()), [], "the capture's folder is left behind")
+        self.assertEqual([p.name for p in self.run_.tmp.iterdir() if p.name.startswith("devkit-capture-")], [],
+                         "the capture's folder is left behind")
 
     def test_vd_ac_75_the_bounds_are_90_s_a_capture_and_16384_css_px_of_height(self):
         self.assertEqual(self.run_.harness({"mode": "bounds"}), {"captureSeconds": 90, "pageHeight": 16384})
@@ -856,6 +863,252 @@ class TextChangesAfterTheScreenshot(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         record = json.loads(p.stdout)
         self.assertEqual((record["redaction"]["text_changed"], record["redaction"]["retried"]), (True, False))
+
+
+# Runs capture.run with the capture bound lowered and the browser's start held back, then prints, when node exits, how
+# the capture ended and whether the held-back browser did start: "late" holds the real start until after the bound and
+# then starts with a timeout of its own (the one capture.cjs gives it, computed before the hold, is spent by then);
+# "hung" never starts, and fails the way Playwright's launch does when its `timeout` runs out (180 s when none is
+# given), so a pending start keeps node alive as a real one does.
+START_DRIVER = r"""
+const fs = require('fs');
+const [module, input] = [process.argv[1], JSON.parse(fs.readFileSync(0, 'utf8'))];
+const capture = require(module);
+const { chromium } = require(input.core);
+capture.BOUNDS.captureSeconds = input.bound;
+const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+const out = { started: false };
+const launch = input.start === 'late'
+  ? async (options) => {
+    await wait(input.hold_ms);
+    const browser = await chromium.launch({ ...options, timeout: 60000 });
+    out.started = true;
+    return browser;
+  }
+  : (options) => new Promise((_, fail) => setTimeout(() => fail(Object.assign(
+    new Error(`browserType.launch: Timeout ${options.timeout || 180000}ms exceeded.`), { name: 'TimeoutError' })),
+  options.timeout || 180000));
+capture.run(input.request, { chromium: { launch } }).then(
+  () => { Object.assign(out, { ok: true }); },
+  (e) => { Object.assign(out, { ok: false, code: e.code, step: e.step }); });
+// the capture fails at its bound, before a late browser has started: node ends once that browser is closed
+process.on('exit', () => { fs.writeSync(1, JSON.stringify(out)); });
+"""
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class TheBoundCoversTheBrowsersStart(unittest.TestCase):
+    # The capture bound ends the capture process, even when the bound runs out before the browser has started: a start
+    # that hangs (a Chrome that never answers on a loaded Mac) and a start that ends after the bound both end there.
+    HANG_GUARD = 60  # s: the process ends a second after its 1 s bound; a start the bound does not end runs 180 s
+
+    def setUp(self):
+        self.run_ = _Run()
+        self.addCleanup(self.run_.close)
+        self.server = _Server().__enter__()
+        self.addCleanup(self.server.__exit__)
+
+    def start(self, how, **extra):
+        payload = {"request": self.run_.request(f"{self.server.base}/page.html"), "core": PLAYWRIGHT["core"],
+                   "bound": 1, "start": how, **extra}
+        proc = subprocess.Popen([NODE, "-e", START_DRIVER, str(MODULE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=self.run_.env(), cwd=str(self.run_.work),
+                                start_new_session=True)
+        try:
+            out, err = proc.communicate(json.dumps(payload), timeout=self.HANG_GUARD)
+        except subprocess.TimeoutExpired:
+            # node's group, and the browser's own group, which names its profile in the run's TMPDIR
+            noderun.stop(proc, str(self.run_.tmp))
+            out, err = proc.communicate()
+            out = None
+        if out is None:
+            self.fail(f"the capture process still ran {self.HANG_GUARD} s after its 1 s bound")
+        self.assertEqual(proc.returncode, 0, err[-2000:])
+        return json.loads(out)
+
+    def test_a_start_that_hangs_ends_with_the_bound_and_writes_nothing(self):
+        out = self.start("hung")
+        self.assertEqual((out["ok"], out["code"], out["step"]), (False, "time-bound", 1))
+        self.assertEqual(self.run_.stored(), [])
+
+    def test_a_browser_that_starts_after_the_bound_is_closed_before_it_loads_the_page(self):
+        out = self.start("late", hold_ms=3000)
+        self.assertEqual((out["ok"], out["code"], out["step"], out["started"]), (False, "time-bound", 1, True))
+        self.assertEqual(self.server.httpd.hits, [], "the capture went on after its bound and loaded the page")
+        self.assertEqual(self.run_.stored(), [])
+
+
+# Runs capture.run with the capture bound lowered, a step that outlasts it, and a browser slow to exit: the first call
+# to its close ends `exit_ms` after Playwright's own, the way a browser that disconnected keeps writing its profile
+# for a moment, or never ends (`exit_ms` null: a browser that does not answer). Prints, when node exits, how the
+# capture ended, how often the browser was closed, whether the capture killed a process group or looked for the
+# processes that name its folder (a listing that throws with `ps_fails`), and, when the capture's folder was removed,
+# whether that first close had ended and how many processes still named the folder.
+CLOSE_DRIVER = r"""
+const fs = require('fs');
+const path = require('path');
+const childProcess = require('child_process');
+const [module, input] = [process.argv[1], JSON.parse(fs.readFileSync(0, 'utf8'))];
+const execFileSync = childProcess.execFileSync;
+childProcess.execFileSync = (file, args, options) => {
+  if (file === 'ps' && String(args).includes('pgid=')) {
+    out.looked = true;
+    if (input.ps_fails) throw new Error('ps: operation not permitted');
+  }
+  return execFileSync(file, args, options);
+};
+const capture = require(module);
+const { chromium } = require(input.core);
+capture.BOUNDS.captureSeconds = input.bound;
+const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+const out = { closes: 0, exited: false, killed: false, looked: false, removed: null };
+const kill = process.kill;
+process.kill = (pid, sig) => {
+  if (pid < 0) out.killed = true;
+  return kill.call(process, pid, sig);
+};
+const launch = async (options) => {
+  const browser = await chromium.launch(options);
+  const close = browser.close.bind(browser);
+  browser.close = async () => {
+    out.closes += 1;
+    if (out.closes > 1) return close();
+    if (input.exit_ms === null) return new Promise(() => {});
+    await close();
+    await wait(input.exit_ms);
+    out.exited = true;
+  };
+  return browser;
+};
+const rmSync = fs.rmSync;
+fs.rmSync = (target, options) => {
+  if (path.basename(String(target)).startsWith('devkit-capture-')) {
+    const ps = require('child_process').execFileSync('ps', ['-A', '-ww', '-o', 'command='], { encoding: 'utf8' });
+    out.removed = { exited: out.exited, browsers: ps.split('\n').filter((line) => line.includes(target)).length };
+  }
+  return rmSync(target, options);
+};
+capture.run(input.request, { chromium: { launch } }).then(
+  () => { out.code = null; }, (e) => { out.code = e.code; })
+  // a browser the capture could not stop keeps node's connection to it open
+  .then(() => { if (input.ps_fails) process.exit(0); });
+process.on('exit', () => { fs.writeSync(1, JSON.stringify(out)); });
+"""
+
+# A detector that never answers, started the way dev impeccable starts its engine: a wrapper process that runs the
+# engine as its own child, which shares the wrapper's stdout, and waits for it. Each writes its pid into the file
+# named by its first argument (the wrapper's line first, the engine's second), and the engine waits two minutes.
+HUNG_ENGINE = ("require('fs').appendFileSync(process.argv[1], String(process.pid) + '\\n'); "
+               "setTimeout(() => {}, 120000);")
+HUNG_DETECTOR = ("const fs = require('fs'); fs.appendFileSync(process.argv[1], String(process.pid) + '\\n'); "
+                 "require('child_process').spawn(process.execPath, ['-e', " + json.dumps(HUNG_ENGINE) + ", "
+                 "process.argv[1]], { stdio: ['ignore', 'inherit', 'ignore'] }).on('exit', () => process.exit(1));")
+
+
+@unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
+class TheBoundEndsWhatTheCaptureStarted(unittest.TestCase):
+    # At the bound the capture stops the browser and the detector, and removes its folder only once the browser has
+    # exited, so nothing the capture started outlives it.
+    def setUp(self):
+        self.run_ = _Run()
+        self.addCleanup(self.run_.close)
+        self.server = _Server().__enter__()
+        self.addCleanup(self.server.__exit__)
+
+    def close_at_the_bound(self, exit_ms, **extra):
+        payload = {"request": self.run_.request(f"{self.server.base}/page.html", recipe=recipe(steps=["wait 10000"])),
+                   "core": PLAYWRIGHT["core"], "bound": 3, "exit_ms": exit_ms, **extra}
+        p = noderun.run([NODE, "-e", CLOSE_DRIVER, str(MODULE)], json.dumps(payload), timeout=90,
+                        env=self.run_.env(), tmpdir=str(self.run_.tmp), cwd=str(self.run_.work))
+        self.stderr = p.stderr
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        out = json.loads(p.stdout)
+        self.assertEqual(out["code"], "time-bound", out)
+        self.assertEqual([p.name for p in self.run_.tmp.iterdir() if p.name.startswith("devkit-capture-")], [],
+                         "the capture's folder is left behind")
+        return out
+
+    def test_the_capture_removes_its_folder_after_the_browser_closed_at_the_bound_has_exited(self):
+        # the browser exits 2 s after Playwright's close; on a loaded Mac that can pass the wait for it, and then the
+        # capture stops what still names its folder: either way no browser process is left to write in the folder
+        # when it is removed. The delay is not a process of its own, so once Chromium's processes ended there is
+        # nothing left to kill, and the capture only looks for them.
+        out = self.close_at_the_bound(2000)
+        self.assertEqual(out["closes"], 1, out)
+        self.assertEqual(out["removed"]["browsers"], 0, out)
+        self.assertTrue(out["removed"]["exited"] or out["looked"],
+                        f"the folder was removed while the browser ran, unchecked: {out}")
+
+    def test_a_browser_that_does_not_close_at_the_bound_is_stopped_before_its_folder_is_removed(self):
+        out = self.close_at_the_bound(None)
+        self.assertEqual((out["killed"], out["removed"]["browsers"]), (True, 0), out)
+        ps = subprocess.run(["ps", "-A", "-ww", "-o", "command="], capture_output=True, text=True, timeout=30).stdout
+        self.assertEqual([line for line in ps.splitlines() if str(self.run_.tmp) in line], [],
+                         "the browser outlived the capture")
+
+    def test_a_process_listing_that_fails_at_the_bound_is_reported_on_stderr(self):
+        # the browser does not close and ps cannot list the processes, so the capture can neither stop the browser nor
+        # wait for it: it says so, for the bound's kill and for the wait after it
+        self.addCleanup(self._kill_named, self.run_.tmp)
+        out = self.close_at_the_bound(None, ps_fails=True)
+        self.assertTrue(out["looked"], out)
+        self.assertIn("capture: ps could not list the processes (ps: operation not permitted), so a browser still "
+                      f"running in {self.run_.tmp}", self.stderr)
+        self.assertIn("is neither stopped nor waited for", self.stderr)
+
+    @staticmethod
+    def _kill_named(folder):
+        # the browser this test left running, found by its profile in the run's folder
+        ps = subprocess.run(["ps", "-A", "-ww", "-o", "pgid=,command="], capture_output=True, text=True,
+                            timeout=30).stdout
+        for group in {int(line.split()[0]) for line in ps.splitlines() if str(folder) + "/" in line}:
+            if group > 1 and group != os.getpgrp():
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except OSError:
+                    pass
+
+    def test_a_detector_still_running_at_the_bound_is_stopped_with_its_engine_and_the_capture_process_ends(self):
+        # the bound leaves the capture time to reach its checks (step 8) on a loaded Mac; the detector it starts there
+        # never answers, and its engine, a child of its own, holds the detector's output open until it ends
+        pid_file = self.run_.top / "detector.pid"
+        self.addCleanup(self._kill, pid_file)
+        request = self.run_.request(f"{self.server.base}/page.html",
+                                    impeccable={"command": [NODE, "-e", HUNG_DETECTOR, str(pid_file)],
+                                                "version": "hung"})
+        payload = {"mode": "capture", "core": PLAYWRIGHT["core"], "request": request,
+                   "bounds": {"captureSeconds": 20}}
+        started = time.monotonic()
+        try:
+            p = noderun.run([NODE, str(HARNESS)], json.dumps(payload), timeout=60, env=self.run_.env(),
+                            tmpdir=str(self.run_.tmp), cwd=str(self.run_.work))
+        except subprocess.TimeoutExpired:
+            self.fail("the capture process waited for the detector's engine after its bound")
+        took = time.monotonic() - started
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        out = json.loads(p.stdout)
+        self.assertEqual((out["ok"], out["code"], out["step"]), (False, "time-bound", 8), out)
+        pids = self._pids(pid_file)
+        self.assertEqual(len(pids), 2, "the capture did not start the detector and its engine")
+        self.assertLess(took, 45, "the capture process waited for the detector after its bound")
+        for pid, who in zip(pids, ("detector", "engine")):
+            with self.assertRaises(ProcessLookupError, msg=f"the {who} outlived the capture"):
+                os.kill(pid, 0)
+
+    @staticmethod
+    def _pids(pid_file):
+        try:
+            return [int(line) for line in pid_file.read_text().split()]
+        except (OSError, ValueError):
+            return []
+
+    @classmethod
+    def _kill(cls, pid_file):
+        for pid in cls._pids(pid_file):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 @unittest.skipUnless(PLAYWRIGHT, NO_PLAYWRIGHT)
@@ -1101,6 +1354,92 @@ class LazyContent(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         shifts = [s for s in json.loads(p.stdout)["checks"]["signals"] if s["check"] == "layout-shift"]
         self.assertEqual([s["anchor"]["selector"] for s in shifts], ["#card"])
+
+
+@unittest.skipUnless(NODE, "node is not on PATH")
+class NpmRoot(unittest.TestCase):
+    # Without a core in the request, the driver finds the pinned Playwright in npm's global folder (`npm root -g`, as
+    # lib/devkit/visual/npmroot.cjs asks it).
+    # Under load npm can print nothing or fail, and that answer was read as a relative path and reported as "The
+    # pinned Playwright is not installed". A stand-in npm first on PATH answers from a plan, one line a call: `empty`
+    # prints nothing, `fail` exits 1, anything else is printed as the folder; it logs every call. The folder it names
+    # holds a playwright-core as dev install puts it under @playwright/cli
+    def setUp(self):
+        self.top = Path(tempfile.mkdtemp(prefix="visual-npm-root-test-"))
+        self.addCleanup(shutil.rmtree, self.top, True)
+        self.bin, self.tmp, self.store = (self.top / n for n in ("bin", "tmp", "store"))
+        for folder in (self.bin, self.tmp):
+            folder.mkdir()
+        self.plan, self.log = self.top / "plan", self.top / "calls"
+        npm = self.bin / "npm"
+        npm.write_text("#!/bin/sh\n"
+                       f"echo \"$*\" >> '{self.log}'\n"
+                       f"line=$(sed -n \"$(wc -l < '{self.log}' | tr -d ' ')p\" '{self.plan}')\n"
+                       'case "$line" in\n'
+                       "  empty) exit 0 ;;\n"
+                       '  fail) echo "npm error code EAGAIN" >&2; exit 1 ;;\n'
+                       '  *) echo "$line" ;;\n'
+                       "esac\n")
+        npm.chmod(0o755)
+        self.globals = self.top / "npm-globals"
+        cli = self.globals / "@playwright" / "cli"
+        self.core = cli / "node_modules" / "playwright-core"
+        self.core.mkdir(parents=True)
+        (cli / "package.json").write_text(json.dumps({"name": "@playwright/cli", "version": "0.9.0"}))
+        (self.core / "package.json").write_text(json.dumps({"name": "playwright-core", "version": "1.99.0"}))
+        (self.core / "browsers.json").write_text(json.dumps({"browsers": [{"name": "chromium", "revision": "1234"}]}))
+
+    def answers(self, *lines):
+        if self.log.exists():
+            self.log.unlink()
+        self.plan.write_text("".join(f"{line}\n" for line in lines))
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def env(self):
+        return _sandbox.env(stubs=[self.bin], TMPDIR=str(self.tmp))
+
+    def node(self, script):
+        # node -e with capture.cjs and axe.cjs as process.argv[1] and [2]
+        p = subprocess.run([NODE, "-e", script, str(MODULE), str(MODULE.parent / "axe.cjs")], capture_output=True,
+                           text=True, timeout=120, env=self.env(), cwd=str(self.top))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_an_npm_root_that_prints_nothing_or_fails_twice_is_named_and_never_read_as_a_missing_playwright(self):
+        request = {"id": "VC-test", "source": {"url": "http://127.0.0.1:9/page.html"}, "recipe": recipe(),
+                   "store": str(self.store), "check": False}
+        for answer, said in (("empty", "it printed nothing"), ("fail", "it failed with exit 1")):
+            with self.subTest(answer=answer):
+                self.answers(answer, answer)
+                p = subprocess.run([NODE, str(MODULE), "--json"], input=json.dumps(request), capture_output=True,
+                                   text=True, timeout=120, env=self.env(), cwd=str(self.top))
+                self.assertEqual((p.returncode, p.stdout), (1, ""), p.stderr)
+                self.assertEqual(p.stderr.strip(), f"✗ npm root -g gave no folder ({said}, twice), so devkit cannot find "
+                                                   "the pinned Playwright. Check that npm root -g prints a folder here, "
+                                                   "then capture again.")
+                self.assertEqual(self.calls(), ["root -g", "root -g"])
+                self.assertFalse(self.store.exists())
+
+    def test_a_folder_on_the_second_ask_finds_the_pinned_playwright(self):
+        for first in ("empty", "fail"):
+            with self.subTest(first=first):
+                self.answers(first, self.globals)
+                out = self.node("process.stdout.write(JSON.stringify(require(process.argv[1]).playwrightCore({})));")
+                self.assertEqual(out, {"path": str(self.core), "version": "1.99.0", "cli": "0.9.0", "revision": "1234"})
+                self.assertEqual(len(self.calls()), 2)
+
+    def test_a_good_answer_is_kept_for_the_process_and_axe_reads_the_same_folder(self):
+        # the folder holds no axe-core, so axe skips; a second ask would fail
+        self.answers(self.globals, "fail")
+        out = self.node("const [capture, axe] = [require(process.argv[1]), require(process.argv[2])];"
+                        "const paths = [capture.playwrightCore({}).path, capture.playwrightCore({}).path];"
+                        "const skipped = {};"
+                        "axe.run(null, {worlds: new Map(), skipped})"
+                        ".then(() => process.stdout.write(JSON.stringify({paths, skipped})));")
+        self.assertEqual(out, {"paths": [str(self.core)] * 2, "skipped": {"axe": "not installed"}})
+        self.assertEqual(self.calls(), ["root -g"])
 
 
 @unittest.skipUnless(NODE, "node is not on PATH")

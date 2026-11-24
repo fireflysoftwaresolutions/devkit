@@ -49,8 +49,10 @@ def last_assistant_text(transcript_path: str):
         return None
     for ln in reversed(lines):
         try:
-            e = json.loads(ln)
+            e = core.load_json(ln)
         except ValueError:
+            continue
+        if not isinstance(e, dict):
             continue
         if e.get("type") == "user" and not e.get("isMeta") and _is_human_turn(e):
             return None  # reached the user's prompt without finding assistant text
@@ -374,6 +376,69 @@ def language_gate(agent: str, data: dict, sess: dict) -> str:
     return why
 
 
+# The auto-mode You rule (a tech lead asked for a spec approval in five replies running in auto mode until the
+# developer objected): in auto, the crew takes the recommended option of each decision and records it, so the You
+# bullet holds only what the developer alone does on their machine or account, and a decision that approves a step,
+# which waits for the developer in either mode. The words of asking for a decision, in English and Spanish; a miss is
+# only reminded, so a bullet that uses one for an account action costs one line of the next prompt. A bullet that
+# names a decision (D2) or offers options ("A or B", "A o B") always asks for one. Approving is a decision unless what
+# the developer approves is a thing on their account or machine ("approve the OAuth app", "aprueba el acceso"), which
+# only they can do: one to three such words right after the verb or its article, after at most one capitalized name
+# ("the GitHub OAuth app"), ending the phrase. An account word that only describes the thing ("the login page
+# layout", "the token migration plan") leaves it a decision. The Spanish
+# "elegir" is spelled out by its forms, so "eligible" is not one.
+_ACCOUNT_WORD = (r"(?:oauth|apps?|application|aplicaci[oó]n|device|dispositivo|login|sign-?in|inicio de sesi[oó]n|"
+                 r"access|acceso|permissions?|permisos?|prompt|dialog|keychain|tokens?|scopes?|authori[sz]ation|"
+                 r"autorizaci[oó]n)\b")
+_PHRASE_END = (r"(?=\s*(?:$|[.,;:!?()\[\]\"'`—–]|(?:that|which|in|on|at|for|from|with|to|so|and|when|once|then|"
+               r"before|after|que|en|a|para|con|desde|y|cuando|antes|después)\b))")
+_ACCOUNT_THING = (r"\s+(?:(?:the|this|that|an?|your|its|la|el|esta|este|tu|su)\s+)?(?:(?-i:[A-Z][\w.-]*)\s+)?"
+                  + _ACCOUNT_WORD + r"(?:\s+" + _ACCOUNT_WORD + r"){0,2}" + _PHRASE_END)
+_ASKS_DECISION = re.compile(r"\b(?:(?:approv|aprob|aprueb)\w*\b(?!" + _ACCOUNT_THING + r")|"
+                            r"(?:sign[ -]?off|decid\w*|decisions?|choos\w*|choice|pick (?:one|an?|between)|"
+                            r"which option|go-?ahead|green light|your call|decisi[oó]n\w*|elecci[oó]n\w*|elij\w*|"
+                            r"elig(?:e|es|en|ió|iendo|ieron)|eleg(?:ir|id|ido|ida|idos|idas|imos)|escog\w*)\b)", re.I)
+# a decision's id or an offer of options, in capitals as devkit prints them, so "a or b" in a sentence is not one
+_NAMES_DECISION = re.compile(r"\bD\d+\b|\b[A-F]\s+(?:or|o)\s+[A-F]\b")
+
+
+def you_reason(you: str) -> str:
+    """What to do instead of a You bullet that asks the developer to approve or decide while the run follows auto."""
+    shown = you if len(you) <= 90 else you[:89].rstrip() + "…"
+    return (f"devkit: your status block's You bullet asks the developer to approve or decide (\"{shown}\") while the "
+            "work is in auto mode, where nothing waits for them: take the recommended option, record it with "
+            "`dev crew ask --decision \"…\" --options \"A: … | B: …\" --recommend A`, go on, and list it in the final "
+            "report so they can change it (`dev crew decide`). Keep in You only an action on their machine or "
+            "account, and a decision that approves a step.")
+
+
+def you_gate(agent: str, data: dict, sess: dict) -> str:
+    """Stop, main session: you_reason when the final message's You bullet asks for an approval or a decision, the
+    work follows auto mode (progress.mode_of: the run's explicit mode, else the configuration's), and no decision of
+    the run waits for the developer (progress.pending_decisions: one that approves a step waits in either mode). Once
+    per turn (`sess["you_told"]`), never on the reply to a send-back. A presentation rule: recorded and reminded at the
+    next prompt, never a send-back of its own. '' when nothing is wrong, with canary.enforce off, or on any error
+    (fails open)."""
+    if data.get("stop_hook_active") or sess.get("you_told", _UNTOLD) == sess.get("turn_started"):
+        return ""
+    if not (core.CFG.get("canary") or {}).get("enforce", True):
+        return ""
+    try:
+        text = data.get("last_assistant_message") or last_assistant_text(data.get("transcript_path")) or ""
+        you = (parse_status(text) or {}).get("you") or ""
+        if not (_NAMES_DECISION.search(you) or _ASKS_DECISION.search(you)):
+            return ""
+        from . import progress
+        run = progress.load_run(agent, data.get("session_id") or "")
+        if progress.mode_of(run) != "auto" or progress.pending_decisions(run):
+            return ""
+        why = you_reason(you)
+    except Exception:
+        return ""
+    sess["you_told"] = sess.get("turn_started")
+    return why
+
+
 STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I)
 
 
@@ -482,9 +547,9 @@ def surface(agent: str, data: dict = None) -> str:
     tp = (data or {}).get("transcript_path")
     try:
         with open(tp) as fh:
-            meta = (json.loads(fh.readline()).get("payload") or {})
+            meta = (core.load_json(fh.readline()).get("payload") or {})
         orig = meta.get("originator") or ""
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError, AttributeError):
         return "unknown"
     if orig in SURFACES:
         return SURFACES[orig]
@@ -648,10 +713,10 @@ def records(days: int = 7) -> list:
     out = []
     for ln in LOG.read_text().splitlines():
         try:
-            r = json.loads(ln)
+            r = core.load_json(ln)
         except ValueError:
             continue
-        if r.get("ts", 0) >= cutoff:
+        if isinstance(r, dict) and r.get("ts", 0) >= cutoff:
             out.append(r)
     return out
 

@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -70,6 +71,7 @@ os.environ["PATH"] = ":".join(dict.fromkeys((sandbox_path() or _EXTRA_PATH) + os
 from . import configschema
 from .configschema import (DEFAULTS, AUDIT_LEVELS, AUDIT_FLOOR_MIN, AUDIT_RULES, PROGRESS_RULES,
                            SLOT_KINDS, audit_config, progress_config)
+from .refusal import Busy, Refusal  # noqa: F401  (core.Refusal and core.Busy: what a command refuses, cli.main's seam)
 
 
 def config_errors(cfg: dict) -> list:
@@ -77,11 +79,219 @@ def config_errors(cfg: dict) -> list:
     return configschema.validate(cfg)
 
 
+# A key an error may name: one or more words of letters and underscores joined by dots, at most KEY_NAME_MAX
+# characters. A key with a digit, a dash or any other character, or a longer one, may be a token pasted as a key, and
+# every reader's error lands in terminals, session logs and screenshots shared with the team.
+KEY_WORD = re.compile(r"[A-Za-z_]+(?:\.[A-Za-z_]+)*")
+KEY_NAME_MAX = 24
+
+
+def short_key(key) -> bool:
+    """Is `key` a short word (KEY_WORD, KEY_NAME_MAX), which an error may name?"""
+    k = str(key)
+    return len(k) <= KEY_NAME_MAX and bool(KEY_WORD.fullmatch(k))
+
+
+def config_key_parts(doc, path: str):
+    """The keys (and list positions) of `doc` a dotted error path names, read from the document itself, so a key with
+    a dot in it is one key. -> [key or index, …], or None when the document has no such path."""
+    if not path:
+        return []
+    if isinstance(doc, list):
+        m = re.match(r"\[(\d+)\]\.?", path)
+        if m and int(m.group(1)) < len(doc):
+            rest = config_key_parts(doc[int(m.group(1))], path[m.end():])
+            return None if rest is None else [int(m.group(1)), *rest]
+        return None
+    if not isinstance(doc, dict):
+        return None
+    for key in sorted((k for k in doc if isinstance(k, str)), key=len, reverse=True):
+        if path == key:
+            return [key]
+        if path.startswith(key) and path[len(key)] in ".[":
+            rest = config_key_parts(doc[key], path[len(key) + (path[len(key)] == "."):])
+            if rest is not None:
+                return [key, *rest]
+    return None
+
+
+def _key_rule(own):
+    """How a configuration error decides whether it may name a key: short_key while core loads its own configuration;
+    after that audit.nameable_key, which also refuses a short word a secret rule or a loaded pattern (this Mac's audit
+    section `own`, the team policy) finds anything in."""
+    if "CFG" not in globals():
+        return short_key
+    try:
+        from . import audit
+    except Exception:
+        return short_key
+
+    def nameable(key) -> bool:
+        try:
+            return audit.nameable_key(key, own)
+        except Exception:
+            return False
+    return nameable
+
+
+_SAVED = object()
+
+
+QUIET_KEY = re.compile(r"<key of \d+ characters?>")  # a map key a reader said by its length
+_SAID_UNKNOWN = re.compile(r"of \d+ characters?(?: in .*)?", re.S)  # an unknown key a reader said by its length
+_GOT = re.compile(r" \(got .*\)\Z", re.S)  # configschema's section checks quote up to 40 characters of a value
+_TO_SET = " must be an object to set a child"  # set_value's refusal of a path whose parent holds no object
+_MISSING = object()
+
+
+def _count(n: int, one: str) -> str:
+    return f"{n} {one}" if n == 1 else f"{n} {one}s"
+
+
+def say_value(value) -> str:
+    """A configuration value as an error says it: its type and length, never its text: "a string of 40 characters",
+    "a list of 2 items", "an object of 1 key", "a number", "a boolean", "null"."""
+    if isinstance(value, bool):
+        return "a boolean"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "a string of " + _count(len(value), "character")
+    if isinstance(value, list):
+        return "a list of " + _count(len(value), "item")
+    if isinstance(value, dict):
+        return "an object of " + _count(len(value), "key")
+    return "a value it does not quote"
+
+
+def _error_parts(raw, path: str) -> tuple:
+    """The keys and list positions an error path names -> (parts, whether `raw` holds the whole path). Read from the
+    document (config_key_parts, so a key with a dot in it is one key); a required key `raw` lacks is its parent's parts
+    and the last word; else the path split at its dots, the way set_value splits a key typed on the command line."""
+    parts = config_key_parts(raw, path)
+    if parts is not None:
+        return parts, True
+    head, dot, last = path.rpartition(".")
+    parent = config_key_parts(raw, head) if dot else None
+    if parent is not None:
+        return [*parent, last], False
+    return [int(i) if i else k for i, k in re.findall(r"\[(\d+)\]|([^.\[\]]+)", path)], False
+
+
+def _say_path(parts, raw, nameable) -> str:
+    """An error path as a reader says it: each key the schema declares by its name; a key the person chose (a map
+    key, such as a job's or a Codex profile's name, or a key devkit does not read) by its name only when `nameable`,
+    else by its length: "jobs.<key of 21 characters>.cmd"."""
+    rule, node, out = configschema.ROOT, raw, ""
+    for p in parts:
+        if isinstance(p, int):
+            out += f"[{p}]"
+            node = node[p] if isinstance(node, list) and p < len(node) else None
+            rule = rule.items if rule is not None else None
+            kind = node.get("kind") if isinstance(node, dict) else None
+            if out == f"ext.add[{p}]" and isinstance(kind, str) and kind in configschema.EXT_RECORDS:
+                rule = configschema.EXT_RECORDS[kind]  # as configschema._walk checks an extension record
+            continue
+        fixed = rule is not None and rule.values is None and p in rule.children
+        named = fixed or QUIET_KEY.fullmatch(str(p)) or nameable(p)
+        out += ("." if out else "") + (str(p) if named else f"<key of {_count(len(str(p)), 'character')}>")
+        rule = rule.children.get(p) if fixed else rule.values if rule is not None else None
+        node = node.get(p) if isinstance(node, dict) else None
+    return out
+
+
+def _value_at(doc, parts):
+    for p in parts:
+        if isinstance(p, int) and isinstance(doc, list) and p < len(doc) or \
+                isinstance(p, str) and isinstance(doc, dict) and p in doc:
+            doc = doc[p]
+        else:
+            return _MISSING
+    return doc
+
+
+def quiet_config_errors(errors, raw=_SAVED) -> list:
+    """The configuration's errors as a person may read them anywhere: never the text of a value, and a key the
+    person chose named only when it may be (_key_rule). A key devkit does not read, or a map key it refuses, that may
+    not be named is its length and where it is: "unknown key of 40 characters in progress"; a map key in a path is
+    its length: "jobs.<key of 21 characters>.cmd is required for a custom job"; a wrong value is its type and length:
+    "work.mode must be one of auto, guided (got a string of 40 characters)". The allowed words a value must be one of
+    are devkit's, so the error lists them. `raw`: the document the errors are about (the saved configuration when not
+    given), which tells a key with a dot in it from two keys and holds the value an error is about."""
+    if raw is _SAVED:
+        try:
+            raw = read_config()
+        except ConfigError:
+            raw = None
+    own = raw.get("audit") if isinstance(raw, dict) and isinstance(raw.get("audit"), dict) else None
+    nameable = _key_rule(own)
+    out = []
+    for e in errors:
+        e = str(e)
+        path, invalid = configschema.unknown_key(e), e.endswith(": invalid map key")
+        path = path or (e[:-len(": invalid map key")] if invalid else "")
+        if path:
+            if _SAID_UNKNOWN.fullmatch(path) or QUIET_KEY.search(path):  # said already
+                out.append(e)
+                continue
+            parts = config_key_parts(raw, path) or [path]  # a key with a dot in it, or a path raw lacks: one key
+            key, where = parts[-1], _say_path(parts[:-1], raw, nameable)
+            if nameable(key):
+                said = _say_path(parts, raw, nameable)
+                out.append(f"{said}: invalid map key" if invalid else f"unknown key {said}")
+                continue
+            place = f" in {where}" if where else ""
+            out.append(f"a map key of {_count(len(str(key)), 'character')}{place} is invalid" if invalid else
+                       f"unknown key of {_count(len(str(key)), 'character')}{place}")
+            continue
+        if QUIET_KEY.search(e):  # said already: a path no document holds
+            out.append(e)
+            continue
+        m = re.match(r"(\S+?)(:?\s.*)\Z", e, re.S)
+        top = re.match(r"[^.\[]+", m.group(1)) if m else None
+        if not (m and top and (top.group() in configschema.ROOT.children or config_key_parts(raw, m.group(1)))):
+            out.append(e)  # no configuration path in it: a file that cannot be read, a path typed with an empty word
+            continue
+        parts, whole = _error_parts(raw, m.group(1))
+        rest = m.group(2)
+        if rest.startswith(" must be ") and not rest.startswith(_TO_SET):
+            value = _value_at(raw, parts) if whole else _MISSING
+            if value is not _MISSING:
+                rest = _GOT.sub("", rest) + f" (got {say_value(value)})"
+            elif _GOT.search(rest):
+                rest = _GOT.sub(" (got a value it does not quote)", rest)
+        out.append(_say_path(parts, raw, nameable) + rest)
+    return out
+
+
+def say_config_key(key, raw=_SAVED) -> str:
+    """A key typed for a configuration writer, as a record or a message says it: split at its dots as set_value
+    splits it, each key the schema declares by its name, and a key the person chose (a job's or a Codex profile's
+    name, a key devkit does not read) by its name only when it may be (_key_rule), else by its length:
+    "codex.profiles.<key of 24 characters>.model". `raw`: the configuration the key is in (the saved one when not
+    given), whose audit section holds this Mac's patterns."""
+    if raw is _SAVED:
+        try:
+            raw = read_config()
+        except ConfigError:
+            raw = None
+    own = raw.get("audit") if isinstance(raw, dict) and isinstance(raw.get("audit"), dict) else None
+    return _say_path(str(key).split("."), raw, _key_rule(own))
+
+
+def say_config_errors(errors, raw=_SAVED) -> list:
+    """The configuration's errors as every reader says them: quiet_config_errors, then each unknown key with the
+    command that removes it (configschema.describe)."""
+    return configschema.describe(quiet_config_errors(errors, raw))
+
+
 # `language`: auto, or a locale as the developer writes it: es, es-ES, pt_BR, zh-Hant
 LOCALE_RE = re.compile(r"(?i)auto|[a-z]{2,3}(?:[-_][a-z]{2,4})?")
 
 
-class ConfigError(ValueError):
+class ConfigError(Refusal, ValueError):
     """Why `dev config set` changed nothing, and what to do instead."""
 
 
@@ -130,7 +340,7 @@ def _validate_config(candidate, before=None):
     if before is not None:
         errors = [e for e in errors if not configschema.tolerated_unknown(e, before, candidate)]
     if errors:
-        raise ConfigError("; ".join(configschema.describe(errors)))
+        raise ConfigError("; ".join(say_config_errors(errors, candidate)))
     # Extension provenance stays owned by its adapter; imported lazily after core initialization.
     if (candidate.get("ext") or {}).get("add"):
         from . import ext
@@ -358,14 +568,41 @@ def config_set(key: str, value: str, path=None) -> tuple:
         try:
             return configschema.set_value(doc, key, new)
         except configschema.SchemaError as exc:
-            raise ConfigError(str(exc)) from None
-    config_update(change, path)
-    digest = hashlib.sha256(json.dumps(new, sort_keys=True, allow_nan=False).encode()).hexdigest()
-    _config_audit(key, json.dumps({"value_type": type(new).__name__, "value_digest": digest}), "ok")
+            raise ConfigError(_quiet_set_error(doc, key, new, str(exc))) from None
+    saved = config_update(change, path)
+    _config_audit(say_config_key(key, saved), say_value(new), "ok")
     return previous[0], new
 
 
+def _quiet_set_error(doc: dict, key: str, value, message: str) -> str:
+    """configschema.set_value's refusal of `key`, as say_config_errors says it: the key the person typed (they may
+    paste a token as one) or a key the candidate holds is named only when it may be."""
+    path = configschema.unknown_key(message)
+    if path and (key == path or key.startswith(path + ".")):  # the path stops at a key devkit does not read
+        typed = {}
+        cursor = typed
+        for part in path.split(".")[:-1]:
+            cursor = cursor.setdefault(part, {})
+        cursor[path.split(".")[-1]] = value
+        return "; ".join(say_config_errors([message], deep_merge(doc, typed)))
+    if message.startswith("configuration "):
+        return message  # no key or value in it: an empty path segment, or a document that is not an object
+    if message.endswith(_TO_SET):  # a key typed on the command line, split at its dots as set_value split it
+        return "; ".join(say_config_errors([message], doc))
+    candidate = json.loads(json.dumps(doc))
+    cursor = candidate
+    parts = key.split(".")
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})  # set_value's own walk passed: each part is an object
+    cursor[parts[-1]] = value
+    errors = [e for e in configschema.validate(candidate) if not configschema.tolerated_unknown(e, doc, candidate)]
+    return "; ".join(say_config_errors(errors, candidate)) if errors else \
+        "the value does not fit the configuration; dev config validate names the problem"
+
+
 def _config_audit(key: str, detail: str, outcome: str, **extra):
+    """One dev.config.set record. `key` and `detail` as a caller may record them: a key the person typed through
+    say_config_key and a value through say_value, never their text."""
     try:
         from . import audit
         audit.record("dev.config.set", str(key)[:120], detail[:300], outcome, **extra)
@@ -414,7 +651,7 @@ def load_config() -> dict:
     if errors:
         hint = config_restore_hint()
         print("devkit: invalid configuration; run dev config show or dev config edit: " +
-              "; ".join(configschema.describe(errors)) + (f"; {hint}" if hint else ""), file=sys.stderr)
+              "; ".join(say_config_errors(errors)) + (f"; {hint}" if hint else ""), file=sys.stderr)
         cfg.setdefault("work", {})["mode"] = "guided"
     root = os.environ.get("DEV_ROOT")
     if root:
@@ -832,9 +1069,72 @@ def du_kb(path, timeout=180, exclude=None):
         return None
 
 
-def read_json(path, default=None):
+# No devkit file nests past 7 levels, yet any teammate can write the handoff repository's files, and a value nested far
+# deeper exhausts the stack: in the parser (Python 3.9 to 3.13 at about a thousand levels, 3.15 at about 200,000) or,
+# after it, in what reads the value (repr, json.dumps, ==, copy). So no value nested deeper than this is read at all.
+JSON_MAX_DEPTH = 64
+
+
+def _json_deeper(v, text) -> bool:
+    """Is parsed value `v` nested deeper than JSON_MAX_DEPTH? `text` is what it was parsed from: with no more brackets
+    than that, it cannot be, which spares the walk for nearly every file and line."""
+    brackets = (b"[", b"{") if isinstance(text, (bytes, bytearray)) else ("[", "{")
+    if sum(text.count(b) for b in brackets) <= JSON_MAX_DEPTH:
+        return False
+    todo = [(v, 1)]
+    while todo:
+        x, depth = todo.pop()
+        items = x.values() if isinstance(x, dict) else x if isinstance(x, list) else None
+        if items is None:
+            continue
+        if depth > JSON_MAX_DEPTH:
+            return True
+        todo.extend((y, depth + 1) for y in items)
+    return False
+
+
+class JSONDepthError(ValueError):
+    """load_json: the text nests past what the parser can hold, or deeper than JSON_MAX_DEPTH."""
+
+
+class JSONNonFiniteError(ValueError):
+    """load_json(allow_nan=False): the text holds NaN, Infinity or -Infinity, which JSON (RFC 8259) and Node's
+    JSON.parse refuse and Python's json reads, or a number past a float's range (1e400), which Python reads as inf
+    and json.dumps would write back as Infinity. Its message names which, in the words of a refusal."""
+
+
+def _no_nonfinite(constant):
+    raise JSONNonFiniteError("NaN or Infinity, which JSON does not allow")
+
+
+def _finite_float(text):
+    f = float(text)
+    if not math.isfinite(f):
+        raise JSONNonFiniteError(f"a number past a float's range ({text[:24]}), read as Infinity")
+    return f
+
+
+def load_json(text, allow_nan=True):
+    """json.loads for text another machine or person may have written -> its value, or ValueError when no reader can
+    read it: json.JSONDecodeError when it is not JSON (cut short, say), JSONDepthError past what the parser can nest
+    or hold (RecursionError, MemoryError) or nested deeper than JSON_MAX_DEPTH, JSONNonFiniteError for NaN or Infinity
+    or a number past a float's range when `allow_nan` is false (text a Node program reads too, such as Claude Code's
+    settings), and the parser's own ValueError otherwise (an integer of more digits than Python converts). Every
+    devkit read of such text parses it with this (read_json, audit.parse_line)."""
     try:
-        return json.loads(Path(path).read_text())
+        v = json.loads(text) if allow_nan else json.loads(text, parse_constant=_no_nonfinite, parse_float=_finite_float)
+    except (RecursionError, MemoryError):
+        raise JSONDepthError("nested too deep to parse") from None
+    if _json_deeper(v, text):
+        raise JSONDepthError(f"nested deeper than {JSON_MAX_DEPTH} levels")
+    return v
+
+
+def read_json(path, default=None, allow_nan=True):
+    """A JSON file's value (load_json, with its `allow_nan`), or `default` when it cannot be read or is no JSON a
+    reader can read."""
+    try:
+        return load_json(Path(path).read_text(), allow_nan=allow_nan)
     except (OSError, ValueError):
         return default
 

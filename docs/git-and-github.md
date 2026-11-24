@@ -326,9 +326,13 @@ order, with `bash -eo pipefail`, `CI=true`, and the step's environment, stopping
 runs on). Each step may run as long as its workflow allows: its own `timeout-minutes`, else its job's. Without one,
 it gets 1.5 times its longest local pass when that is over 30 minutes, else 30. `--step-timeout` sets one limit for
 every step. A step past its limit ends with exit 124, prints the limit and where it came from, and names
-`dev ci --run --resume --step-timeout <twice the limit>`. Each step's log is kept in
-`~/.local/state/devkit/ci/logs/<repo>/`. When macOS has only `python3`, a `python` shim stands in for what
-`setup-python` provides on the runner.
+`dev ci --run --resume --step-timeout <twice the limit>`. A step past its limit, Ctrl-C, SIGTERM, or SIGHUP stops
+every process the step started, and `dev` then exits 124, 130, 143, or 129; under `nohup`, SIGHUP leaves the step
+running. Each checkout keeps its own step logs and step records, so two worktrees of one repository can run
+`dev ci --run` at once: the logs are in `~/.local/state/devkit/ci/logs/<repo>@<checkout>/`, where `<checkout>` is a
+short hash of the checkout's path, and a checkout's logs and records go after 30 days without a run. A step's limit
+still comes from its longest pass in any checkout of the repository. When macOS has only `python3`, a `python` shim
+stands in for what `setup-python` provides on the runner.
 
 Steps that cannot or must not run on your Mac are skipped, with the reason:
 
@@ -337,7 +341,7 @@ Steps that cannot or must not run on your Mac are skipped, with the reason:
 | Setup actions (`uses:`) | Your local toolchain stands in for them |
 | Dependency installs (`npm ci`, `pip install`, `uv sync`, …) | Your local environment is used; nothing is reinstalled |
 | Side effects: publishing, deploying, pushing, system installs, coverage uploads | They change things outside your Mac |
-| A hosted runner's own setup: a step that deletes a path not inside the checkout (`rm -rf /opt/hostedtoolcache/…`), `docker` or `podman … prune`, setup run with `sudo` (`sudo systemctl …`), OS package installs and updates (`apt-get`, `brew`, `dnf`, `apk`, `choco`, …), `playwright install` and `install-deps`, `git config --global` or `--system`, a Linux runner's own system setup (`fc-cache`, `ldconfig`, `locale-gen`, `update-ca-certificates`, …), and `mkdir`, `cp`, `mv`, `ln`, `install`, `touch`, `tee`, `rsync`, or a shell redirect (`>`, `>>`, `2>`, `&>`) writing into the home folder outside the checkout (`mkdir -p ~/.local/share/fonts`, `echo … > ~/.npmrc`), unless the same pipeline runs a check (`pytest \| tee ~/pytest.log` and `pytest > ~/pytest.log` run; into a dotfile such as `~/.bashrc`, through `tee` or a redirect, or written as root (`sudo tee`, `sudo dd of=`) into any folder, it blocks the evidence; a download written as root into a system folder, such as `curl … \| sudo tee /etc/apt/keyrings/…`, stays setup) | They would delete your caches and images, install system packages, rewrite your settings, or fill your home folder; a Mac has no use for a Linux runner's system caches. Each skipped step gets a line that says why. devkit also reads the script a step hands to a shell with `-c` (`xvfb-run bash -c …`) |
+| A hosted runner's own setup: a step that deletes a path not inside the checkout (`rm -rf /opt/hostedtoolcache/…`), `docker` or `podman … prune`, setup run with `sudo` (`sudo systemctl …`), OS package installs and updates (`apt-get`, `brew`, `dnf`, `apk`, `choco`, …), `playwright install` and `install-deps`, `git config --global` or `--system`, a Linux runner's own system setup (`fc-cache`, `ldconfig`, `locale-gen`, `update-ca-certificates`, …), and `mkdir`, `cp`, `mv`, `ln`, `install`, `touch`, `tee`, `rsync`, or a shell redirect (`>`, `>>`, `2>`, `&>`) writing into the home folder outside the checkout (`mkdir -p ~/.local/share/fonts`, `echo … > ~/.npmrc`), unless the same pipeline runs a check (`pytest \| tee ~/pytest.log` and `pytest > ~/pytest.log` run; into a dotfile such as `~/.bashrc`, through `tee` or a redirect, also through a variable the step set (`LOG=~/.bashrc; pytest > $LOG`); into a path this Mac cannot tell, such as a command's output (`LOG=$(echo ~/.bashrc); pytest > $LOG`) or a variable that `read` sets (a fresh `mktemp` path is known); or piped into any `sudo` command (`sudo tee`, `sudo dd of=`, `sudo cat`), it blocks the evidence; a download written as root into a system folder, such as `curl … \| sudo tee /etc/apt/keyrings/…`, stays setup) | They would delete your caches and images, install system packages, rewrite your settings, or fill your home folder; a Mac has no use for a Linux runner's system caches. Each skipped step gets a line that says why. devkit also reads the script a step hands to a shell with `-c` (`xvfb-run bash -c …`) |
 | Steps that need CI secrets or write CI plumbing (`$GITHUB_ENV`, `$GITHUB_OUTPUT`) | They only make sense on the runner |
 | Jobs that deploy or publish, run on Windows, or only on other events | They are not part of the check of a change |
 

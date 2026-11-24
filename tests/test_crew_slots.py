@@ -16,6 +16,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, core, crew, dispatch, progress as pg  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
@@ -107,8 +111,7 @@ class ConfigSetTests(unittest.TestCase):
         self.assertEqual(json.loads(self.file.read_text()), {"editor": "vim", "progress": {"max_parallel": 6}})
         rec = [r for r in audit.records(1, "dev.config.set")]
         self.assertEqual([r["target"] for r in rec], ["progress.max_parallel"])
-        self.assertEqual(json.loads(rec[0]["detail"])["value_type"], "int")
-        self.assertIn("value_digest", json.loads(rec[0]["detail"]))
+        self.assertEqual(rec[0]["detail"], "a number")  # the value's type, never its text or a digest of it
 
     def test_an_agent_sets_the_parallel_limit_too(self):
         with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):

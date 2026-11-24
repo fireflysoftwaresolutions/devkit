@@ -27,7 +27,7 @@ class ScratchFolderTests(unittest.TestCase):
         if pad_exists:
             self.pad.mkdir(parents=True)
         run = {"agents": {"a1b2c3": {"persona": persona}}}
-        with mock.patch.object(hooks, "_claude_tmp", return_value=self.claude_tmp), \
+        with mock.patch.object(progress, "claude_tmp", return_value=self.claude_tmp), \
                 mock.patch.object(progress, "load_run", return_value=run):
             hooks._make_scratch_folder("claude", self.data)
 

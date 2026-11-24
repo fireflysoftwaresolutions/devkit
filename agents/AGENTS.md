@@ -243,8 +243,8 @@ step, never the words of the request, so the developer's language does not matte
   to its Responsible member with the files it owns (`dev progress assign api --to Tank --scope "services/**"`).
   devkit refuses a member the RACI does not make Responsible for the step; override only with `--why "…"`, which is
   recorded. Launch one step per member with `dev crew brief --step`, whose launch description names it: a step binds
-  only to the launch that names it. devkit creates the member's `scratchpad/<member id>/` at launch, the only place
-  it may write scratch files.
+  only to the launch that names it. devkit creates each lane's own `scratchpad/<member id>-<step>/` at launch, the
+  only place it may write scratch files.
 - **Owners.** Before you edit files outside your own lane or assign a scope, run `dev crew owner <paths>`: it names
   the member whose step holds them. A member whose lane ended or went stale holds no files.
 - **Parallel or not.** Run members in parallel only for independent steps with fixed contracts and separate files;

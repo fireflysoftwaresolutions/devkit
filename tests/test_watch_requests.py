@@ -10,6 +10,7 @@
 import contextlib
 import io
 import json
+import os
 import sys
 import time
 import unittest
@@ -18,6 +19,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
 
 from devkit import audit, continuity, core, hooks, progress as pg, state  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
@@ -199,27 +205,160 @@ class SendMessageAnswerTests(RequestCase):
 
 
 class MemberWaitRouteTests(RequestCase):
-    def test_a_members_wait_names_its_own_lane_even_in_the_background(self):
-        # a background command's call leaves the ledger as soon as it starts, so a member's background wait found no
-        # caller, counted as the main session and could take the tech lead's events; the PreToolUse hook gives each
-        # member's `dev watch` call its lane, as it does its `dev crew` calls
-        def pre(cmd, background):
-            out = io.StringIO()
-            inp = dict({"command": cmd}, **({"run_in_background": True} if background else {}))
-            payload = {"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_id": "a_tank",
-                       "tool_use_id": "toolu_w", "tool_input": inp, "cwd": str(self.root)}
-            with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
-                hooks.run("pre-tool", "claude")
-            text = out.getvalue().strip()
-            return ((json.loads(text) if text else {}).get("hookSpecificOutput") or {}).get("updatedInput") or {}
+    # A member's `dev watch --wait --for me` must take the member's own events, never the tech lead's, in the foreground
+    # and in the background (a background call leaves the ledger as soon as it starts).
+    def pre(self, cmd, background, mode=None, tid="toolu_w"):
+        out = io.StringIO()
+        inp = dict({"command": cmd}, **({"run_in_background": True} if background else {}))
+        payload = {"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_id": "a_tank",
+                   "tool_use_id": tid, "tool_input": inp, "cwd": str(self.root),
+                   **({"permission_mode": mode} if mode else {})}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            hooks.run("pre-tool", "claude")
+        text = out.getvalue().strip()
+        return payload, ((json.loads(text) if text else {}).get("hookSpecificOutput") or {}).get("updatedInput") or {}
+
+    def test_a_members_plain_wait_goes_out_as_written_and_its_ledger_names_its_lane(self):
+        # where Claude Code checks the developer's rules the wait goes out exactly as typed (so an allow rule for
+        # `dev watch` matches it); its lane rides on the text pin: the ledger entry names the member, and a background
+        # call's record is kept past its close for the wait's dev command (identity.keep_background)
+        from devkit import identity
         for background in (False, True):
             with self.subTest(background=background):
-                got = pre("dev watch --wait --for me --timeout 9", background)
-                # its lane, and its call token right before dev (the plain form, where the payload names no bypass)
-                self.assertRegex(got.get("command") or "", r"\ADEVKIT_FROM_AGENT=a_tank DEVKIT_CALL=toolu_w\.[A-Za-z0-9_-]{22} "
-                                                           r"dev watch --wait --for me --timeout 9\Z")
+                tid = f"toolu_w{int(background)}"
+                data, got = self.pre("dev watch --wait --for me --timeout 9", background, tid=tid)
+                self.assertEqual(got, {})
+                entry = pg.call_entry(data)
+                self.assertEqual((entry.get("caller"), entry.get("pin_by"), bool(entry.get("background"))),
+                                 ("a_tank", "text", background))
+                hooks._close_call(dict(data, hook_event_name="PostToolUse"))
+                self.assertEqual(pg.call_entry(data), {})
+                kept = identity._kept_background("s1", time.time())
+                self.assertEqual([(e.get("tool_use_id"), e.get("caller")) for e in kept],
+                                 [(tid, "a_tank")] if background else [])
+
+    def test_a_members_wait_where_the_payload_names_bypass_carries_its_lane_in_front(self):
+        # bypassPermissions: every call carries its token, and a member's own wait its lane variable right before dev
+        for background in (False, True):
+            with self.subTest(background=background):
+                _, got = self.pre("dev watch --wait --for me --timeout 9", background, "bypassPermissions",
+                                  tid=f"toolu_b{int(background)}")
+                self.assertRegex(got.get("command") or "",
+                                 rf"; export DEVKIT_CALL=toolu_b{int(background)}\.[A-Za-z0-9_-]{{22}}; readonly DEVKIT_CALL; "
+                                 r"DEVKIT_FROM_AGENT=a_tank dev watch --wait --for me --timeout 9\Z")
                 self.assertEqual(got.get("run_in_background", False), background)
-        self.assertEqual(pre("dev watch --wait; rm -rf build", False), {})  # only a call of its own is routed
+
+    def test_only_a_wait_of_its_own_is_pinned_or_routed(self):
+        for mode in (None, "bypassPermissions"):
+            with self.subTest(mode=mode):
+                data, got = self.pre("dev watch --wait; rm -rf build", False, mode, tid=f"toolu_c{mode}")
+                self.assertNotIn("DEVKIT_FROM_AGENT", got.get("command") or "")
+                self.assertNotEqual(pg.call_entry(data).get("pin_by"), "text")
+
+
+# The end-to-end check, with real processes: a stand-in for Claude Code's agent process (its argv[0] is `claude`)
+# holds a devkit session in a home of its own, fires the real PreToolUse and PostToolUse hooks for a member's
+# `dev watch --wait --for me --timeout 9` in a mode that checks the developer's rules, and runs the call's shell in
+# Claude Code's form (`zsh -c … eval '<command>' < /dev/null && pwd -P >| …`). Its `dev` starts once the stand-in says
+# go: for the background call, after the call's PostToolUse took it out of the ledger.
+STAND_IN = r"""
+import json, os, subprocess, sys, time
+from unittest import mock
+W, OUT = sys.argv[1:3]
+sys.path.insert(0, os.path.join(W, "lib"))
+from devkit import progress as pg, watch
+SID, CMD, now = "se2e", "dev watch --wait --for me --timeout 9", time.time()
+pg.SESSIONS.mkdir(parents=True, exist_ok=True)
+(pg.SESSIONS / f"claude-{SID}.json").write_text(json.dumps({"agent": "claude", "session": SID, "started": now - 60,
+                                                            "pid": os.getpid(), "cwd": OUT}))
+with mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}), \
+        mock.patch.object(pg, "resolve_session", lambda *a, **k: ("claude", SID, "ancestry")):
+    pg.start("Work", plan="api=30m", now=now - 600)
+    pg.assign("api", "Tank", why="the test's assignment", now=now - 590)
+    pg.note_agent_launch("claude", {"session_id": SID, "tool_use_id": "toolu_a_tank",
+                                    "tool_input": {"description": "Tank: api", "subagent_type": "devkit:tank"}},
+                         now=now - 580)
+    pg.on_subagent("claude", {"session_id": SID, "agent_id": "a_tank", "agent_type": "devkit:tank"}, True, now=now - 580)
+    pg.launch_result("claude", {"session_id": SID, "tool_use_id": "toolu_a_tank", "tool_response": {"agentId": "a_tank"}},
+                     now=now - 580)
+dev = [sys.executable, "-I", "-S", os.path.join(W, "bin", "dev")]
+def hook(event, payload):
+    return subprocess.run(dev + ["hook", event, "--agent", "claude"], input=json.dumps(payload), capture_output=True,
+                          text=True, timeout=120).stdout
+result = {}
+for mode in ("fg", "bg"):
+    tid, go = f"toolu_{mode}", os.path.join(OUT, f"go-{mode}")
+    pre = {"session_id": SID, "tool_use_id": tid, "tool_name": "Bash", "hook_event_name": "PreToolUse", "cwd": OUT,
+           "agent_id": "a_tank", "permission_mode": "default",
+           "tool_input": {"command": CMD, **({"run_in_background": True} if mode == "bg" else {})}}
+    rewritten = "updatedInput" in hook("pre-tool", pre)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DEVKIT_") or k == "DEVKIT_TEST_PATH"}
+    env.update(PATH=os.path.join(OUT, "bin") + os.pathsep + env.get("PATH", ""), CLAUDECODE="1", E2E_GO=go,
+               E2E_PY=sys.executable, E2E_DEV=dev[-1])
+    script = "export DEVKIT_AGENT=claude\n: && eval '" + CMD + "' < /dev/null && pwd -P >| " + os.path.join(OUT, "cwd")
+    shell = subprocess.Popen(["/bin/zsh", "-c", script], env=env, cwd=OUT, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True)
+    post = dict(pre, hook_event_name="PostToolUse", tool_response={"stdout": ""})
+    if mode == "bg":
+        hook("post-tool", post)
+    left = not pg.call_entry(pre)
+    pg._ask_into("claude", SID, f"FOR-MAIN-{mode}: may I rename the column?", None, "a_tank", time.time())
+    pg._ask_into("claude", SID, f"FOR-TANK-{mode}: update the docs too", "a_tank", "main", time.time(), kind="notice")
+    open(go, "w").close()
+    out, _ = shell.communicate(timeout=120)
+    if mode == "fg":
+        hook("post-tool", post)
+    result[mode] = {"rewritten": rewritten, "left_ledger": left, "rc": shell.returncode, "out": out}
+result["due_main"] = [e["line"] for e in watch.pending("claude", SID, "main")]
+result["due_tank"] = [e["line"] for e in watch.pending("claude", SID, "a_tank")]
+print("RESULT " + json.dumps(result))
+"""
+
+DEV_GATE = "#!/bin/sh\nwhile [ ! -f \"$E2E_GO\" ]; do sleep 0.05; done\nexec \"$E2E_PY\" -I -S \"$E2E_DEV\" \"$@\"\n"
+
+
+def interpreter() -> str:
+    # the interpreter's own binary: a macOS framework build's python3 starts another binary and drops argv[0]
+    if sys.platform != "darwin":
+        return sys.executable
+    import subprocess
+    path = subprocess.run(["ps", "-o", "comm=", "-p", str(os.getpid())], capture_output=True, text=True,
+                          timeout=10).stdout.strip()
+    return path if os.path.isabs(path) and os.access(path, os.X_OK) else sys.executable
+
+
+class MemberWaitEndToEndTests(unittest.TestCase):
+    def test_a_members_plain_wait_takes_its_own_events_in_the_foreground_and_the_background(self):
+        import subprocess
+        import tempfile
+        import _sandbox
+        tmp = Path(tempfile.mkdtemp(prefix="devkit-e2e-wait-"))
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        (tmp / "home").mkdir()
+        (tmp / "tmp").mkdir()
+        (tmp / "bin").mkdir()
+        gate = tmp / "bin" / "dev"
+        gate.write_text(DEV_GATE)
+        gate.chmod(0o700)
+        script = tmp / "stand_in.py"
+        script.write_text(STAND_IN)
+        env = {k: v for k, v in _sandbox.env().items() if not k.startswith(("DEVKIT_", "CLAUDE", "CODEX"))
+               or k in ("DEVKIT_TEST_PATH", "DEVKIT_NO_NOTIFY")}
+        env.update(HOME=str(tmp / "home"), TMPDIR=str(tmp / "tmp"))
+        tree = str(Path(__file__).resolve().parents[1])
+        run = subprocess.run(["claude", "-I", str(script), tree, str(tmp)], executable=interpreter(), env=env,
+                             cwd=str(tmp), capture_output=True, text=True, timeout=300)
+        line = next((ln for ln in run.stdout.splitlines() if ln.startswith("RESULT ")), "")
+        self.assertTrue(line, run.stdout[-2000:] + run.stderr[-2000:])
+        got = json.loads(line[len("RESULT "):])
+        for mode in ("fg", "bg"):
+            with self.subTest(mode=mode):
+                r = got[mode]
+                self.assertEqual((r["rewritten"], r["left_ledger"], r["rc"]), (False, mode == "bg", 0), r["out"])
+                self.assertIn(f"FOR-TANK-{mode}", r["out"])
+                self.assertNotIn("FOR-MAIN", r["out"])
+        self.assertEqual(got["due_tank"], [])
+        self.assertEqual(sorted(ln.split("“")[1][:11] for ln in got["due_main"]), ["FOR-MAIN-bg", "FOR-MAIN-fg"])
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urlparse
 
+from .refusal import Refusal
+
 DEFAULTS = {
     "dev_root": "~/Development",
     "github_user": "",              # empty: detected from `gh api user`
@@ -63,6 +65,7 @@ DEFAULTS = {
     # control whose name or path holds one of these words (crawl.cjs always adds its own, which are these); `mask`:
     # CSS selectors painted over in every capture, besides the password, one-time-code, and card fields devkit
     # always masks and the capture's own --mask
+    "test": {"listing": False},  # true: every `dev test` run finds test files by the runners' own listings
     "visual": {"crawl": {"avoid": ["delete", "remove", "pay", "send", "submit", "sign out", "logout"]}, "mask": []},
     # devkit's public bug registry: share is the developer's consent to post (on, reports, off; unset asks), and
     # sync lets the hourly sync refresh the known bugs and send what the outbox holds
@@ -239,7 +242,7 @@ def progress_config(raw):
     return values, errors
 
 
-class SchemaError(ValueError):
+class SchemaError(Refusal, ValueError):
     """A candidate or JSON document violates the configuration contract."""
 
 
@@ -454,6 +457,7 @@ SCHEMA.update({
                     "block_after_minutes": number()}),
     "canary": obj({"enforce": BOOL, "roles": BOOL, "language": BOOL}),
     "dashboard": obj({"idle_minutes": number(positive=True)}),
+    "test": obj({"listing": BOOL}),
     "visual": obj({"crawl": obj({"avoid": array(NONEMPTY)}), "mask": array(NONEMPTY)}),
     "backup": obj({"auto": BOOL, "after_minutes": number(0, 1440)}),
     "bugs": obj({"share": enum(None, "on", "reports", "off"), "sync": BOOL}),

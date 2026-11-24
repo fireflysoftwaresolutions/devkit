@@ -11,6 +11,8 @@
 import contextlib
 import io
 import json
+import os
+import re
 import sys
 import time
 import unittest
@@ -21,8 +23,18 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS.parent / "lib"))
 sys.path.insert(0, str(TESTS))
 
-from devkit import canary, hooks, plans, readonly, skillguard, state  # noqa: E402
+from devkit import canary, cli, hooks, plans, readonly, skillguard, state  # noqa: E402
 from test_language_neutral_hooks import HookCase  # noqa: E402
+
+
+@contextlib.contextmanager
+def _cwd(path):
+    before = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(before)
 
 UNVERSIONED = "# Export plan\n\nEdited by hand, without dev plan revise.\n"  # no body_sha: it needs a revision
 REMINDER = "you changed plan(s) without recording why"
@@ -160,6 +172,24 @@ class OwnPlansTests(PlanCheckCase):
         self.shell(f"cat > '{mine}' <<'EOF'\n{UNVERSIONED}EOF", during=lambda: self.write(mine))
         reason = self.stop(self.MOVED)
         self.assertIn("plans/fireflysoftwaresolutions/devkit/2026-11-10-hotfix.md", reason)
+
+    # The reminder named a plan by its path in the handoff repository (plans/…), and `dev plan revise` read that path
+    # from the session's own folder: "no plan at plans/…", so a session could never satisfy the reminder. Every path
+    # it names is one `dev plan revise` takes from the folder the session works in.
+    def test_the_command_the_reminder_gives_revises_the_design_note_it_names(self):
+        note = self.plan("fireflyframework/firefly-weave/design/decision-grid", "README.md")
+        self.edit_tool(note)
+        named = re.search(r"without recording why: (.+?)\. Run", self.stop(self.MOVED)).group(1).split(", ")
+        self.assertEqual(len(named), 1, named)
+        out, err = io.StringIO(), io.StringIO()
+        real = self.handoff_root.resolve()  # the command resolves a plan's path: /var is /private/var
+        with mock.patch.object(plans, "PLANS", real / "plans"), mock.patch.object(plans, "HANDOFF", real), \
+                mock.patch.object(cli, "HANDOFF", real), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), _cwd(self.root):
+            rc = cli.main(["plan", "revise", named[0], "--why", "the mockups moved to the new grid"])
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertFalse(plans.needs_revision(note))
+        self.assertEqual(self.stop(self.MOVED), "")
 
     def test_a_plan_written_by_a_shell_call_that_then_failed_is_reminded(self):
         mine = self.plan("fireflysoftwaresolutions/devkit", "2026-11-10-hotfix.md")

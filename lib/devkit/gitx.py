@@ -31,6 +31,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -446,6 +447,14 @@ def _key(c) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "__", c.pid)
 
 
+def _checkout_key(c) -> str:
+    """The project's key and a short hash of this checkout's real path (`acme__widget@3f9c0a1b2d4e`): the main
+    checkout and each worktree of a project keep their own dev ci --run logs and step records, which the evidence
+    markers, named by commit and tree, need not."""
+    import hashlib
+    return f"{_key(c)}@{hashlib.sha256(os.path.realpath(c.top).encode()).hexdigest()[:12]}"
+
+
 def work_tree(top):
     """Tree id of the working tree as it is now (tracked and untracked, not ignored); the real index is untouched."""
     import shutil
@@ -479,7 +488,7 @@ def record_evidence(c, how: str, tree: str, **extra) -> dict:
             "ts": int(time.time()), "user": os.environ.get("USER", ""), "host": os.uname().nodename.split(".")[0]}
     data.update(extra)
     (d / name).write_text(json.dumps(data, indent=1))
-    cutoff = time.time() - 30 * 86400
+    cutoff = time.time() - CI_KEEP_DAYS * 86400
     for f in d.glob("*.json"):
         try:
             if f.stat().st_mtime < cutoff:
@@ -1274,7 +1283,8 @@ def _commit_lane(c):
     """The crew lane that runs this `dev commit` -> (lane id, scope layers, the folder its globs count from), or None
     in the main session and a developer's shell. The lane is DEVKIT_FROM_AGENT when the hooks set it, else the member
     the call ledger names (progress._as_lane); its scope is the one its edits are advised against: its own globs
-    and those of the open steps it owns, inside its parents' (progress.lane_scope), counted from lanescope.scope_base."""
+    and those of the open steps it owns, inside its parents' (progress.lane_scope), counted from the checkout its
+    scope was given in (progress.lane_home), as `dev crew owner` counts it, else from lanescope.scope_base."""
     from . import progress
     aid = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None, c.top)
     if not aid:
@@ -1282,7 +1292,8 @@ def _commit_lane(c):
     agent, sid = progress.current_session(c.top)
     run, lane = progress.lane_of(agent, sid, aid)
     layers = progress.lane_scope(run, aid) if lane else []
-    return aid, layers, lanescope.scope_base((run or {}).get("project"), c.top)
+    home = progress.lane_home(run, aid) if lane else ""
+    return aid, layers, home or lanescope.scope_base((run or {}).get("project"), c.top)
 
 
 def _held_by_lanes(c, paths) -> list:
@@ -1418,9 +1429,15 @@ def _sync_shared_index(top, before: str, left) -> str:
     return "" if rc == 0 else (err or out or "git reset failed")
 
 
-def _lane_refusal(layers, left) -> int:
+def _lane_refusal(layers, left, top=None, base=None) -> int:
     """No staged file of the lane's own: what stays staged, and why. An empty layer is a crew lane that runs no step
-    (progress.lane_scope): it holds no file."""
+    (progress.lane_scope): it holds no file. A scope that counts in another checkout (`base`, not `top`) holds no file
+    of this one."""
+    if layers and all(layers) and top and base and core.real(str(base)) != core.real(str(top)):
+        return refuse(f"your step's scope ({'; '.join(', '.join(layer) for layer in layers)}) counts in "
+                      f"{core.tilde(str(base))}, so none of the {len(left)} staged file(s) of this checkout is yours; "
+                      f"they stay staged for their owner: {_few(left)}",
+                      f"commit in your checkout: cd {shlex.quote(str(base))} && dev commit -m \"…\"")
     if not layers:
         return refuse(f"your crew lane has no file scope, so devkit cannot tell which of the {len(left)} staged "
                       f"file(s) are yours; they stay staged: {_few(left)}",
@@ -1520,7 +1537,13 @@ def cmd_commit(a) -> int:
         ids = list(dict.fromkeys(_WORK_ID.findall(message)))
         if ids:
             return _task_id_refusal(ids)
-    lane = None if a.paths else _commit_lane(c)
+    from . import identity
+    try:
+        lane = None if a.paths else _commit_lane(c)
+    except identity.IdentityError as e:  # devkit cannot tell whose lane commits, so it commits for none of them
+        # never the <paths> form, which checks no lane's scope: devkit commits for nobody until it knows who calls
+        return refuse(str(e), "run dev commit again on its own, in your own call, so devkit can tell whose lane "
+                              "commits; dev crew owner <path> names who holds each file")
     if lane is None and not a.paths:  # the main session: what a working lane staged stays staged for it
         names = _zsplit(_git_z(c.top, "diff", "--cached", "--name-only", "--no-renames", "-z")[1])
         if a.all:
@@ -1558,7 +1581,7 @@ def cmd_commit(a) -> int:
         mine = set(own)
         left = [p for p in names if p not in mine]
         if not own and not a.amend:
-            return _lane_refusal(lane[1], left)
+            return _lane_refusal(lane[1], left, c.top, lane[2])
         head = core.gitout(c.top, "rev-parse", "-q", "--verify", "HEAD")
         folder, index, err = _lane_index(c.top, head, own)
         if not folder:
@@ -2151,15 +2174,79 @@ def _expand(run: str, root: str) -> str:
 
 _PRUNABLE = frozenset({"system", "image", "container", "volume", "network", "builder", "buildx"})
 _SHELL_VAR = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+_BARE_VAR = re.compile(r"\$([A-Za-z_]\w*)")
+# what `${…}` holds that _expand_params resolves: a name, then a default (`-`, `=`) or an alternate (`+`) word, the
+# colon form also for an empty value
+_PARAM = re.compile(r"([A-Za-z_]\w*)(?:(:?[-=+])(.*))?", re.S)
+_UNKNOWN = "$"  # the value of a variable this Mac cannot tell: a path through it stays unknown (_shell_path)
+
+
+def _home_tilde(word: str) -> str:
+    return os.path.expanduser("~") + word[1:] if word == "~" or word.startswith("~/") else word
+
+
+def _brace_end(text: str, i: int) -> int:
+    """The index of the `}` that closes the `${` whose content starts at text[i], or -1 when it does not close."""
+    depth = 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text.startswith("${", i):
+            depth += 1
+            i += 2
+            continue
+        if text[i] == "}":
+            depth -= 1
+            if not depth:
+                return i
+        i += 1
+    return -1
+
+
+def _expand_params(text: str, env: dict) -> str:
+    """`text` with its variables expanded as the shell does here, from `env`: `$VAR`, `${VAR}` (unset is empty), the
+    defaults `${VAR-word}` and `${VAR=word}` (the word when VAR is unset; with a colon, also when it is empty) and the
+    alternates `${VAR+word}` and `${VAR:+word}`, whose word starts with `~` for the home folder. Any other expansion (a
+    command's output, `${#VAR}`, `${VAR%…}`, `$1`) keeps its `$`, so a path through it stays one this Mac cannot
+    tell."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] != "$":
+            out.append(text[i])
+            i += 1
+            continue
+        bare = _BARE_VAR.match(text, i)
+        if bare:
+            out.append(env.get(bare.group(1)) or "")
+            i = bare.end()
+            continue
+        end = _brace_end(text, i + 2) if text.startswith("${", i) else -1
+        param = _PARAM.fullmatch(text, i + 2, end) if end > 0 else None
+        if not param:
+            out.append("$")
+            i += 1
+            continue
+        name, op, word = param.groups()
+        value = env.get(name)
+        given = value is not None and (value != "" or not op or not op.startswith(":"))
+        if not op:
+            out.append(value or "")
+        elif op[-1] in "-=":
+            out.append(value if given else _expand_params(_home_tilde(word), env))
+        else:
+            out.append(_expand_params(_home_tilde(word), env) if given else "")
+        i = end + 1
+    return "".join(out)
 
 
 def _shell_path(word: str, cwd, env: dict):
-    """The absolute path a shell word names, as the shell expands it here: `~`, and `$VAR` / `${VAR}` from `env`
-    (an unset variable is empty, so `"$UNSET/"` is `/`). None when this Mac cannot tell: a command's output (the
-    shell reader leaves a `$` for `$(…)`), another expansion, or a folder `cd` went to that is not known."""
-    if word == "~" or word.startswith("~/"):
-        word = os.path.expanduser("~") + word[1:]
-    word = _SHELL_VAR.sub(lambda m: env.get(m.group(1) or m.group(2)) or "", word)
+    """The absolute path a shell word names, as the shell expands it here: `~`, and the variables _expand_params
+    resolves from `env` (an unset variable is empty, so `"$UNSET/"` is `/`; `${TMPDIR:-/tmp}` is TMPDIR, or /tmp
+    when it is unset or empty). None when this Mac cannot tell: a command's output (the shell reader leaves a `$`
+    for `$(…)`), another expansion, a variable whose value is not known here, or a folder `cd` went to that is not
+    known."""
+    word = _expand_params(_home_tilde(word), env)
     if "$" in word or "`" in word or word.startswith("~") or (cwd is None and not os.path.isabs(word)):
         return None
     return os.path.realpath(os.path.join(cwd or "/", word))
@@ -2394,9 +2481,14 @@ def _informational(argv, words) -> bool:
 
 
 _HOME_KINDS = ("home", "home-dot", "home-root")  # a write into the home folder, least to most severe
-# a write outside the checkout: setup with no check beside it; next to one, all but "home" block the step instead,
-# and "root-system" (a root write into a system folder) only next to a check that is not a download (_SETUP_FEEDS)
-_OUTSIDE_KINDS = _HOME_KINDS + ("root-write", "root-system")
+# a write outside the checkout, or a command run as root: setup with no check beside it; next to one, all but "home"
+# block the step instead, and "root-system" (a root write into a system folder) and "root-setup" (any other setup
+# command run with sudo, `sudo systemctl start …`) only next to a check that is not a download (_SETUP_FEEDS): a
+# check piped into sudo (`pytest | sudo cat`) cannot run here; "unknown" (a redirect, or a file a writing command
+# writes, whose path this Mac cannot tell, _unknown_write) may be any file, a dotfile of the home folder as well, so it
+# blocks next to a check too
+_OUTSIDE_KINDS = _HOME_KINDS + ("root-write", "root-system", "root-setup", "unknown")
+_ROOT_SETUP_KINDS = ("root-system", "root-setup")
 # the folders a hosted runner's own system setup writes as root (`curl … | sudo tee /etc/apt/keyrings/…`, a tool into
 # /usr/local/bin), and the temporary folders under them, which hold a check's log instead (/var/tmp, macOS's
 # /var/folders); both are compared resolved, as _shell_path gives a path (on macOS /etc is /private/etc)
@@ -2432,13 +2524,130 @@ def _home_write(targets, as_root: bool, state: dict):
     return found
 
 
+def _unknown_write(targets, state: dict):
+    """("unknown", why) for the first file a redirect or a writing command (_WRITERS: tee, cp, mv, dd of=, …) writes
+    whose path this Mac cannot tell (_shell_path: a command's output, another expansion, a variable read or set at
+    run time, a relative path after a `cd` it could not follow): it may be any file, a dotfile of the home folder as
+    well, so devkit cannot rule out a write outside the checkout. None when every target is known; a known one inside
+    the checkout or a temporary folder is never in doubt. `targets`: the words that name the files, as written."""
+    for w in targets:
+        if _shell_path(w, state["here"], state["env"]) is None:
+            return "unknown", f"runner prep (writes {w}, a path this Mac cannot tell)"
+    return None
+
+
+_DECLARES = frozenset({"export", "declare", "typeset", "readonly", "local"})
+_ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=(.*)", re.S)
+_NAME = re.compile(r"[A-Za-z_]\w*")
+# a word that sets a variable to a fresh file or folder mktemp makes in the temporary folder (`LOG=$(mktemp)`,
+# `export DIR="$(mktemp -d -t ci)"`): with no template or folder of its own it is a new path there, never a file that
+# already exists. The shell reader keeps only `LOG=$` of it, so the piece's own text tells (_fresh_temps).
+_ASSIGN_AT = re.compile(r"([A-Za-z_]\w*)=")
+_FRESH_TEMP = re.compile(r"(\"?)(?:\$\(|`)\s*mktemp(?:\s+(?:-[dqu]+|-t\s*[\w.-]+|--tmpdir))*\s*(?:\)|`)\1"
+                         r"(?=$|[\s;&|)])")
+# commands that set the variables they name to a value read when the step runs: from their input (read, mapfile),
+# their list (for, select) or their format (printf -v)
+_READS_INTO = frozenset({"read", "mapfile", "readarray"})
+
+
+def _fresh_temps(code: str) -> dict:
+    """{name: [whether it sets a fresh mktemp path (_FRESH_TEMP), for each `name=` word of the piece, in order]}, read
+    from the piece's text outside quotes and heredoc bodies. Only a word at the piece's own level is fresh: one inside
+    a subshell or a command substitution sets the variable there alone. _assign takes the marks in the order the
+    shell reader gives the words, so a later assignment of the same command wins, as in the shell."""
+    text = shellparse.strip_heredocs(code)
+    out, stack, i, n = {}, [], 0, len(text)
+    while i < n:
+        ch, top = text[i], (stack[-1] if stack else None)
+        if top == "'":
+            if ch == "'":
+                stack.pop()
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == '"' and top == '"' or ch == "`" and top == "`" or ch == ")" and top == "(":
+            stack.pop()
+        elif text.startswith("$(", i) or (ch == "(" and top != '"'):
+            stack.append("(")
+            i += 2 if ch == "$" else 1
+            continue
+        elif ch == "`" or (ch in "'\"" and top != '"'):
+            stack.append(ch)
+        elif top is None and (i == 0 or text[i - 1] in " \t\n;&|"):
+            m = _ASSIGN_AT.match(text, i)
+            if m:
+                out.setdefault(m.group(1), []).append(bool(_FRESH_TEMP.match(text, m.end())))
+                i = m.end()
+                continue
+        i += 1
+    return out
+
+
+def _set_by_command(argv, words, env: dict) -> None:
+    """Each variable a command sets to a value read when the step runs (_READS_INTO, a for or select loop, printf -v)
+    holds a path this Mac cannot tell for the rest of the step: `read LOG <<< "$HOME/.bashrc"; pytest > "$LOG"`."""
+    names = []
+    k = 0
+    while k < len(argv) and argv[k] in shellparse.RESERVED and argv[k] != "select":
+        k += 1
+    if argv[k:k + 1] in (["for"], ["select"]):
+        names = argv[k + 1:k + 2]
+    elif words and os.path.basename(words[0]) in _READS_INTO:
+        names = words[1:]  # its options' values too: a name too many only makes devkit more careful
+    elif words and os.path.basename(words[0]) == "printf":
+        for j, w in enumerate(words[1:], 1):
+            if w == "-v":
+                names = words[j + 1:j + 2]
+            elif w.startswith("-v"):
+                names = [w[2:]]
+            if not w.startswith("-") or w == "--" or names:
+                break
+    for name in names:
+        if _NAME.fullmatch(name):
+            env[name] = _UNKNOWN
+
+
+def _assign(argv, words, state: dict) -> None:
+    """A variable the step sets for the rest of its script (`LOG=~/.bashrc`, `export LOG="$HOME/.npmrc"`) goes into
+    the step's variables (`state["env"]`), expanded as the shell does (`~`, the variables _expand_params knows), so a
+    later redirect or tee target that names it (`pytest > $LOG`) is the file it holds. The words count in their
+    order: a fresh mktemp path (`state["fresh"]`, _fresh_temps) holds a path in the temporary folder until a later
+    word sets the variable again. A value made of a command's output keeps its `$`, so _shell_path cannot tell where
+    it points, and so does one that read, for or printf -v sets (_set_by_command); an assignment in front of a command
+    (`LOG=x pytest`) is that command's own and is left alone."""
+    env, fresh = state["env"], state.get("fresh") or {}
+    marks = []  # whether each word of argv sets a fresh mktemp path, in the order of the piece's `name=` words
+    for w in argv:
+        m = _ASSIGNMENT.fullmatch(w)
+        queue = fresh.get(m.group(1)) if m else None
+        marks.append(queue.pop(0) if queue else False)
+    if not words:
+        given = range(len(argv))
+    elif os.path.basename(words[0]) in _DECLARES and list(argv[len(argv) - len(words):]) == list(words):
+        given = [k for k in range(len(argv) - len(words) + 1, len(argv)) if not argv[k].startswith(("-", "+"))]
+    else:
+        _set_by_command(argv, words, env)
+        return
+    for k in given:
+        m = _ASSIGNMENT.fullmatch(argv[k])
+        if not m:
+            continue
+        if marks[k]:
+            env[m.group(1)] = os.path.join(tempfile.gettempdir(), f"mktemp-{m.group(1)}")
+        else:
+            env[m.group(1)] = _expand_params(_home_tilde(m.group(2)), env)
+
+
 def _prep_one(argv, words, as_root: bool, state: dict):
     """("setup", why) when this one command only sets up a hosted runner, ("home", why) when it writes into the home
     folder outside the checkout (setup unless its piece runs a check), ("home-dot", why) or ("home-root", why) when
     that write goes into a dotfile or a dot folder, or runs as root, ("root-write", why) when it writes as root
     anywhere else but a system folder (`pytest | sudo tee /tmp/x.log`; these three are setup with no check beside
-    them, and a block next to one), ("root-system", why) when it writes as root into a system folder (setup unless a
-    check that is not a download feeds it), ("root", why) when it is a check that runs as root, or None. `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    them, and a block next to one), ("root-system", why) when it writes as root into a system folder, ("root-setup",
+    why) when it is any other runner setup run as root (both setup unless a check that is not a download feeds them),
+    ("root", why) when it is a check that runs as root, or None. A variable it sets for the rest of the step goes
+    into `state` (_assign). `state` carries the folder `cd` went to ("here"), the checkout ("top") and the variables."""
+    _assign(argv, words, state)
     if not words:
         return None
     env, top = state["env"], state["top"]
@@ -2480,7 +2689,7 @@ def _prep_one(argv, words, as_root: bool, state: dict):
         # "home": setup only when its piece runs no check (_classify); a check's log piped to tee still runs. A
         # dotfile or dot folder, or a write as root, blocks the step instead next to a check.
         targets = _written(words, _WRITERS[name])
-        found = _home_write(targets, as_root, state)
+        found = _home_write(targets, as_root, state) or (None if as_root else _unknown_write(targets, state))
         if found:
             return found
         # A write as root cannot run here, so next to a check it blocks: skipping `pytest | sudo tee /tmp/x.log`
@@ -2496,7 +2705,7 @@ def _prep_one(argv, words, as_root: bool, state: dict):
             return "root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do on this Mac"
         if name in _ROOT_SETUP or _informational(argv, words) or _SERVICE_VERBS & set(pos) or \
                 _SETUP_SCRIPT.search(name) or re.match(r"/(?:etc|sbin|usr/sbin)/", words[0]):
-            return "setup", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
+            return "root-setup", f"runner prep (sudo {' '.join(words[:2])} runs as root on the runner's machine)"
         return "root", f"runs {' '.join(words[:2])} as root (sudo), which dev ci --run does not do on this Mac"
     return None
 
@@ -2590,7 +2799,10 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     a substitution that runs the setup, next to a check, is tangled: the setup cannot be taken out without the check.
     `source`/`.` and a command or process substitution (see _substitutions) are checks. A write into the home folder,
     by a writing command or a shell redirect, is setup only in a piece that runs no check: `pytest | tee
-    ~/pytest.log` and `pytest > ~/pytest.log` are the check, and run."""
+    ~/pytest.log` and `pytest > ~/pytest.log` are the check, and run. A redirect or a writing command's target this
+    Mac cannot tell (_unknown_write) is setup alone too, and next to a check it blocks the piece, as a dotfile does:
+    `LOG=$(echo ~/.bashrc); pytest > $LOG` is not run. A variable set to a fresh mktemp path is known until a later
+    word sets it again (_fresh_temps, _assign)."""
     code = piece["code"]
     piped = _PIPED_INSTALLER.search(code)
     setup = "runner prep (curl … | sh runs an installer downloaded from the internet)" if piped else None
@@ -2600,7 +2812,7 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
     def wrote(got, words):  # a write outside the checkout (_OUTSIDE_KINDS): setup alone, a block next to a check
         nonlocal outside, held, system
         outside = outside or (got[1], " ".join(words[:2]))
-        if got[0] == "root-system":
+        if got[0] in _ROOT_SETUP_KINDS:
             system = system or os.path.basename(words[0])
         elif got[0] in ("home-root", "root-write"):
             held = held or ("root", f"runs {os.path.basename(words[0])} as root (sudo), which dev ci --run does "
@@ -2609,9 +2821,17 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
             target = got[1].split("writes ", 1)[1].split(" into the home folder", 1)[0]
             held = held or ("tangled", f"writes {target} into a dotfile of the home folder next to a check, which "
                                        f"would change this Mac's own settings: write the log inside the checkout")
+        elif got[0] == "unknown":
+            target = got[1].split("writes ", 1)[1].split(", a path this Mac cannot tell", 1)[0]
+            held = held or ("tangled", f"writes {target}, a path this Mac cannot tell next to a check: it may be any "
+                                       f"file, a dotfile of the home folder as well, so devkit cannot rule out a "
+                                       f"write outside the checkout: write the log to a path inside the checkout or "
+                                       f"from mktemp")
 
+    state["fresh"] = _fresh_temps(code)
     for argv, words, as_root, container, redirects in _commands(code, state=state):
-        shell = _home_write(*redirects, state)  # `pytest > ~/.bashrc`: the shell writes it, whatever the command
+        # `pytest > ~/.bashrc`, `pytest > "$(…)"`: the shell writes it, whatever the command
+        shell = _home_write(*redirects, state) or _unknown_write(redirects[0], state)
         if shell:
             wrote(shell, words)
         nested = nested or container
@@ -2644,10 +2864,12 @@ def _classify(piece: dict, state: dict, installs: bool) -> dict:
         # runs cannot be left out without the command that uses its output, so next to a check it is tangled; one
         # that only feeds the setup (`apt-get install "linux-headers-$(uname -r)"`) leaves the piece setup.
         checks.append([script])
-        inside = dict(state)  # it runs in a subshell of its own: a `cd` in it holds for the rest of it only
+        # a subshell of its own: its `cd` and variables stay in it
+        inside = dict(state, env=dict(state["env"]), fresh=_fresh_temps(script))
         for argv, words, as_root, container, redirects in _commands(script, state=inside):
             got = None if container else _prep_one(argv, words, as_root, inside)
-            got = got if got and got[0] in ("setup",) + _OUTSIDE_KINDS else _home_write(*redirects, inside)
+            got = got if got and got[0] in ("setup",) + _OUTSIDE_KINDS else \
+                _home_write(*redirects, inside) or _unknown_write(redirects[0], inside)
             if got:
                 setup, first, nested = setup or got[1], first or " ".join(words[:2]), True
     why = setup or install
@@ -2667,7 +2889,7 @@ def _separate(run: str, cwd: str, root: str, env: dict, installs: bool = False) 
     had succeeded: the tools installed here are used, and a missing one fails the step), "dropped" lists them.
     "tangled": setup and a check that cannot be separated (a nested shell, a subshell, a heredoc). "root": the check
     itself runs as root. `installs`: dependency installs (npm ci, pip install) count as setup too, as for dev ci --run."""
-    state = {"here": os.path.realpath(cwd), "top": os.path.realpath(root), "env": env}
+    state = {"here": os.path.realpath(cwd), "top": os.path.realpath(root), "env": dict(env)}  # its own variables
     pieces = _top_pieces(run)
     whole = pieces is None
     if whole:  # the shell reader leaves heredoc bodies out
@@ -2950,6 +3172,10 @@ def ci_command(a, top):
             return 0
         return no_evidence(c, "push")
     if a.mark_passed:
+        from . import changes  # the CHANGELOG check dev ci --run makes holds for a suite run by hand too
+        bad = changes.ci_problem(c.top, c.branch)
+        if bad:
+            return fail(*bad)
         tree = work_tree(c.top)
         if not tree:
             return fail("could not compute the working tree")
@@ -2967,19 +3193,59 @@ def _fmt_secs(s) -> str:
     return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
 
 
+CI_KEEP_DAYS = 30  # the local CI evidence, and the step logs and records of a checkout nothing has run in since
+
+
 def _steps_file(c) -> Path:
-    return _ci_dir() / "steps" / f"{_key(c)}.json"
+    return _ci_dir() / "steps" / f"{_checkout_key(c)}.json"
 
 
 def step_records(c) -> dict:
-    """The last result of every local CI step: {"<job> › <step>": {rc, tree, sha, secs, how, failed_tests, …}}."""
+    """The last result of every local CI step in this checkout: {"<job> › <step>": {rc, tree, sha, secs, how,
+    failed_tests, …}}. Each checkout keeps its own (_checkout_key): another worktree's run never changes what
+    --resume keeps here."""
     data = core.read_json(_steps_file(c), {})
     return (data.get("steps") or {}) if isinstance(data, dict) else {}
 
 
+def _step_history(c) -> dict:
+    """{"<job> › <step>": {"longest": seconds}}: the longest whole pass of each step in any checkout of the project,
+    and in the one file the project kept before each checkout had its own, so the limit it sets (step_limit) holds
+    in a new worktree too."""
+    found = {}
+    files = [_ci_dir() / "steps" / f"{_key(c)}.json"] + \
+        [Path(f) for f in _glob.glob(str(_ci_dir() / "steps" / (_glob.escape(_key(c)) + "@*.json")))]
+    for f in files:
+        data = core.read_json(f, {})
+        steps = data.get("steps") if isinstance(data, dict) else None
+        for key, rec in (steps.items() if isinstance(steps, dict) else ()):
+            secs = _longest_pass(rec)
+            if secs and secs > (found.get(key) or 0):
+                found[key] = secs
+    return {key: {"longest": secs} for key, secs in found.items()}
+
+
+def _prune_ci_runs() -> None:
+    """Remove the step logs and records of every checkout nothing has run dev ci --run in for CI_KEEP_DAYS days (a
+    worktree removed long ago), as record_evidence does with the evidence markers."""
+    cutoff = time.time() - CI_KEEP_DAYS * 86400
+    for d in ((_ci_dir() / "logs").iterdir() if (_ci_dir() / "logs").is_dir() else ()):
+        try:
+            if d.is_dir() and d.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+    for f in (_ci_dir() / "steps").glob("*.json"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
 def _save_step(c, key, rec) -> None:
-    """Record step `key`'s result in the project's steps file, read, changed and written under the file's lock (a
-    second `dev ci --run` of the project saving at once waits instead of dropping this step) and written in one step
+    """Record step `key`'s result in this checkout's steps file, read, changed and written under the file's lock (a
+    second `dev ci --run` of the checkout saving at once waits instead of dropping this step) and written in one step
     through a temporary file of its own (core.replace_text). A lock still held after its wait is written over: a lost
     record only runs its step again on --resume."""
     f = _steps_file(c)
@@ -3321,6 +3587,94 @@ def _longest_pass(rec):
     return None
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except PermissionError:
+        return True  # a member runs as another user (sudo): it is there, though no signal reaches it
+    except OSError:
+        return False
+    return True
+
+
+def _signal_group(proc, sig, grace: float) -> None:
+    """Send `sig` to the group `proc` leads and wait up to `grace` seconds for every process of it to end."""
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, sig)
+    end = time.monotonic() + grace
+    while _group_alive(proc.pid) and time.monotonic() < end:
+        proc.poll()  # reap the shell, so it does not keep the group alive as a zombie
+        time.sleep(0.05)
+
+
+def _stop_group(proc, grace: float = 5.0) -> None:
+    """Stop every process of the group `proc` leads (it started with start_new_session): SIGTERM, up to `grace`
+    seconds for them to end, then SIGKILL, and reap the shell. A second Ctrl-C during the grace ends the wait at
+    once, not the stop: the SIGKILL still goes out and the shell is reaped before the interrupt goes on, so a process
+    that ignores SIGTERM never outlives dev ci --run."""
+    try:
+        _signal_group(proc, signal.SIGTERM, grace)
+    finally:
+        if _group_alive(proc.pid):
+            _signal_group(proc, signal.SIGKILL, grace)
+        proc.wait()
+
+
+def _signal_exit(signum) -> BaseException:
+    """What a signal raises in dev while a step runs: KeyboardInterrupt for Ctrl-C, else SystemExit with the shell's
+    exit code for a process the signal ended."""
+    return KeyboardInterrupt() if signum == signal.SIGINT else SystemExit(128 + signum)
+
+
+def _step_shell(argv: list, cwd, stdout, env: dict, timeout: float, grace: float = 5.0):
+    """Run one `dev ci --run` step's shell in a session of its own -> CompletedProcess. Past `timeout` seconds every
+    process of its group stops before TimeoutExpired is raised: subprocess.run's timeout ends only the shell, and the
+    suite the shell started ran on, writing the step's log. Ctrl-C stops them too, and so do SIGTERM and SIGHUP to
+    dev (a stopped agent task, a closed terminal), which no longer reach a session of their own: while the step runs
+    they raise SystemExit where they would end dev at once, and dev exits 128 + the signal once the step stopped. A
+    signal dev ignores (SIGHUP under nohup) or handles itself keeps its handler. A Ctrl-C, SIGTERM or SIGHUP that
+    comes while Popen still starts the shell, which may run already, waits until Popen hands it over, then stops it
+    the same way: raised inside Popen, it left dev no shell to stop, and the step ran on after dev exited. The shell
+    gets `env` without the call token (identity.detached_env), whoever built it: a step's processes never act for the
+    call that ran dev."""
+    from . import identity
+    starting, held = [True], []
+
+    def on_signal(signum, frame):
+        if starting:
+            held.append(signum)
+            return
+        raise _signal_exit(signum)
+    saved = {}
+    for sig, default in ((signal.SIGINT, signal.default_int_handler), (signal.SIGTERM, signal.SIG_DFL),
+                         (signal.SIGHUP, signal.SIG_DFL)):
+        try:
+            if signal.getsignal(sig) == default:
+                saved[sig] = signal.signal(sig, on_signal)
+        except (ValueError, OSError):  # not the main thread: only the main thread can handle a signal
+            pass
+    try:
+        try:
+            proc = subprocess.Popen(argv, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT,
+                                    env=identity.detached_env(env), start_new_session=True)
+        except BaseException:
+            starting.clear()  # no shell started: a signal from here on ends dev at once
+            if held:
+                raise _signal_exit(held[0]) from None
+            raise
+        try:
+            starting.clear()
+            if held:
+                raise _signal_exit(held[0])
+            return subprocess.CompletedProcess(argv, proc.wait(timeout=timeout))
+        except BaseException:  # the limit, KeyboardInterrupt, or SystemExit from SIGTERM or SIGHUP
+            _stop_group(proc, grace)
+            raise
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+
+
 def step_limit(s, rec=None, given=None) -> tuple:
     """The minutes local step `s` may run and where that number comes from -> (minutes, source): `given` (the
     command line's --step-timeout); else the step's own timeout-minutes, then its job's, as the workflow declares
@@ -3351,13 +3705,21 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
     if not jobs:
         return fail("no GitHub Actions workflows to run here",
                     'run your local suite, then: dev ci --mark-passed --note "<command>: <result>"')
+    from . import changes  # a repository with change fragments: CHANGELOG.md is written on release branches only
+    bad = changes.ci_problem(c.top, c.branch)
+    if bad and not dry_run:
+        return fail(*bad)
+    if bad:  # a dry run still plans the steps, and says the real run stops here
+        ui.warn(f"dev ci --run would fail before any step: {bad[0]}")
+        for ln in bad[1].splitlines():
+            print(f"  {ui.dim(ln)}", file=sys.stderr)
     runnable = [s for j in jobs if not j["skip"] for s in j["steps"] if not s["skip"]]
     skipped = [(j["job"], j["workflow"], j["skip"], j["blocking"]) for j in jobs if j["skip"]] + \
               [(s["job"], s["name"], s["skip"], s["blocking"]) for j in jobs if not j["skip"] for s in j["steps"]
                if s["skip"] and s["skip"] != "setup"]
     setup = sum(1 for j in jobs for s in j["steps"] if s["skip"] == "setup")
-    history = step_records(c)  # each step's last record: what --resume keeps, and its longest pass for its limit
-    records = history if resume else {}
+    history = _step_history(c)  # each step's longest pass in any checkout of the project: its limit (step_limit)
+    records = step_records(c) if resume else {}  # each step's last record in this checkout: what --resume keeps
     if resume and not records:
         info("nothing recorded yet: --resume runs every step")
         resume = False
@@ -3397,7 +3759,8 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
         launcher.write_text(f"#!/bin/sh\nexec {shlex.quote(shutil.which('python3'))} \"$@\"\n")
         launcher.chmod(0o700)
         info("python → python3 for these steps (setup-python provides `python` on the runner)")
-    logs = _ci_dir() / "logs" / _key(c)
+    _prune_ci_runs()
+    logs = _ci_dir() / "logs" / _checkout_key(c)  # this checkout's own: a run in another worktree never empties it
     logs.mkdir(parents=True, exist_ok=True)
     for f in logs.glob("*.log"):
         f.unlink()
@@ -3480,11 +3843,11 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
             timed_out = False
             try:
                 with open(log, "w") as fh:
-                    rc = subprocess.run(argv,
-                                        cwd=s["cwd"], stdout=fh, stderr=subprocess.STDOUT, env=env,
-                                        timeout=limit * 60).returncode
+                    rc = _step_shell(argv, cwd=s["cwd"], stdout=fh, env=env, timeout=limit * 60).returncode
             except subprocess.TimeoutExpired:
                 rc, timed_out = 124, True
+                with open(log, "a") as fh:
+                    fh.write(f"\ndevkit: the step passed its limit of {limit:g} min; its processes were stopped\n")
             except OSError as e:
                 log.write_text(str(e))
                 rc = 127
@@ -4917,19 +5280,6 @@ def delivery_policy(top) -> dict:
         return {}
 
 
-_PEP440_PARTS = re.compile(r"^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?(?:\.dev(\d+))?$")
-
-
-def _pep440_key(tag: str) -> tuple:
-    """PEP 440's order of a version tag: 1.0.dev1 < 1.0a1 < 1.0b1.dev1 < 1.0b1 < 1.0rc1 < 1.0 < 1.0.post1."""
-    epoch, release, pre, n, post, dev = _PEP440_PARTS.match(tag).groups()
-    parts = [int(x) for x in release.split(".")]
-    while len(parts) > 1 and parts[-1] == 0:
-        parts.pop()  # 1.0 is 1.0.0
-    stage = ({"a": 0, "b": 1, "rc": 2}[pre], int(n)) if pre else (-1, 0) if dev and not post else (3, 0)
-    return (int(epoch or 0), tuple(parts), stage, int(post) if post else -1, (0, int(dev)) if dev else (1, 0))
-
-
 def version_scheme(top):
     """-> (scheme 'calver'|'semver'|'pep440', latest version tag or None, next CalVer). The recorded policy wins;
     without one, version tags that use PEP 440's pre, post or dev releases (v0.1.0a16) make it pep440, as `dev
@@ -4945,8 +5295,8 @@ def version_scheme(top):
     if recorded == "calver":
         return "calver", cur, nxt
     if recorded == "pep440" or (not recorded and delivery._scheme_from_tags(every)[0] == "pep440"):
-        pep = [t for t in every if delivery.PEP440_RE.match(t) and _PEP440_PARTS.match(t)]
-        return "pep440", (max(pep, key=_pep440_key) if pep else None), nxt
+        pep = [t for t in every if delivery.PEP440_RE.match(t) and delivery.PEP440_PARTS.match(t)]
+        return "pep440", (max(pep, key=delivery.version_key) if pep else None), nxt
     files = version_files(top)
     if recorded == "semver" or other or any(not _plausible_calver(v) for v in files.values()):
         return "semver", (sorted(other or tags, key=key)[-1] if (other or tags) else None), nxt
@@ -5201,7 +5551,31 @@ def _give_back(held):
         info(f"{resource} stays claimed until it expires ({type(e).__name__}: {e})")
 
 
+def release_version_refusal(top, version: str, scheme: str, nxt: str):
+    """Why `version` cannot be released -> (reason, fix or None), or None. dev release checks it on the default branch
+    before it tags, and on a release branch before it writes the change fragments into that version's CHANGELOG
+    section: a PEP 440 version where the repository uses PEP 440, else X.Y.Z, and a plausible YY.MM.PATCH under
+    CalVer; and no tag of it yet, as the caller fetched the tags from origin: neither the tag dev release creates
+    (delivery.release_tag: v<version>, or <version> where the project's tag format has no v) nor the other spelling,
+    so a project that changed its format cannot release a shipped version twice. `scheme`, `nxt`: version_scheme's."""
+    from . import delivery
+    if scheme == "pep440":
+        if not (delivery.PEP440_RE.match(version) and delivery.PEP440_PARTS.match(version)):
+            return f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)", None
+    elif not _VERSION_RE.match(version):
+        return f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)", None
+    if scheme == "calver" and not _plausible_calver(version):
+        return f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})", None
+    ours = delivery.release_tag(top, version, delivery_policy(top))
+    tag = next((t for t in (ours, version if ours != version else f"v{version}") if _ref_sha(top, f"refs/tags/{t}")),
+               None)
+    if tag:
+        return f"tag {tag} already exists", (f"next version: {nxt}" if scheme == "calver" else None)
+    return None
+
+
 def _release(a, c) -> int:
+    from . import changes
     if not c.has_origin:
         return refuse("no `origin` remote to release to")
     fetched, err = _fetch(c, "--tags")
@@ -5213,6 +5587,8 @@ def _release(a, c) -> int:
         return refuse(f"this project releases with {tool} (its delivery policy)",
                       f"merge the {tool} release PR; it tags and publishes (dev delivery shows the policy)")
     if c.branch != c.default:
+        if changes.release_branch(c.branch) and changes.uses_fragments(c.top):  # fragments go into its CHANGELOG
+            return changes.prepare_release(c, a)
         return refuse(f"releases are cut from `{c.default}` (you are on `{c.branch or 'a detached HEAD'}`)",
                       f"merge the release PR (dev pr merge), then: git switch {c.default} && dev rebase")
     n = _dirty(c.top, untracked=False)
@@ -5227,22 +5603,19 @@ def _release(a, c) -> int:
     if not version:
         return refuse(f"this repository uses its own version scheme (latest {current or 'in its files'})",
                       "dev release --version X.Y.Z")
-    if scheme == "pep440":
-        from . import delivery
-        if not (delivery.PEP440_RE.match(version) and _PEP440_PARTS.match(version)):
-            return refuse(f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)")
-    elif not _VERSION_RE.match(version):
-        return refuse(f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)")
-    if scheme == "calver" and not _plausible_calver(version):
-        return refuse(f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})")
-    tag = "v" + version
-    if _ref_sha(c.top, f"refs/tags/{tag}"):
-        return refuse(f"tag {tag} already exists", f"next version: {nxt}" if scheme == "calver" else None)
+    bad = release_version_refusal(c.top, version, scheme, nxt)
+    if bad:
+        return refuse(*bad)
+    from . import delivery
+    tag = delivery.release_tag(c.top, version, delivery_policy(c.top))  # the tag the release workflow runs on
     wrong = {f: v for f, v in version_files(c.top).items() if not _release_version_matches(f, v, version)}
     if wrong:
         f, v = next(iter(wrong.items()))
         return refuse(f"{f} says {v}, not {version}",
                       "bump the version (and the CHANGELOG) on the release branch, merge it, then release")
+    left = changes.release_refusal(c.top, version)  # change fragments that are not in the CHANGELOG yet
+    if left:
+        return refuse(*left)
     why = (getattr(a, "why", None) or "").strip()
     pending = release_open_items(c, current)
     listing = "".join(f"\n    {it['meta']['id']} “{it['meta']['title']}” · {b} ({_merge_ref(m)})" for it, b, m in pending)
@@ -5294,8 +5667,7 @@ def _release(a, c) -> int:
         if notes:
             print(ui.dim("  notes: " + notes.splitlines()[0][:100]))
         return 0
-    from . import delivery
-    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)  # the recorded policy's tag format
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag, c.top)  # the recorded policy's tag format
     if bad:
         return refuse(bad)
     rc, _, err = core.git(c.top, "tag", "-s" if sign else "-a", tag, "-m", f"Release {version}")
@@ -5517,7 +5889,7 @@ def _tag_push(c, tag: str, sha: str, remote: str = "origin"):
     """A tag the push sends: the recorded delivery policy's tag format (delivery.tag_violation), then the embargoes,
     since a tag publishes the commits it points to. -> the refusal's exit code, or None."""
     from . import delivery
-    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag, c.top)
     if bad:
         return refuse(bad)
     return _embargo_refusal(c, tag, sha, remote=remote) if sha else None
@@ -5759,7 +6131,7 @@ def cmd_gh(a) -> int:
                                                     "--notes-start-tag"})
             if pos:
                 from . import delivery
-                bad = delivery.tag_violation(delivery.scope_for(c.top), pos[0])  # the tag gh would create
+                bad = delivery.tag_violation(delivery.scope_for(c.top), pos[0], c.top)  # the tag gh would create
                 if bad:
                     return refuse(bad)
     return EXEC(["gh", *args], cwd=cwd)
