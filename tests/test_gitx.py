@@ -2567,6 +2567,65 @@ class ReleaseTests(unittest.TestCase):
             s.branch("feat/x")
             self.assertIn("releases are cut from `main`", dev("release")[2])
 
+    def test_release_tags_the_version_in_the_projects_tag_format_and_its_release_workflow_runs_on_it(self):
+        # dev release tagged v<version> whatever the format, so a repository whose tags have no v never started the
+        # release workflow dev ci init generates for it, which runs on <version> tags only
+        from devkit import pipelines
+        cases = (("a policy without the v", {"versioning": "calver", "tag_format": "YY.MM.PATCH"}, (), "26.11.4"),
+                 ("a policy with the v", {"versioning": "calver", "tag_format": "vYY.MM.PATCH"}, (), "v26.11.4"),
+                 ("nothing recorded or tagged", None, (), "v26.11.4"),
+                 ("no policy, tags without the v", None, ("26.11.3",), "26.11.4"))
+        for name, policy, tags, want in cases:
+            other = want[1:] if want.startswith("v") else "v" + want
+            with self.subTest(name), Sandbox() as s:
+                if policy:
+                    f = delivery.POLICIES / "acme" / "widget.json"
+                    f.parent.mkdir(parents=True)
+                    f.write_text(json.dumps(policy))
+                for t in tags:
+                    git(s.repo, "tag", t)
+                git(s.repo, "push", "-q", "origin", "--tags")
+                dev("ci", "--mark-passed")
+                s.gh.on(["run", "list"], [])
+                s.gh.on(["release", "create"], f"https://github.com/acme/widget/releases/tag/{want}\n")
+                rc, out, err = dev("release", "--version", "26.11.4")
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(s.head(f"{want}^{{commit}}", repo=s.origin), s.head())
+                self.assertEqual(gitx._ref_sha(s.origin, f"refs/tags/{other}"), "")
+                call = s.gh.called("release", "create")[0]
+                self.assertEqual((call[call.index("create") + 1], call[call.index("--title") + 1]), (want, want))
+                self.assertIn(f"released {want} ·", out)
+                workflow = pipelines.generate(s.repo, "github", policy=policy)[0][".github/workflows/release.yml"]
+                globs = pipelines.load_yaml(workflow)["on"]["push"]["tags"]
+                self.assertTrue(any(pipelines.gh_glob(g, want) for g in globs), globs)
+                self.assertFalse(any(pipelines.gh_glob(g, other) for g in globs), globs)
+                rc, _, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 2, err)
+                self.assertIn(f"tag {want} already exists", err)
+
+    def test_a_recorded_tag_format_decides_the_tag_over_the_tags_spelling_and_refuses_the_other_spelling(self):
+        # the policy and the repository's tags disagree: the policy names the new tag, and a version the repository
+        # already shipped in the other spelling is still refused, so it cannot ship twice
+        for fmt, shipped, want, other in (("YY.MM.PATCH", "v26.11.3", "26.11.4", "v26.11.4"),
+                                          ("vYY.MM.PATCH", "26.11.3", "v26.11.4", "26.11.4")):
+            with self.subTest(fmt), Sandbox() as s:
+                f = delivery.POLICIES / "acme" / "widget.json"
+                f.parent.mkdir(parents=True)
+                f.write_text(json.dumps({"versioning": "calver", "tag_format": fmt}))
+                git(s.repo, "tag", shipped)
+                git(s.repo, "push", "-q", "origin", "--tags")
+                dev("ci", "--mark-passed")
+                s.gh.on(["run", "list"], [])
+                rc, out, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 0, out + err)
+                self.assertIn(f"dry run: release {want} (calver)", out)
+                git(s.repo, "tag", other)
+                git(s.repo, "push", "-q", "origin", f"refs/tags/{other}")
+                git(s.repo, "tag", "-d", other)  # shipped from another clone: only origin has it
+                rc, out, err = dev("release", "--version", "26.11.4", "--dry-run")
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(f"tag {other} already exists", err)
+
     def test_the_recorded_delivery_policy_wins(self):
         with Sandbox() as s:
             dev("ci", "--mark-passed")
@@ -3140,6 +3199,22 @@ class GitPushFlagTests(unittest.TestCase):
                     rc, err = self.push(s, *args)
                     self.assertEqual(rc, 2)
                     self.assertIn("`release-1` is not a SemVer tag", err)
+
+    def test_a_policy_without_a_tag_format_names_the_fix_in_the_spelling_of_the_repositorys_tags(self):
+        # the refusal told a repository whose tags have no v to use vMAJOR.MINOR.PATCH, a tag dev release never makes
+        with Sandbox() as s:
+            f = delivery.POLICIES / "acme" / "widget.json"
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"versioning": "semver"}))
+            git(s.repo, "tag", "1.0.0")
+            git(s.repo, "tag", "release-1")
+            rc, err = self.push(s, "origin", "release-1")
+            self.assertEqual(rc, 2)
+            self.assertIn("`release-1` is not a SemVer tag (MAJOR.MINOR.PATCH). Use MAJOR.MINOR.PATCH,", err)
+            dev("ci", "--mark-passed")
+            rc, _, err = dev("gh", "release", "create", "release-1", "--notes", "x")
+            self.assertEqual(rc, 2)
+            self.assertIn("Use MAJOR.MINOR.PATCH,", err)
 
     def test_follow_tags_follows_the_recorded_tag_format(self):
         # --follow-tags sends the branch and the local tags the remote lacks along with it

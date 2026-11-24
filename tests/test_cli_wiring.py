@@ -161,6 +161,32 @@ class ParserReadsFlagsAsTheGuardDoesTests(unittest.TestCase):
         self.assertEqual(sorted(flags & shellparse._DEV_VALUES), [])  # a flag it reads as a value hides the next word
 
 
+class CalverTagTests(unittest.TestCase):
+    # `dev calver` named the next tag v<next> in every repository, though dev release tags without the v where the
+    # repository's tags have none
+
+    def test_dev_calver_names_the_next_tag_as_the_repository_spells_its_tags(self):
+        from devkit import delivery
+        for tags, prefix in ((("v26.10.4",), "v"), (("26.10.4", "26.10.5"), "")):
+            with self.subTest(tags=tags), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(delivery, "POLICIES", Path(d) / "policies"):
+                repo = Path(d) / "repo"
+                subprocess.run(["git", "init", "-q", str(repo)], check=True)
+                subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                                "--allow-empty", "-m", "x"], check=True)
+                for t in tags:
+                    subprocess.run(["git", "-C", str(repo), "tag", t], check=True)
+                nxt = cli.calver(str(repo))[1]
+                cwd = os.getcwd()
+                os.chdir(repo)
+                try:
+                    rc, out = dev("calver")
+                finally:
+                    os.chdir(cwd)
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"(tag {prefix}{nxt}, branch release/{nxt})", out)
+
+
 class ClosedPipeTests(unittest.TestCase):
     # `dev audit --json | head -c 100`: the reader closes the pipe before dev has written everything. dev stops
     # quietly with the exit code of a program that a closed pipe stopped (128 + SIGPIPE, as `yes | head` reports it)

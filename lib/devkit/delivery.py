@@ -27,6 +27,8 @@ SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
 # A PEP 440 public version in its normal form: [N!]N(.N)*[{a|b|rc}N][.postN][.devN]
 PEP440_RE = re.compile(r"^v?(?:\d+!)?\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?$")
 PEP440_ONLY = re.compile(r"\d(?:a|b|rc)\d+|\.post\d+|\.dev\d+")  # a pre, post or dev release: not SemVer's syntax
+# The same, in its parts: epoch, release numbers, pre-release (a, b or rc and its number), post-release, dev release
+PEP440_PARTS = re.compile(r"^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?(?:\.dev(\d+))?$")
 PEP440_FORMAT = "MAJOR.MINOR.MICRO[{a|b|rc}N][.postN][.devN]"
 FIELDS = ("versioning", "tag_format", "version_source", "release_flow", "changelog", "test_gate", "ci", "branch_model",
           "publish", "deploy", "kind", "release_train", "job_timeout_minutes", "delete_branch_on_merge")
@@ -66,8 +68,37 @@ def _read(p: Path, limit=300_000) -> str:
 
 # --------------------------------------------------------------------------- detection
 
+def version_key(tag: str):
+    """Where a version tag stands in release order, with its v removed -> a key that sorts older before newer, or None
+    for a tag that names no version. PEP 440's order (1.0.dev1 < 1.0a1 < 1.0b1.dev1 < 1.0b1 < 1.0rc1 < 1.0 <
+    1.0.post1), which orders CalVer and SemVer releases by their numbers too, and a SemVer pre-release (1.2.3-rc.1)
+    before its release, its dot-separated identifiers compared as SemVer does: numbers as numbers, before words."""
+    m = PEP440_PARTS.match(tag)
+    ids = ()
+    if m:
+        epoch, release, pre, n, post, dev = m.groups()
+    else:
+        s = SEMVER_RE.match(tag)
+        if not s:
+            return None
+        epoch, release, pre, n, post, dev = None, ".".join(s.groups()), None, None, None, None
+        label = tag[s.end(3):]
+        if label.startswith("-"):  # a pre-release; +build metadata does not change the order
+            ids = tuple((0, int(x)) if x.isdigit() else (1, x) for x in label[1:].split("."))
+    parts = [int(x) for x in release.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()  # 1.0 is 1.0.0
+    stage = ({"a": 0, "b": 1, "rc": 2}[pre], int(n)) if pre else (-1, 0) if ids or (dev and not post) else (3, 0)
+    return (int(epoch or 0), tuple(parts), stage, int(post) if post else -1, (0, int(dev)) if dev else (1, 0), ids)
+
+
 def _tags(repo: Path) -> list:
-    return [t for t in core.gitout(repo, "tag", "--sort=-v:refname").splitlines()[:60] if t]
+    """The repository's tags, the newest version first, then the tags that name no version; at most 60. Versions are
+    compared with their v removed (version_key): git's own version sort lists every v tag before every tag that
+    starts with a digit, so a project that dropped the v, or took it up, would read an old tag as its newest."""
+    tags = [t for t in core.gitout(repo, "tag", "--sort=-v:refname").splitlines() if t]
+    keys = {t: version_key(t) for t in tags}
+    return (sorted((t for t in tags if keys[t]), key=keys.get, reverse=True) + [t for t in tags if not keys[t]])[:60]
 
 
 def _pep440(v: str) -> bool:
@@ -77,18 +108,20 @@ def _pep440(v: str) -> bool:
 
 def _scheme_from_tags(tags: list):
     """-> (scheme, tag format) of the version tags: calver, semver, pep440 (tags that use PEP 440's pre, post or dev
-    releases and none of SemVer's own `-pre` or `+build` forms), other, or (None, None) without tags."""
+    releases and none of SemVer's own `-pre` or `+build` forms), other, or (None, None) without tags. The format is
+    spelled as the scheme's newest version tag is (version_key), with or without the v, in whatever order `tags` are."""
     cal = [t for t in tags if CALVER_RE.match(t) and 1 <= int(CALVER_RE.match(t).group(2)) <= 12]
     sem = [t for t in tags if SEMVER_RE.match(t) and t not in cal]
     pep = [t for t in tags if _pep440(t) and t not in cal and t not in sem]
     if not tags:
         return None, None
+    v = lambda ts: max(ts, key=version_key).startswith("v")  # noqa: E731
     if len(cal) >= max(1, len(sem) + len(pep)):
-        return "calver", "vYY.MM.PATCH" if cal[0].startswith("v") else "YY.MM.PATCH"
+        return "calver", "vYY.MM.PATCH" if v(cal) else "YY.MM.PATCH"
     if pep and not any(re.search(r"[-+]", t) for t in sem):
-        return "pep440", ("v" if pep[0].startswith("v") else "") + PEP440_FORMAT
+        return "pep440", ("v" if v(pep + sem) else "") + PEP440_FORMAT  # a final release such as 1.0.0 is PEP 440 too
     if sem:
-        return "semver", "vMAJOR.MINOR.PATCH" if sem[0].startswith("v") else "MAJOR.MINOR.PATCH"
+        return "semver", "vMAJOR.MINOR.PATCH" if v(sem) else "MAJOR.MINOR.PATCH"
     return "other", tags[0]
 
 
@@ -315,28 +348,59 @@ def summary_line(scope: str) -> str:
             (f" · release train: {p['release_train']}" if p.get("release_train") else ""))
 
 
-def tag_violation(scope: str, tag: str):
-    """A tag that does not follow the recorded scheme -> the reason, else None."""
+def release_tag_format(repo, policy=None) -> str:
+    """The format of the project's release tags: `policy`'s tag_format (the recorded delivery policy when `policy` is
+    None), else the one dev delivery detects from the repository's CalVer, SemVer or PEP 440 tags, else vYY.MM.PATCH.
+    A repository whose tags follow no version scheme has no format to detect, so it gets the default."""
+    if policy is None:
+        try:
+            policy = load(scope_for(repo))
+        except Exception:  # the handoff repository is optional
+            policy = None
+    fmt = (policy or {}).get("tag_format")
+    if not fmt:
+        scheme, found = _scheme_from_tags(_tags(Path(repo)))
+        fmt = found if scheme in ("calver", "semver", "pep440") else None
+    return fmt or "vYY.MM.PATCH"
+
+
+def release_tag(repo, version: str, policy=None) -> str:
+    """The tag that names `version` in this project: v<version> when its release_tag_format starts with v, else
+    <version>. dev release creates and pushes it, names its GitHub release after it, and checks it before it tags;
+    devkit's CI watch follows it; and the release workflow dev ci init generates runs on tags spelled this way
+    (release_tag(repo, "") is the prefix of that workflow's tag pattern). `policy`: release_tag_format's."""
+    return ("v" if release_tag_format(repo, policy).startswith("v") else "") + version
+
+
+def tag_violation(scope: str, tag: str, repo=None):
+    """A tag that does not follow the recorded scheme -> the reason, else None. The reason spells the tag as dev release
+    does (release_tag): `repo`'s tags spell it where the policy records no tag_format, else the v."""
     p = load(scope)
     if not p or not tag or not p.get("versioning"):
         return None
+    if repo is not None:
+        v = release_tag(repo, "", p)
+    else:
+        v = "v" if str(p.get("tag_format") or "v").startswith("v") else ""
+    fmt = p.get("tag_format") or {"calver": f"{v}YY.MM.PATCH", "semver": f"{v}MAJOR.MINOR.PATCH",
+                                  "pep440": f"{v}{PEP440_FORMAT}"}.get(p["versioning"])
     if p["versioning"] == "calver":
         m = CALVER_RE.match(tag)
         if m and 1 <= int(m.group(2)) <= 12:
             return None
-        return (f"`{tag}` does not follow this project's CalVer policy ({p.get('tag_format')}). The next version is "
-                f"`dev calver --next`; tag it as v<that>, or change the policy with `dev delivery apply --set "
+        return (f"`{tag}` does not follow this project's CalVer policy ({fmt}). The next version is "
+                f"`dev calver --next`; tag it as {v}<that>, or change the policy with `dev delivery apply --set "
                 f"versioning=… --why \"…\"`.")
     if p["versioning"] == "semver":
         if SEMVER_RE.match(tag):
             return None
-        return (f"`{tag}` is not a SemVer tag ({p.get('tag_format')}). Use vMAJOR.MINOR.PATCH, or change the policy "
+        return (f"`{tag}` is not a SemVer tag ({fmt}). Use {v}MAJOR.MINOR.PATCH, or change the policy "
                 f"with `dev delivery apply --set versioning=… --why \"…\"`.")
     if p["versioning"] == "pep440":
         if PEP440_RE.match(tag):
             return None
-        return (f"`{tag}` is not a PEP 440 version tag ({p.get('tag_format')}). Use v{PEP440_FORMAT}, for example "
-                f"v0.1.0a17, or change the policy with `dev delivery apply --set versioning=… --why \"…\"`.")
+        return (f"`{tag}` is not a PEP 440 version tag ({fmt}). Use {v}{PEP440_FORMAT}, for example "
+                f"{v}0.1.0a17, or change the policy with `dev delivery apply --set versioning=… --why \"…\"`.")
     return None
 
 

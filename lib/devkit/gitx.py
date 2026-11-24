@@ -3172,6 +3172,10 @@ def ci_command(a, top):
             return 0
         return no_evidence(c, "push")
     if a.mark_passed:
+        from . import changes  # the CHANGELOG check dev ci --run makes holds for a suite run by hand too
+        bad = changes.ci_problem(c.top, c.branch)
+        if bad:
+            return fail(*bad)
         tree = work_tree(c.top)
         if not tree:
             return fail("could not compute the working tree")
@@ -3701,6 +3705,14 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=None, resume=F
     if not jobs:
         return fail("no GitHub Actions workflows to run here",
                     'run your local suite, then: dev ci --mark-passed --note "<command>: <result>"')
+    from . import changes  # a repository with change fragments: CHANGELOG.md is written on release branches only
+    bad = changes.ci_problem(c.top, c.branch)
+    if bad and not dry_run:
+        return fail(*bad)
+    if bad:  # a dry run still plans the steps, and says the real run stops here
+        ui.warn(f"dev ci --run would fail before any step: {bad[0]}")
+        for ln in bad[1].splitlines():
+            print(f"  {ui.dim(ln)}", file=sys.stderr)
     runnable = [s for j in jobs if not j["skip"] for s in j["steps"] if not s["skip"]]
     skipped = [(j["job"], j["workflow"], j["skip"], j["blocking"]) for j in jobs if j["skip"]] + \
               [(s["job"], s["name"], s["skip"], s["blocking"]) for j in jobs if not j["skip"] for s in j["steps"]
@@ -5268,19 +5280,6 @@ def delivery_policy(top) -> dict:
         return {}
 
 
-_PEP440_PARTS = re.compile(r"^v?(?:(\d+)!)?(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?(?:\.dev(\d+))?$")
-
-
-def _pep440_key(tag: str) -> tuple:
-    """PEP 440's order of a version tag: 1.0.dev1 < 1.0a1 < 1.0b1.dev1 < 1.0b1 < 1.0rc1 < 1.0 < 1.0.post1."""
-    epoch, release, pre, n, post, dev = _PEP440_PARTS.match(tag).groups()
-    parts = [int(x) for x in release.split(".")]
-    while len(parts) > 1 and parts[-1] == 0:
-        parts.pop()  # 1.0 is 1.0.0
-    stage = ({"a": 0, "b": 1, "rc": 2}[pre], int(n)) if pre else (-1, 0) if dev and not post else (3, 0)
-    return (int(epoch or 0), tuple(parts), stage, int(post) if post else -1, (0, int(dev)) if dev else (1, 0))
-
-
 def version_scheme(top):
     """-> (scheme 'calver'|'semver'|'pep440', latest version tag or None, next CalVer). The recorded policy wins;
     without one, version tags that use PEP 440's pre, post or dev releases (v0.1.0a16) make it pep440, as `dev
@@ -5296,8 +5295,8 @@ def version_scheme(top):
     if recorded == "calver":
         return "calver", cur, nxt
     if recorded == "pep440" or (not recorded and delivery._scheme_from_tags(every)[0] == "pep440"):
-        pep = [t for t in every if delivery.PEP440_RE.match(t) and _PEP440_PARTS.match(t)]
-        return "pep440", (max(pep, key=_pep440_key) if pep else None), nxt
+        pep = [t for t in every if delivery.PEP440_RE.match(t) and delivery.PEP440_PARTS.match(t)]
+        return "pep440", (max(pep, key=delivery.version_key) if pep else None), nxt
     files = version_files(top)
     if recorded == "semver" or other or any(not _plausible_calver(v) for v in files.values()):
         return "semver", (sorted(other or tags, key=key)[-1] if (other or tags) else None), nxt
@@ -5552,7 +5551,31 @@ def _give_back(held):
         info(f"{resource} stays claimed until it expires ({type(e).__name__}: {e})")
 
 
+def release_version_refusal(top, version: str, scheme: str, nxt: str):
+    """Why `version` cannot be released -> (reason, fix or None), or None. dev release checks it on the default branch
+    before it tags, and on a release branch before it writes the change fragments into that version's CHANGELOG
+    section: a PEP 440 version where the repository uses PEP 440, else X.Y.Z, and a plausible YY.MM.PATCH under
+    CalVer; and no tag of it yet, as the caller fetched the tags from origin: neither the tag dev release creates
+    (delivery.release_tag: v<version>, or <version> where the project's tag format has no v) nor the other spelling,
+    so a project that changed its format cannot release a shipped version twice. `scheme`, `nxt`: version_scheme's."""
+    from . import delivery
+    if scheme == "pep440":
+        if not (delivery.PEP440_RE.match(version) and delivery.PEP440_PARTS.match(version)):
+            return f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)", None
+    elif not _VERSION_RE.match(version):
+        return f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)", None
+    if scheme == "calver" and not _plausible_calver(version):
+        return f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})", None
+    ours = delivery.release_tag(top, version, delivery_policy(top))
+    tag = next((t for t in (ours, version if ours != version else f"v{version}") if _ref_sha(top, f"refs/tags/{t}")),
+               None)
+    if tag:
+        return f"tag {tag} already exists", (f"next version: {nxt}" if scheme == "calver" else None)
+    return None
+
+
 def _release(a, c) -> int:
+    from . import changes
     if not c.has_origin:
         return refuse("no `origin` remote to release to")
     fetched, err = _fetch(c, "--tags")
@@ -5564,6 +5587,8 @@ def _release(a, c) -> int:
         return refuse(f"this project releases with {tool} (its delivery policy)",
                       f"merge the {tool} release PR; it tags and publishes (dev delivery shows the policy)")
     if c.branch != c.default:
+        if changes.release_branch(c.branch) and changes.uses_fragments(c.top):  # fragments go into its CHANGELOG
+            return changes.prepare_release(c, a)
         return refuse(f"releases are cut from `{c.default}` (you are on `{c.branch or 'a detached HEAD'}`)",
                       f"merge the release PR (dev pr merge), then: git switch {c.default} && dev rebase")
     n = _dirty(c.top, untracked=False)
@@ -5578,22 +5603,19 @@ def _release(a, c) -> int:
     if not version:
         return refuse(f"this repository uses its own version scheme (latest {current or 'in its files'})",
                       "dev release --version X.Y.Z")
-    if scheme == "pep440":
-        from . import delivery
-        if not (delivery.PEP440_RE.match(version) and _PEP440_PARTS.match(version)):
-            return refuse(f"`{version}` is not a PEP 440 version ({delivery.PEP440_FORMAT}, for example 0.1.0a17)")
-    elif not _VERSION_RE.match(version):
-        return refuse(f"`{version}` is not a version (YY.MM.PATCH or X.Y.Z)")
-    if scheme == "calver" and not _plausible_calver(version):
-        return refuse(f"`{version}` is not CalVer YY.MM.PATCH (next: {nxt})")
-    tag = "v" + version
-    if _ref_sha(c.top, f"refs/tags/{tag}"):
-        return refuse(f"tag {tag} already exists", f"next version: {nxt}" if scheme == "calver" else None)
+    bad = release_version_refusal(c.top, version, scheme, nxt)
+    if bad:
+        return refuse(*bad)
+    from . import delivery
+    tag = delivery.release_tag(c.top, version, delivery_policy(c.top))  # the tag the release workflow runs on
     wrong = {f: v for f, v in version_files(c.top).items() if not _release_version_matches(f, v, version)}
     if wrong:
         f, v = next(iter(wrong.items()))
         return refuse(f"{f} says {v}, not {version}",
                       "bump the version (and the CHANGELOG) on the release branch, merge it, then release")
+    left = changes.release_refusal(c.top, version)  # change fragments that are not in the CHANGELOG yet
+    if left:
+        return refuse(*left)
     why = (getattr(a, "why", None) or "").strip()
     pending = release_open_items(c, current)
     listing = "".join(f"\n    {it['meta']['id']} “{it['meta']['title']}” · {b} ({_merge_ref(m)})" for it, b, m in pending)
@@ -5645,8 +5667,7 @@ def _release(a, c) -> int:
         if notes:
             print(ui.dim("  notes: " + notes.splitlines()[0][:100]))
         return 0
-    from . import delivery
-    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)  # the recorded policy's tag format
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag, c.top)  # the recorded policy's tag format
     if bad:
         return refuse(bad)
     rc, _, err = core.git(c.top, "tag", "-s" if sign else "-a", tag, "-m", f"Release {version}")
@@ -5868,7 +5889,7 @@ def _tag_push(c, tag: str, sha: str, remote: str = "origin"):
     """A tag the push sends: the recorded delivery policy's tag format (delivery.tag_violation), then the embargoes,
     since a tag publishes the commits it points to. -> the refusal's exit code, or None."""
     from . import delivery
-    bad = delivery.tag_violation(delivery.scope_for(c.top), tag)
+    bad = delivery.tag_violation(delivery.scope_for(c.top), tag, c.top)
     if bad:
         return refuse(bad)
     return _embargo_refusal(c, tag, sha, remote=remote) if sha else None
@@ -6110,7 +6131,7 @@ def cmd_gh(a) -> int:
                                                     "--notes-start-tag"})
             if pos:
                 from . import delivery
-                bad = delivery.tag_violation(delivery.scope_for(c.top), pos[0])  # the tag gh would create
+                bad = delivery.tag_violation(delivery.scope_for(c.top), pos[0], c.top)  # the tag gh would create
                 if bad:
                     return refuse(bad)
     return EXEC(["gh", *args], cwd=cwd)

@@ -829,9 +829,42 @@ class InitTests(unittest.TestCase):
     def test_tag_triggers_follow_the_policy(self):
         r = repo(STACKS["go"])
         gh, _ = P.generate(r, "github", policy={"tag_format": "YY.MM.PATCH"})
-        self.assertIn('tags: ["[0-9]+.[0-9]+.[0-9]+"]', gh[".github/workflows/release.yml"])
+        self.assertIn('    tags:\n      - "[0-9]+.[0-9]+.[0-9]+"\n', gh[".github/workflows/release.yml"])
         gl, _ = P.generate(r, "gitlab", policy={"tag_format": "vMAJOR.MINOR.PATCH"})
-        self.assertIn("$CI_COMMIT_TAG =~ /^v\\d+\\.\\d+\\.\\d+$/", gl[".gitlab-ci.yml"])
+        self.assertIn("$CI_COMMIT_TAG =~ /^v\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/", gl[".gitlab-ci.yml"])
+
+    # the release workflow ran on X.Y.Z tags only, so a PEP 440 release such as v0.1.0a17 or a SemVer pre-release such
+    # as v1.2.3-rc.1, which the policy takes, started no release
+    def test_the_release_triggers_take_every_tag_of_the_scheme_and_no_other(self):
+        from devkit import delivery
+        r = repo(STACKS["go"])
+        cases = (("vYY.MM.PATCH", ["v26.11.0", "v26.11.12"],
+                  ["26.11.0", "v26.11.0-rc.1", "v26.11.0a1", "v26.11", "v26.11.0junk", "v26.11.0.1"]),
+                 ("MAJOR.MINOR.PATCH", ["1.2.3", "1.2.3-rc.1", "1.2.3-alpha", "10.0.0-beta.2"],
+                  ["v1.2.3", "1.2.3junk", "1.2.3.4", "1.2.3-", "1.2.3a1", "1.2.3-rc.1+b5", "1.2.3-rc_1",
+                   "1.2.3-a!b"]),
+                 ("vMAJOR.MINOR.PATCH", ["v1.2.3", "v1.2.3-rc.1"],
+                  ["1.2.3", "v1.2.3junk", "v1.2.3-", "v1.2.3-rc.1+b5", "v1.2.3-rc_1"]),
+                 ("v" + delivery.PEP440_FORMAT,
+                  ["v0.1.0", "v0.1.0a17", "v0.1.0b2", "v0.1.0rc1", "v1.0.0.post1", "v2.0.0.dev3", "v1.0.0a1.post2.dev3",
+                   "v1.0.0rc1.dev1", "v1.0.0.post1.dev2"],
+                  ["0.1.0a17", "v1.2.3junk", "v0.1.0a", "v0.1.0-rc.1", "v0.1.0alpha1", "v1.0.0.post",
+                   "v1.0.0.dev1.post1", "v0.1.0a17junk"]))
+        for fmt, run, skip in cases:
+            policy = {"tag_format": fmt}
+            gh, _ = P.generate(r, "github", policy=policy)
+            gl, _ = P.generate(r, "gitlab", policy=policy)
+            globs = P.load_yaml(gh[".github/workflows/release.yml"])["on"]["push"]["tags"]
+            rx = re.search(r"\$CI_COMMIT_TAG =~ /(.+)/", gl[".gitlab-ci.yml"]).group(1)
+            for tag in run + skip:
+                with self.subTest(fmt=fmt, tag=tag):
+                    self.assertEqual(any(P.gh_glob(g, tag) for g in globs), tag in run, globs)
+                    self.assertEqual(bool(re.search(rx, tag)), tag in run, rx)
+            for provider, gen in (("github", gh), ("gitlab", gl)):
+                with self.subTest(fmt=fmt, provider=provider):
+                    rep = P.audit(r, provider=provider, policy=policy, only=set(gen), overlay=gen, external=False)
+                    self.assertEqual(loud(rep), [])
+                    self.assertNotIn("tag-format-mismatch", ids(rep))
 
     def test_cmd_init_writes_refuses_and_dry_runs(self):
         r = repo(STACKS["python"])
