@@ -1545,11 +1545,19 @@ def _install_skills():
 
 def write_claude_settings(include_hooks=True):
     """Merge devkit's managed keys into ~/.claude/settings.json (other keys untouched). -> whether it changed. A copy
-    older than the pinned release writes nothing (core.older_copy_skip)."""
+    older than the pinned release writes nothing (core.older_copy_skip). Neither does a file that holds NaN, Infinity
+    or a number past a float's range: Python reads 1e400 as inf, and json.dumps would write Infinity, which Claude
+    Code (Node's JSON.parse) cannot read; devkit names the value to fix instead."""
     f = CLAUDE_HOME / "settings.json"
     if core.older_copy_skip(tilde(f)):
         return False
-    cur = read_json(f, {}) or {}
+    try:
+        cur = core.load_json(f.read_text(), allow_nan=False) or {}
+    except core.JSONNonFiniteError as e:
+        fail(f"{tilde(f)} holds {e}: devkit left the file as it is. Fix that value, then run dev install --only claude")
+        return False
+    except (OSError, ValueError):
+        cur = {}
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
     new = core.deep_merge(cur, {k: v for k, v in frag.items() if k != "hooks"})
@@ -1580,7 +1588,8 @@ def write_claude_settings(include_hooks=True):
     if new != cur:
         backup(f)
         f.parent.mkdir(parents=True, exist_ok=True)
-        core.replace_text(f, json.dumps(new, indent=2, ensure_ascii=False) + "\n")  # a temporary file of its own
+        # a temporary file of its own; never NaN or Infinity, which Node cannot read
+        core.replace_text(f, json.dumps(new, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
     return new != cur
 
 

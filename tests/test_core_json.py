@@ -81,6 +81,18 @@ class LoadJsonErrorTests(unittest.TestCase):
                     core.load_json(text, allow_nan=False)
         self.assertEqual(core.load_json('{"x": 1e5, "NaN": "Infinity"}', allow_nan=False), {"x": 1e5, "NaN": "Infinity"})
 
+    def test_a_number_past_a_floats_range_is_refused_with_nan_and_infinity(self):
+        # Python reads 1e400 as inf and json.dumps writes it back as Infinity, which Node's JSON.parse refuses
+        for number in ("1e400", "-1e400", "1.5E+309"):
+            with self.subTest(number):
+                text = '{"x": ' + number + "}"
+                self.assertEqual(json.dumps(core.load_json(text)), '{"x": ' + ("-" if number[0] == "-" else "") +
+                                 "Infinity}")
+                with self.assertRaises(core.JSONNonFiniteError) as refused:
+                    core.load_json(text, allow_nan=False)
+                self.assertIn("past a float's range", str(refused.exception))
+        self.assertEqual(core.load_json('{"x": 1e308, "y": 1e-400}', allow_nan=False), {"x": 1e308, "y": 0.0})
+
     def test_read_json_passes_allow_nan_on(self):
         with tempfile.TemporaryDirectory() as tmp:
             f = Path(tmp) / "s.json"

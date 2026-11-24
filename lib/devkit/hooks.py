@@ -1531,8 +1531,8 @@ def _unreadable_why(raw: bytes) -> str:
         why.append("it is not JSON")
     except core.JSONDepthError:
         why.append(f"it nests deeper than {core.JSON_MAX_DEPTH} levels")
-    except core.JSONNonFiniteError:
-        why.append("it holds NaN or Infinity, which JSON does not allow")
+    except core.JSONNonFiniteError as e:
+        why.append(f"it holds {e}")
     except ValueError as e:
         why.append(f"it holds a value devkit's JSON reader cannot take: {str(e).split(';')[0][:160]}")
     return ", and ".join(why) or "it changed while devkit read it"
@@ -1629,7 +1629,7 @@ def _devkit_env_fix(path: str, settings: dict, managed: bool = True) -> tuple:
     settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
     if not settings["env"]:
         settings.pop("env")
-    return changed, json.dumps(settings, indent=2) + "\n"
+    return changed, json.dumps(settings, indent=2, allow_nan=False) + "\n"  # Node reads no NaN or Infinity
 
 
 def instructions_loaded(agent: str):

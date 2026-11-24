@@ -402,6 +402,33 @@ class ConfigChangeTests(unittest.TestCase):
                 self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unreadable")
         self.assertEqual(self.spawned, [])
 
+    def test_a_number_past_a_floats_range_is_refused_and_never_written_as_infinity(self):
+        # Python reads 1e400 as inf and json.dumps would write Infinity, which Node cannot read: every later change
+        # would then be refused, and dev install would keep writing it
+        s = managed_settings()
+        s["env"] = dict(s.get("env") or {}, DEVKIT_EVIL="1")
+        text = json.dumps(s)[:-1] + ', "big": 1e400}'
+        self.settings.write_text(text)
+        code, err = self.change_written()
+        self.assertEqual(code, 2)
+        self.assertIn("(it holds a number past a float's range", err)
+        self.assertIn("env.DEVKIT_EVIL", err)
+        self.assertEqual(self.settings.read_text(), text)
+        self.assertEqual(self.spawned, [])
+
+    def test_dev_install_writes_no_infinity_and_leaves_such_settings_as_they_are(self):
+        s = managed_settings()
+        s["disableAllHooks"] = True
+        text = json.dumps(s)[:-1] + ', "big": 1e400}'
+        self.settings.write_text(text)
+        out = io.StringIO()
+        with mock.patch.object(setup, "CLAUDE_HOME", self.settings.parent), \
+                mock.patch.object(setup, "STATE", self.root / "state"), contextlib.redirect_stdout(out):
+            self.assertFalse(setup.write_claude_settings())
+        self.assertEqual(self.settings.read_text(), text)
+        self.assertIn(str(self.settings.name), out.getvalue())
+        self.assertIn("1e400", out.getvalue())
+
     def test_a_settings_file_that_is_json_null_is_refused_as_no_settings_object(self):
         self.settings.write_text("null")
         code, err = self.change_written()

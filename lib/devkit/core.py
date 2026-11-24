@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -862,22 +863,30 @@ class JSONDepthError(ValueError):
 
 class JSONNonFiniteError(ValueError):
     """load_json(allow_nan=False): the text holds NaN, Infinity or -Infinity, which JSON (RFC 8259) and Node's
-    JSON.parse refuse and Python's json reads."""
+    JSON.parse refuse and Python's json reads, or a number past a float's range (1e400), which Python reads as inf
+    and json.dumps would write back as Infinity. Its message names which, in the words of a refusal."""
 
 
 def _no_nonfinite(constant):
-    raise JSONNonFiniteError(f"{constant} is not JSON")
+    raise JSONNonFiniteError("NaN or Infinity, which JSON does not allow")
+
+
+def _finite_float(text):
+    f = float(text)
+    if not math.isfinite(f):
+        raise JSONNonFiniteError(f"a number past a float's range ({text[:24]}), read as Infinity")
+    return f
 
 
 def load_json(text, allow_nan=True):
     """json.loads for text another machine or person may have written -> its value, or ValueError when no reader can
     read it: json.JSONDecodeError when it is not JSON (cut short, say), JSONDepthError past what the parser can nest
     or hold (RecursionError, MemoryError) or nested deeper than JSON_MAX_DEPTH, JSONNonFiniteError for NaN or Infinity
-    when `allow_nan` is false (text a Node program reads too, such as Claude Code's settings), and the parser's own
-    ValueError otherwise (an integer of more digits than Python converts). Every devkit read of such text parses it
-    with this (read_json, audit.parse_line)."""
+    or a number past a float's range when `allow_nan` is false (text a Node program reads too, such as Claude Code's
+    settings), and the parser's own ValueError otherwise (an integer of more digits than Python converts). Every
+    devkit read of such text parses it with this (read_json, audit.parse_line)."""
     try:
-        v = json.loads(text) if allow_nan else json.loads(text, parse_constant=_no_nonfinite)
+        v = json.loads(text) if allow_nan else json.loads(text, parse_constant=_no_nonfinite, parse_float=_finite_float)
     except (RecursionError, MemoryError):
         raise JSONDepthError("nested too deep to parse") from None
     if _json_deeper(v, text):
