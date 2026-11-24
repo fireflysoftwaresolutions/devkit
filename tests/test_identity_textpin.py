@@ -1626,8 +1626,14 @@ class TextPinRecordFailureTests(TextPinCase):
         (outside / "other.json").write_text(json.dumps({"closed": 1}))
         pg.CALLS.mkdir(parents=True, exist_ok=True)
         os.symlink(outside, pg.CALLS / "s-link")
-        with mock.patch.object(pg, "_pid_running", lambda pid: True):
+        real_open, swept = pg.open_calls, []
+
+        def seen(sid, *a, **k):
+            swept.append(sid)
+            return real_open(sid, *a, **k)
+        with mock.patch.object(pg, "_pid_running", lambda pid: True), mock.patch.object(pg, "open_calls", seen):
             identity.sweep_gone()
+        self.assertNotIn("s-link", swept)  # the sweep takes no link for a session folder
         self.assertEqual(pg.open_calls("s-link", time.time() + 100000), [])
         self.assertEqual(sorted(p.name for p in outside.iterdir()), ["config.json", "other.json"])
         # swapped for a link once the reader opened it: the expired entry of the folder it opened goes, nothing outside
