@@ -7,9 +7,10 @@ to 3.13 raise RecursionError at about a thousand levels, Python 3.15 at about 15
 ValueError, so the Stop hook and the other readers crashed.
 
 Each reader test feeds one reader a deep document and checks that the reader treats it as it treats any unreadable
-one, and still reads the records around it. The last test keeps the pattern from coming back: it fails on any
-json.load or json.loads in lib/devkit outside core.load_json and the reviewed call sites of REVIEWED, each with the
-reason it is safe. Every file here is temporary. Run: python3 -m unittest tests.test_json_reads (under
+one, and still reads the records around it. The last test keeps the pattern from coming back: it fails on any use of
+json in lib/devkit that can reach its parsers (anything but json.dumps, json.dump, json.JSONDecodeError and
+json.JSONEncoder, under any name) outside core.load_json and the reviewed sites of REVIEWED, each with the reason it
+is safe. Every file here is temporary. Run: python3 -m unittest tests.test_json_reads (under
 /usr/bin/python3 too, for Python 3.9).
 """
 import ast
@@ -780,7 +781,8 @@ CONFIG = "the developer's own devkit configuration, which dev config validates o
 AUDIT = "OPEN: the team's published audit files; audit.py's readers move to core.load_json with the audit depth guard"
 
 # (module below lib/devkit, enclosing function) -> (raw parses there, why). core.load_json is the one parse of JSON
-# that comes from outside; nothing else may call json.load, json.loads or json.JSONDecoder without an entry here.
+# that comes from outside; nothing else may use json beyond SAFE (json.dumps, json.dump, json.JSONDecodeError,
+# json.JSONEncoder) without an entry here.
 REVIEWED = {
     ("approvals", "meta_reader.read"): (1, "Claude Code's subagent meta file, a fixed shape it writes itself"),
     ("audit", "_day_of"): (1, AUDIT),
@@ -912,49 +914,90 @@ REVIEWED = {
     ("work", "_shown_lists"): (1, OWN),
     ("work", "writing"): (1, OWN),
 }
-# json's parsers, and the submodules that hold them (json.decoder.JSONDecoder, json.scanner's scanner)
-PARSERS = ("load", "loads", "JSONDecoder", "decoder", "scanner")
+# The uses of json that parse nothing: its writers, the error its parsers raise, and its encoder class. Every other use
+# of the name json can reach a parser (json.loads, json.JSONDecoder, json._default_decoder, json.__dict__, the module
+# itself passed on or kept under another name), so the guard counts it.
+SAFE = ("dumps", "dump", "JSONDecodeError", "JSONEncoder")
+
+
+def _json_name(node) -> bool:
+    """A string that names json or one of its submodules: "json", "json.decoder"."""
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and \
+        (node.value == "json" or node.value.startswith("json."))
+
+
+def _modules(node) -> bool:
+    """sys.modules, or modules imported from sys."""
+    return isinstance(node, ast.Attribute) and node.attr == "modules" or isinstance(node, ast.Name) and \
+        node.id == "modules"
 
 
 def _json_import(node) -> bool:
-    """An import that names json's parsers other than as json.<name>: `from json import loads`, `from json.decoder
-    import JSONDecoder`, `import json as j`, `import json.decoder`."""
+    """An import that names json other than as `import json`: `from json import loads`, `from json.decoder import
+    JSONDecoder`, `import json as j`, `import json.decoder`, and json taken from another module (`from .core import
+    json as j`)."""
     if isinstance(node, ast.ImportFrom):
-        return node.level == 0 and (node.module == "json" or str(node.module).startswith("json."))
+        return node.level == 0 and (node.module == "json" or str(node.module).startswith("json.")) or \
+            any(a.name == "json" for a in node.names)
     return isinstance(node, ast.Import) and any(a.name.startswith("json.") or a.name == "json" and a.asname
                                                 for a in node.names)
 
 
-def _json_parser_ref(node) -> bool:
-    """A reference to one of json's parsers, called or not: json.loads(t), map(json.loads, ...), parse = json.loads,
-    json.JSONDecoder() kept for later, json.decoder.JSONDecoder, and getattr(json, ...), whose name is any string."""
-    if isinstance(node, ast.Attribute):
-        return isinstance(node.value, ast.Name) and node.value.id == "json" and node.attr in PARSERS
-    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr" and \
-        bool(node.args) and isinstance(node.args[0], ast.Name) and node.args[0].id == "json"
+def _params(fn) -> set:
+    """The parameters of a function or lambda that have no default value: what its caller passes."""
+    a = fn.args
+    positional = a.posonlyargs + a.args
+    free = positional[:len(positional) - len(a.defaults)]
+    free += [x for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is None]
+    return {x.arg for x in free + [a.vararg, a.kwarg] if x is not None}
+
+
+def _json_use(node, parent, params=frozenset()) -> bool:
+    """A use of json that can reach its parsers: the name json anywhere but json.<one of SAFE> (json.loads,
+    map(json.loads, ...), parse = json.loads, j = json, vars(json), getattr(json, name), json.__dict__,
+    json._default_decoder, operator.attrgetter("loads")(json)); any attribute named json (core.json.loads,
+    resp.json()), but a field read off a parameter the caller passes (`if a.json:`, argparse's --json), which is
+    neither called nor dereferenced; json looked up by its name (importlib.import_module("json"),
+    __import__("json.decoder"), sys.modules["json"], sys.modules.get("json")). `params`: the enclosing functions'
+    parameters without a default value."""
+    if isinstance(node, ast.Name) and node.id == "json":
+        return not (isinstance(parent, ast.Attribute) and parent.attr in SAFE)
+    if isinstance(node, ast.Attribute) and node.attr == "json":
+        field = isinstance(node.value, ast.Name) and node.value.id in params
+        return not field or isinstance(parent, ast.Attribute) or isinstance(parent, ast.Call) and parent.func is node
+    if isinstance(node, ast.Subscript):
+        return _modules(node.value) and _json_name(node.slice)
+    if isinstance(node, ast.Call) and node.args and _json_name(node.args[0]):
+        f = node.func
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+        return name in ("import_module", "__import__") or isinstance(f, ast.Attribute) and _modules(f.value)
+    return False
 
 
 def raw_parses(package: Path):
-    """-> ({(module, enclosing function): count of references to json's parsers}, [imports that would hide one]).
+    """-> ({(module, enclosing function): count of the uses of json that can reach its parsers (_json_use)}, [imports
+    that would hide one]).
     core.load_json, the depth-bounded parser, is left out."""
     found, aliases = {}, []
     for f in sorted(package.rglob("*.py")):
         module = ".".join(f.relative_to(package).with_suffix("").parts)
         tree = ast.parse(f.read_text(), str(f))
 
-        def visit(node, names):
+        def visit(node, names, params):
             for child in ast.iter_child_nodes(node):
-                inner = names
+                inner, passed = names, params
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     inner = names + [child.name]
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    passed = params | _params(child)
                 if _json_import(child):
                     aliases.append(f"{module}:{child.lineno}")
-                if _json_parser_ref(child):
+                if _json_use(child, node, params):
                     key = (module, ".".join(inner) or "<module>")
                     if key != ("core", "load_json"):
                         found[key] = found.get(key, 0) + 1
-                visit(child, inner)
-        visit(tree, [])
+                visit(child, inner, passed)
+        visit(tree, [], frozenset())
     return found, aliases
 
 
@@ -987,11 +1030,34 @@ class RawParseGuardTests(unittest.TestCase):
                 "def h(ts):\n    return list(map(json.loads, ts))\n\n"
                 "def k(t, name):\n    return getattr(json, name)(t)\n\n"
                 "def m(t):\n    return DEC.decode(t)\n")
+            # json reached through another name: the module looked up by its name or through another module, the
+            # module itself passed or kept, its private decoder and its namespace; json's writers, its error and its
+            # encoder class are the only safe uses
+            (pkg / "e.py").write_text(
+                "import importlib\nimport operator\nimport sys\nfrom . import core\nfrom .core import json as j2\n\n"
+                "def f01(t):\n    return importlib.import_module('json').loads(t)\n\n"
+                "def f02(t):\n    return __import__('json').loads(t)\n\n"
+                "def f03(t):\n    import json\n    j = json\n    return j.loads(t)\n\n"
+                "def f04(t):\n    return sys.modules['json'].loads(t)\n\n"
+                "def f05(t):\n    import json\n    return json._default_decoder.decode(t)\n\n"
+                "def f06(t):\n    import json\n    return json.__dict__['loads'](t)\n\n"
+                "def f07(t):\n    import json\n    return vars(json)['loads'](t)\n\n"
+                "def f08(t):\n    return core.json.loads(t)\n\n"
+                "def f09(t):\n    return j2.loads(t)\n\n"
+                "def f10(t):\n    import json\n    return operator.attrgetter('loads')(json)(t)\n\n"
+                "def f11(t):\n    return importlib.import_module('json.decoder').JSONDecoder().decode(t)\n\n"
+                "def f12(t):\n    return sys.modules.get('json').loads(t)\n\n"
+                "def f13(t, m=core):\n    return m.json.loads(t)\n\n"
+                "def f14(resp):\n    return resp.json()\n\n"
+                "def f15(a):\n    return a.json.loads(a.text)\n\n"
+                "def flag(a):\n    return a.json or (lambda b: b.json)(a)\n\n"
+                "def safe(v, f):\n    import json\n    try:\n        return json.dumps(v), json.dump(v, f)\n"
+                "    except (json.JSONDecodeError, TypeError):\n        return json.JSONEncoder().encode(v)\n")
             found, aliases = raw_parses(pkg)
         self.assertEqual(found, {("a", "<module>"): 1, ("a", "f"): 1, ("sub.b", "C.m"): 1,
                                  ("sub.b", "C.m.inner"): 1, ("d", "<module>"): 2, ("d", "g"): 1, ("d", "h"): 1,
-                                 ("d", "k"): 1})
-        self.assertEqual(aliases, ["c:1", "c:2", "d:1", "d:2", "d:3"])
+                                 ("d", "k"): 1, **{("e", f"f{n:02}"): 1 for n in range(1, 16) if n != 9}})
+        self.assertEqual(aliases, ["c:1", "c:2", "d:1", "d:2", "d:3", "e:5"])
 
 
 if __name__ == "__main__":
