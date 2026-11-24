@@ -588,17 +588,22 @@ class FailureKindTests(unittest.TestCase):
 
 
 class FailedTimeoutTests(unittest.TestCase):
-    # pytest-timeout fails a test that ran too long with pytest's Failed ("Failed: Timeout >1.0s"), which is no check of
-    # the test: only pytest's own Failed, bare or as _pytest.outcomes.Failed, is an assertion, and a Failed of another
-    # module is named by what was raised
+    # pytest-timeout fails a test that ran too long with pytest's Failed ("Failed: Timeout >1.0s" before 2.2, "Failed:
+    # Timeout (>1.0s) from pytest-timeout." since), which is no check of the test: only pytest's own Failed, bare or as
+    # _pytest.outcomes.Failed, is an assertion, never one that says Timeout, and a Failed of another module is named by
+    # what was raised
     def test_only_pytest_s_own_failed_and_never_a_timeout_is_an_assertion(self):
         top = "/w"
         messages = ["Failed: Timeout &gt;1.0s", "_pytest.outcomes.Failed: add is off by one", "plugin.Failed: lost",
-                    "Failed: DID NOT RAISE &lt;class 'ValueError'&gt;"]
+                    "Failed: DID NOT RAISE &lt;class 'ValueError'&gt;",
+                    "Failed: Timeout (&gt;1.0s) from pytest-timeout.",
+                    "E   Failed: Timeout (&gt;1.0s) from pytest-timeout.",
+                    "_pytest.outcomes.Failed: Timeout (&gt;1.0s) from pytest-timeout."]
         report = ('<testsuites><testsuite name="pytest">' + "".join(
             f'<testcase classname="tests.test_x" name="test_{i}"><failure message="{m}">x</failure></testcase>'
             for i, m in enumerate(messages)) + "</testsuite></testsuites>")
-        self.assertEqual(["Failed", "assertion", "plugin.Failed", "assertion"],
+        self.assertEqual(["Failed", "assertion", "plugin.Failed", "assertion", "Failed", "Failed",
+                          "_pytest.outcomes.Failed"],
                          [c.get("failure") for c in testx.parse_junit(report, top, top, "pytest")])
 
 
