@@ -23,6 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _sandbox  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import bugs, core, providers, registry, setup, toolchain, tui, ui, wizard  # noqa: E402
 from test_visual_npmroot import NpmStandIn  # noqa: E402  (a stand-in npm first on PATH)
 

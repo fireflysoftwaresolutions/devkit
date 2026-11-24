@@ -28,6 +28,11 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import core, gitx, testx  # noqa: E402
 import test_gitx as G  # noqa: E402  (its Sandbox and dev() drive `dev ci`)
 
@@ -2936,7 +2941,11 @@ class CalcTests(unittest.TestCase):
                 (r / f"module_{n}.py").write_text("VALUE = 1\n")
             snapshot = testx._proof_snapshot(r)
             self.assertEqual(len(snapshot), 750)
-            for setting, value in (("PROOF_FILES", 749), ("PROOF_BYTES", 100), ("PROOF_SECONDS", -1)):
+            # the bound is work (files and bytes), not wall-clock time: a slow, loaded machine gets the same evidence
+            ticks = iter(range(10**6))
+            with mock.patch.object(testx.time, "monotonic", side_effect=lambda: float(next(ticks))):
+                self.assertEqual(testx._proof_snapshot(r), snapshot)
+            for setting, value in (("PROOF_FILES", 749), ("PROOF_BYTES", 100)):
                 with self.subTest(setting=setting), mock.patch.object(testx, setting, value):
                     self.assertEqual(testx._proof_snapshot(r), {})
             cache = r / "__pycache__"
@@ -3120,6 +3129,47 @@ class CalcTests(unittest.TestCase):
             self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in data["tests"]],
                              [("test_calc.CalcTests.test_sandbox_drops_x", "failed", "proves the change")])
             self.assertIn("{'Y': 2}", data["tests"][0]["message"])
+
+    # a line the change adds inside a helper that was there before is part of that helper's change too
+    def test_a_line_added_inside_a_helper_is_undone_with_the_change(self):
+        with Env() as e:
+            r = e.repo(SANDBOX_BASE)
+            text = (r / "tests" / "test_calc.py").read_text()
+            (r / "tests" / "test_calc.py").write_text(
+                text.replace("    return dict(env)\n",
+                             "    env = {k: v for k, v in env.items() if k != 'X'}\n    return dict(env)\n") +
+                "\n    def test_sandbox_drops_x(self):\n"
+                "        self.assertEqual(sandbox_env({'X': 1, 'Y': 2}), {'Y': 2})\n")
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertEqual(rc, 0, out + err)
+            data = json.loads(out)
+            self.assertEqual(data["test_module_helpers"], ["tests/test_calc.py"])
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in data["tests"]],
+                             [("test_calc.CalcTests.test_sandbox_drops_x", "failed", "proves the change")])
+
+    # a helper of a test class that gains a parameter changes the module outside its helpers' bodies, so the module
+    # keeps its change: restored by halves, its old signature ran the new body, and a test the change does not touch
+    # crashed on a NameError that prove took for proof. Run as it is now, the test the change does not touch passes
+    # and cannot be proven, named by that edit, and the new test proves the production change by its failure.
+    def test_a_helper_comes_back_whole_so_a_test_the_change_does_not_touch_runs_cleanly(self):
+        base = dict(PROVE_BASE, **{"tests/test_calc.py": with_tests().replace(
+            "    def test_add(self):\n        self.assertEqual(calc.add(1, 2), 3)\n",
+            "    def pair(self):\n        a, b = 1, 2\n        return a, b\n\n"
+            "    def test_add(self):\n        self.assertEqual(calc.add(*self.pair()), 3)\n")})
+        with Env() as e:
+            r = e.repo(base)
+            text = (r / "tests" / "test_calc.py").read_text()
+            (r / "tests" / "test_calc.py").write_text(
+                text.replace("    def pair(self):\n        a, b = 1, 2\n",
+                             "    def pair(self, scale=1):\n        a, b = 1, 2\n        a, b = a * scale, b * scale\n")
+                + "\n    def test_mul(self):\n        self.assertEqual(calc.mul(*self.pair(2)), 8)\n")
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            self.assertNotIn("NameError", out + err)
+            self.assertEqual([(t["id"], t["without_change"], t["verdict"]) for t in json.loads(out)["tests"]],
+                             [("test_calc.CalcTests.test_add", "passed", "cannot be proven: its module keeps a change "
+                               "outside its helpers' bodies: an edited helper `CalcTests.pair` (line 10)"),
+                              ("test_calc.CalcTests.test_mul", "failed", "proves the change")], out + err)
 
     # a test helper the change adds is test code, not the change under test: it stays in the copy, so the new test
     # runs against the old production code. Removed, every test that imports it failed on the import and was
@@ -3486,9 +3536,12 @@ class CalcTests(unittest.TestCase):
                 ("test/page.mjs", "2/2", "failed"),
                 ("test/slug.test.mjs::joins words with dashes", "2/2", "failed"),
                 ("test_calc.CalcTests.test_mul", "2/2", "failed")])
+            # a plain script fails by its exit code, never on an assertion: one that reaches a changed helper file
+            # cannot be proven, as the rerun proves only by an assertion failure
             rc, out, err = dev(r, "prove", "--json", "--runs", "1", "test/page.mjs")
-            self.assertEqual(rc, 0, out + err)
-            self.assertEqual([t["id"] for t in json.loads(out)["tests"]], ["test/page.mjs"])
+            self.assertEqual([("test/page.mjs", "cannot be proven: without the change it fails on exit code 1, not on "
+                                                "an assertion")],
+                             [(t["id"], t["verdict"]) for t in json.loads(out)["tests"]], out + err)
             # --runner leaves the node tests out: they are listed, and the plain script is no helper for that
             rc, out, err = dev(r, "prove", "--json", "--runs", "1", "--runner", "unittest")
             self.assertEqual(rc, 0, out + err)

@@ -310,6 +310,12 @@ critical path first, then your latest request, then the oldest; a launch out of 
 `dev crew next --first "<step>" --why "…"`. Change these keys with `dev config set`, which validates and audits
 the update.
 
+### Tests
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `test.listing` | `false` | `true`: every `dev test` run finds the files that hold tests by the runners' own listings (pytest `--collect-only`, unittest discovery, `vitest list`, `playwright --list`), cached until the runner, its configuration, or the test files change, as `dev test --listed` does for one run. A listing that fails or takes over 5 minutes leaves the file rules to decide. Set it with `dev config set test.listing true`; see [Testing](testing.md) |
+
 ### Visual diagnosis
 
 | Key | Default | Meaning |

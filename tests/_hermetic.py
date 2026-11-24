@@ -455,31 +455,43 @@ def _popen_detaches() -> bool:
     return False
 
 
-# A redirect's & (2>&1, >&2, <&0, >&-, &>file, &>>file): right after > or <, or before a digit, - or >. It is part
-# of the redirect, not a background marker, so it stays in its word.
-_REDIRECT_AMP = re.compile(r"(?<=[<>])&|&(?=[\d>-])")
+# A redirect's & (2>&1, >&2, <&0, >&-): right after > or <. It is part of the redirect, not a background marker, so
+# it stays in its word. `&>file` and `&>>file` redirect both outputs in bash and zsh only: sh (dash, Debian's and
+# Ubuntu's /bin/sh) reads `cmd &>file` as `cmd &` then `>file`. An & before anything else (`cmd &2>/dev/null`) sends
+# the command to the background in every shell.
+_REDIRECT_AMP = re.compile(r"(?<=[<>])&")
+_BOTH_OUTPUTS_AMP = re.compile(r"&(?=>)")
 _KEEP_AMP = "\ue000"  # what holds a redirect's & while the line is split at its real ones
 
 
-def _shell_line(line: str) -> list:
+def _shell_line(line: str, sh: bool = False) -> list:
     """(the words, whether the line sends it to the background) of each command of a shell line: split at ; & | ( )
     and new lines, quotes removed, comments and the keywords that run the next word dropped. `cmd &` runs in the
-    background; `cmd && …` and a redirect's & (2>&1, &>file) do not."""
+    background, and so does every command of a pipeline that ends in & (`dev sync | tee log &`); `cmd && …` and a
+    redirect's & (2>&1) do not. sh: the line runs under sh, where `&>file` is a background too (see above)."""
+    kept = _REDIRECT_AMP.sub(_KEEP_AMP, line)
+    if not sh:
+        kept = _BOTH_OUTPUTS_AMP.sub(_KEEP_AMP, kept)
     try:
-        lex = shlex.shlex(_sandbox._without_comments(_REDIRECT_AMP.sub(_KEEP_AMP, line)), posix=True,
-                          punctuation_chars=";&|()`\n")
+        lex = shlex.shlex(_sandbox._without_comments(kept), posix=True, punctuation_chars=";&|()`\n")
         lex.whitespace, lex.whitespace_split, lex.commenters = " \t\r", True, ""
         tokens = [t.replace(_KEEP_AMP, "&") if _KEEP_AMP in t else t for t in lex]
     except ValueError:
         return [(line.split(), False)]
-    out, words = [], []
+    out, words, pipeline = [], [], []
     for t in tokens + [";"]:
         if t and all(c in ";&|()`\n" for c in t):
             while words and words[0] in _sandbox._KEYWORDS:
                 words.pop(0)
             if words:
-                out.append((words, t == "&"))
+                pipeline.append(words)
             words = []
+            if t in ("|", "|&"):  # the pipeline goes on: its commands run, or not, in the background together
+                continue
+            # the splitter joins & to a separator right after it (`&\n`, `&)`, `&;`, `)&`): still a background; an
+            # && or a |& is not
+            out += [(w, "&" in t.replace("&&", "").replace("|&", "")) for w in pipeline]
+            pipeline = []
         else:
             words.append(t)
     return out
@@ -520,15 +532,15 @@ def detached_sync(event, args) -> str:
     if event not in _sandbox.EVENTS:
         return ""
     env, cwd, _ = _sandbox._commands(event, args)
-    if event == "os.system":
-        commands = _shell_line(os.fsdecode(args[0] or ""))
+    if event == "os.system":  # /bin/sh, which is dash on Debian and Ubuntu
+        commands = _shell_line(os.fsdecode(args[0] or ""), sh=True)
     else:
         words = _sandbox._words(args[1])
         commands = [(words, False)]
         if words and os.path.basename(words[0]).lower() in _sandbox._SHELLS:
             flag = next((i for i, w in enumerate(words[1:], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", w)), None)
             if flag is not None and flag + 1 < len(words):
-                commands += _shell_line(words[flag + 1])
+                commands += _shell_line(words[flag + 1], sh=os.path.basename(words[0]).lower() in ("sh", "dash"))
     detaches = event == "subprocess.Popen" and _popen_detaches()
     for command, background in commands:
         program, child, _ = _sandbox._launched(command, env)

@@ -2234,6 +2234,7 @@ _dev__test() {
     '--runner=[only this runner]:name: ' \
     '--json[json]' \
     '(--verbose -v)'{-v,--verbose}'[stream the runner'\''s full output]' \
+    '--listed[the files that hold tests are those the runner'\''s own listing names]' \
     '(--project -p)'{-p+,--project=}'[another project]:project: _dev_live projects -' \
     '1: :->cmds' \
     '*:: :->args' && ret=0
@@ -2269,6 +2270,7 @@ _dev__test__run() {
     '--runner=[only this runner]:name: ' \
     '--json[json]' \
     '(--verbose -v)'{-v,--verbose}'[stream the runner'\''s full output]' \
+    '--listed[the files that hold tests are those the runner'\''s own listing names]' \
     '*:paths:_files'
 }
 
@@ -2278,7 +2280,8 @@ _dev__test__plan() {
     '--all[the whole suite]' \
     '--since=[since]:branch: _dev_live branches -' \
     '--runner=[runner]:name: ' \
-    '--json[json]'
+    '--json[json]' \
+    '--listed[the files that hold tests are those the runner'\''s own listing names]'
 }
 
 _dev__test__prove() {
@@ -2289,6 +2292,7 @@ _dev__test__prove() {
     '--isolated-imports[unittest only]' \
     '--runner=[runner]:name: ' \
     '--json[json]' \
+    '--listed[the files that hold tests are those the runner'\''s own listing names]' \
     '*:tests:_files'
 }
 

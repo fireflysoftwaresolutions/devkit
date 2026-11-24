@@ -20,6 +20,11 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import ciwatch, cistatus, cli, continuity, core, crew, ext, hooks, progress, prompt, registry  # noqa: E402
 from devkit import updatecheck, welcome, work  # noqa: E402
 from test_progress import TempState  # noqa: E402

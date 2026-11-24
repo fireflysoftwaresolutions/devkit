@@ -628,7 +628,7 @@ FLAG_OPTIONS = frozenset((
     "--comment --comments --continue --count --cross --discard --draft --dry-run --edit --fail-fast --failed --fill "
     "--final --finish --fixed --for-chat --force --force-in-use --force-with-lease --forced-colors --full-path "
     "--github --global --help --history --ignore-case --include-heavy --interactive --isolated-imports --json "
-    "--keep-branch --keep-going --later --latest --lift --list --local --mark-passed --markdown --md --members "
+    "--keep-branch --keep-going --later --latest --lift --list --listed --local --mark-passed --markdown --md --members "
     "--merge --mermaid --mine --move --name-only --names --new --no-check --no-copy --no-deps --no-git --no-index "
     "--no-open --no-prose --no-push --no-template --no-validate --now --offline --old-format --online --open --outline "
     "--outside "

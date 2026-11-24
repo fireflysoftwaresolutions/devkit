@@ -22,6 +22,10 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_peers import CLAUDE_A, CLAUDE_B, CODEX_A, PeerCase  # noqa: E402
 
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # a probe that imports this module by path gets the suite's temporary home too
+
 from devkit import audit, cli, core, peers  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 

@@ -411,10 +411,10 @@ _dev_spec() {
     'issue create') o='-h --help --title --body --body-file --label --assignee' v='--title=n --body=n --body-file=f --label=n --assignee=n' ;;
     'git') o='-h --help -C' v='-C=d' p='*f' ;;
     'gh') o='-h --help' p='*f' ;;
-    'test') c='run plan prove audit' o='-h --help --failed --affected --all --since --runner --json -v --verbose -p --project' v='--since=l:branches:-:: --runner=n -p=l:projects:-:: --project=l:projects:-::' ;;
-    'test run') o='-h --help --failed --affected --all --since --runner --json -v --verbose' v='--since=l:branches:-:: --runner=n' p='*f' ;;
-    'test plan') o='-h --help --all --since --runner --json' v='--since=l:branches:-:: --runner=n' ;;
-    'test prove') o='-h --help --since --runs --isolated-imports --runner --json' v='--since=l:branches:-:: --runs=n --runner=n' p='*f' ;;
+    'test') c='run plan prove audit' o='-h --help --failed --affected --all --since --runner --json -v --verbose --listed -p --project' v='--since=l:branches:-:: --runner=n -p=l:projects:-:: --project=l:projects:-::' ;;
+    'test run') o='-h --help --failed --affected --all --since --runner --json -v --verbose --listed' v='--since=l:branches:-:: --runner=n' p='*f' ;;
+    'test plan') o='-h --help --all --since --runner --json --listed' v='--since=l:branches:-:: --runner=n' ;;
+    'test prove') o='-h --help --since --runs --isolated-imports --runner --json --listed' v='--since=l:branches:-:: --runs=n --runner=n' p='*f' ;;
     'test audit') o='-h --help --changed --since --json --min-severity --rule' v='--since=l:branches:-:: --min-severity=c:low,medium,high --rule=c:debug-output,duplicate-test,empty-test,mock-only,no-assertion,no-production-reference,skipped-without-reason,sleep-in-test,smoke-only,snapshot-only,swallowed-failure,trivial-assertion,vague-name' p='*f' ;;
     'mcp') o='-h --help' ;;
     'desktop') o='-h --help --no-validate --json' p='c:pack,status' ;;

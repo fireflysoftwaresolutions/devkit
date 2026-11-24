@@ -34,11 +34,14 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
 import contextlib
 import fcntl
 import fnmatch
+import functools
 import glob
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -49,6 +52,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize
 import urllib.parse
 import warnings
 import xml.etree.ElementTree as ET
@@ -242,12 +246,33 @@ class _Repo:
         self._text, self._graphs = {}, {}
         self._runners = None
         self._pytest = {}  # folder -> the pytest collection rules that govern it (_pytest_rules)
+        self.listed = {}  # file -> whether its runner's listing holds it (dev test --listed): the runner's word
+        self.tests = sorted(f for f in self.existing if self.runnable(f))
+        if listing_on():
+            self._apply_listing()
+
+    def _apply_listing(self):
+        """Which files hold tests, as each runner that can list says (list_tests): its listing replaces the file-name
+        rules for the files of its language under its root, except in a folder it lists whole (a package that fails
+        to import), where the file rules decide."""
+        for r in self.runners():
+            files = list_tests(self.top, r, self)
+            if files is None:
+                continue
+            folders = [x for x in files if x.endswith("/")]  # their files are tests by the file rules
+            for f in self.existing:
+                if _lang(f) == r["lang"] and _under(f, r["root"]) and owner(self.runners(), f) is r:
+                    self.listed[f] = f in files or (any(f.startswith(d) for d in folders) and self.runnable(f))
+            r["selection"] = "listed"
         self.tests = sorted(f for f in self.existing if self.runnable(f))
 
     def runnable(self, f) -> bool:
         """A file a runner here executes as tests: named as one (_runnable) and, for Python, one pytest's own
         configuration collects. pytest collects any file named on its command line, so devkit applies its testpaths
-        and python_files itself: a production module named test_… outside them is no test."""
+        and python_files itself: a production module named test_… outside them is no test. With the runner's
+        listing (dev test --listed), the listing decides."""
+        if f in self.listed:
+            return self.listed[f]
         if not _runnable(f):
             return False
         if not f.endswith(".py"):
@@ -299,6 +324,156 @@ class _Repo:
         if lang not in self._graphs:
             self._graphs[lang] = {"py": _py_graph, "js": _js_graph, "go": _go_graph}[lang](self)
         return self._graphs[lang]
+
+
+# --------------------------------------------------------------------------- the runner's own listing
+
+LISTING_SECONDS = 300  # a listing that takes longer is no listing: the file rules decide
+_LIST_CONFIGS = ("pytest.ini", ".pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "conftest.py", "package.json",
+                 "angular.json") + tuple(f"{t}.config.{e}" for t in ("vitest", "vite", "jest", "playwright")
+                                         for e in ("ts", "js", "mjs", "cjs", "mts", "cts"))
+
+
+def listing_on() -> bool:
+    """dev test --listed, or config test.listing: the runners' own listings say which files hold tests."""
+    return os.environ.get("DEVKIT_TEST_LISTING") == "1" or bool((core.CFG.get("test") or {}).get("listing"))
+
+
+def _list_key(top, runner, repo, argv=()) -> str:
+    """What a runner's listing depends on: the runner and its command, the listing command devkit runs (its script:
+    a devkit that lists otherwise lists again) and devkit's version, its configuration files (their text, conftest
+    files too) and the names of the files of its language under its root (a new test file lists again)."""
+    h = hashlib.sha256(json.dumps([runner["name"], runner["root"], runner.get("exec"), [str(x) for x in argv],
+                                   core.VERSION]).encode())
+    for f in repo.existing:
+        if _under(f, runner["root"]) and (f.rpartition("/")[2] in _LIST_CONFIGS or _lang(f) == runner["lang"]):
+            h.update(f.encode() + b"\0")
+            if f.rpartition("/")[2] in _LIST_CONFIGS:
+                h.update(repo.text(f).encode("utf-8", "replace") + b"\0")
+    return h.hexdigest()
+
+
+# a module that fails to import is listed as unittest.loader's stand-in test named after the module: it is a test file
+# that fails, so it is listed by the file its name finds; a package that fails to import hides its modules, so it is
+# listed as its folder (a trailing separator), whose files the file rules decide
+_LIST_UNITTEST = """import importlib.util, json, os, sys, unittest
+start, top = sys.argv[1], sys.argv[2]
+suite = unittest.TestLoader().discover(start, top_level_dir=top)
+out = set()
+def walk(s):
+    for x in s:
+        if isinstance(x, unittest.TestSuite):
+            walk(x)
+        elif type(x).__module__ != "unittest.loader":
+            out.add(sys.modules[type(x).__module__].__file__)
+        else:
+            try:
+                spec = importlib.util.find_spec(x._testMethodName)
+            except Exception:
+                spec = None
+            if spec is not None and spec.submodule_search_locations:
+                out.update(os.path.join(p, "") for p in spec.submodule_search_locations)
+            elif spec is not None and spec.origin:
+                out.add(spec.origin)
+walk(suite)
+print(json.dumps(sorted(out)))
+"""
+
+
+def _list_command(top, runner) -> tuple:
+    """(argv, folder, parse(output, folder) -> absolute paths) of a runner's listing, or None."""
+    name, ex, root = runner["name"], list(runner.get("exec") or []), _rootdir(top, runner)
+
+    def lines(text, rx):
+        return [m.group(1) for m in re.finditer(rx, text)]
+
+    def json_files(text):
+        found = []
+
+        def walk(x):
+            if isinstance(x, dict):
+                if isinstance(x.get("file"), str):
+                    found.append(x["file"])
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+        try:
+            walk(json.loads(text[text.find("[") if text.lstrip().startswith("[") else text.find("{"):]))
+        except ValueError:
+            return None
+        return found
+    if name == "pytest":
+        return ex + ["--collect-only", "-q", "-p", "no:cacheprovider"], root, \
+            lambda out, d: [os.path.join(d, x) for x in dict.fromkeys(lines(out, r"(?m)^([^\s:]+\.py)::"))]
+    if name == "unittest":
+        start = runner.get("start") or "."
+        level = "." if runner.get("package") else start
+        return [runner.get("python") or sys.executable, "-c", _LIST_UNITTEST, start, level], root, \
+            lambda out, d: json.loads(out.strip().splitlines()[-1]) if out.strip() else None
+    if name == "vitest":
+        return ex + ["list", "--filesOnly", "--json"], root, \
+            lambda out, d: [os.path.join(d, x) for x in json_files(out) or []] if json_files(out) is not None else None
+    if name == "playwright":
+        return ex + ["--list", "--reporter=json"], root, _playwright_files
+    if name == "jest":
+        return ex + ["--listTests"], root, lambda out, d: [x.strip() for x in out.splitlines() if x.strip().startswith("/")]
+    return None
+
+
+def _playwright_files(out, d):
+    """The spec files of `playwright test --list --reporter=json`: each suite's file, relative to config.rootDir."""
+    try:
+        data = json.loads(out[out.find("{"):])
+    except ValueError:
+        return None
+    base = ((data.get("config") or {}).get("rootDir") if isinstance(data, dict) else None) or d
+    return [os.path.join(base, s["file"]) for s in data.get("suites") or [] if isinstance(s, dict) and s.get("file")]
+
+
+def list_tests(top, runner, repo=None):
+    """The files (relative to the top) that `runner`'s own listing says hold tests, or None when it cannot list them
+    (no listing for the runner, or the listing failed). Cached in devkit's state by _list_key."""
+    top = str(top)
+    repo = repo or _Repo(top)
+    cmd = _list_command(top, runner)
+    if cmd is None:
+        return None
+    key = _list_key(top, runner, repo, cmd[0])
+    cache = core.STATE / "test-lists" / f"{project_key(top)[1]}--{hashlib.sha256((runner['root'] + runner['name']).encode()).hexdigest()[:12]}.json"
+    held = core.read_json(cache, {}) or {}
+    if held.get("key") == key and isinstance(held.get("files"), list):
+        return set(held["files"])
+    from . import identity
+    argv, folder, parse = cmd
+    env = dict(identity.runner_env(dict(os.environ)), PYTHONDONTWRITEBYTECODE="1", CI="1")
+    t0 = time.time()
+    try:
+        p = subprocess.run([str(x) for x in argv], cwd=folder, env=env, capture_output=True, text=True,
+                           errors="replace", timeout=LISTING_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    try:
+        found = parse(p.stdout, folder) if p.returncode in (0, 5) else None
+    except (ValueError, IndexError, KeyError):
+        found = None
+    if found is None:
+        return None
+    real_top = os.path.realpath(top)
+    # a folder (a trailing separator) keeps its trailing slash: the file rules decide its files
+    files = sorted({os.path.relpath(os.path.realpath(x), real_top).replace(os.sep, "/") + "/" * x.endswith(os.sep)
+                    for x in found if os.path.realpath(x).startswith(real_top + os.sep)})
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{cache.stem}-", suffix=".tmp", dir=str(cache.parent))
+    try:  # written whole, then moved in place: a reader never sees half of it
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"key": key, "files": files, "secs": round(time.time() - t0, 2), "at": time.time()}, fh)
+        os.replace(tmp, cache)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return set(files)
 
 
 # --------------------------------------------------------------------------- changed files
@@ -697,6 +872,78 @@ def detect(top, repo=None) -> list:
             found.append({"name": "pest", "root": rel(d), "lang": "php", "exec": ["vendor/bin/pest"]})
         elif "phpunit/phpunit" in deps or has(d, "phpunit.xml", "phpunit.xml.dist", "phpunit.dist.xml"):
             found.append({"name": "phpunit", "root": rel(d), "lang": "php", "exec": ["vendor/bin/phpunit"]})
+    return _declare(top, found, by_dir)
+
+
+def declared(top, by_dir=None) -> list:
+    """The test commands the project declares, in the order they decide: [{command, cwd, source}] from the test_gate
+    of its delivery policy (dev delivery), then the run steps of its CI workflows (as dev ci reads them), then each
+    package.json's test script."""
+    top = str(top)
+    out = []
+    try:
+        from . import delivery
+        policy = delivery.load(delivery.scope_for(top)) or {}
+    except Exception:  # noqa: BLE001 - a project outside the registry or a broken policy declares nothing
+        policy = {}
+    for cmd in policy.get("test_gate") or []:
+        if isinstance(cmd, str):
+            out.append({"command": cmd, "cwd": top, "source": "delivery policy test_gate"})
+    try:
+        from . import gitx
+        jobs = gitx.plan(top) if os.path.isdir(os.path.join(top, ".github", "workflows")) else []
+    except Exception:  # noqa: BLE001 - a workflow dev ci cannot read declares nothing
+        jobs = []
+    for j in jobs:
+        for st in j.get("steps") or []:
+            if st.get("run"):
+                cwd = st.get("cwd") or "."
+                out.append({"command": st["run"], "cwd": cwd if os.path.isabs(cwd) else os.path.join(top, cwd),
+                            "source": f"CI .github/workflows/{j.get('file')} › {j.get('id') or j.get('job')} › "
+                                      f"{st.get('name') or st['run'].splitlines()[0][:40]}"})
+    for d in sorted(d for d, names in (by_dir or {}).items() if "package.json" in names):
+        pkg = core.read_json(os.path.join(top, d, "package.json"), {}) or {}
+        if str((pkg.get("scripts") or {}).get("test") or "").strip():
+            out.append({"command": "npm test", "cwd": os.path.join(top, d) if d else top,
+                        "source": f"{d + '/' if d else ''}package.json test script"})
+    return out
+
+
+_BARE_PYTHON = re.compile(r"python[\d.]*|py")
+
+
+def _declare(top, found, by_dir=None) -> list:
+    """Each runner found takes the command the project declares for it (declared: the first that is a plain call of
+    the same runner at the same root, testx.recognize), and says where it came from: source "declared" with
+    declared_by, or "inferred". A bare `python` of a CI step is the interpreter devkit found here, as the CI's
+    setup-python is there."""
+    decls = []
+    for decl in declared(top, by_dir):
+        r = recognize(decl["command"], decl["cwd"], top)
+        if r:
+            decls.append((r, decl))
+    for x in found:
+        x["source"], x["declared_by"] = "inferred", ""
+        for r, decl in decls:
+            if r["name"] != x["name"] or r["root"] != x["root"]:
+                continue
+            ex = list(r["exec"])
+            if ex and _BARE_PYTHON.fullmatch(os.path.basename(ex[0])) and x["exec"][:2] == ["uv", "run"]:
+                # a uv project without a .venv: its interpreter is uv's, not the one devkit runs on
+                ex[:1] = ["uv", "run", "python"]
+            elif ex and _BARE_PYTHON.fullmatch(os.path.basename(ex[0])) and x.get("python"):
+                ex[0] = x["python"]
+            elif ex and ex[0] in ("pytest", "py.test") and x["name"] == "pytest":
+                # a bare pytest is the CI environment's: here that is the pytest devkit runs for this project (its
+                # .venv's interpreter, or uv run in a uv project), not PATH's pytest
+                ex[:1] = list(x["exec"])
+            if x["lang"] == "py" or r["name"] in ("go", "maven", "gradle"):
+                x["exec"] = ex
+            for k in ("start", "package", "scope", "env", "argv"):
+                if r.get(k) not in (None, [], {}):
+                    x[k] = r[k]
+            x.update(source="declared", declared_by=decl["source"], declared=decl["command"])
+            break
     return found
 
 
@@ -803,14 +1050,35 @@ def _js_code(text: str) -> str:
     return "".join(out)
 
 
+_JS_TYPE_ONLY = re.compile(r"""^(?:import|export)\s+type\b""")
+_JS_ONLY_NAMED = re.compile(r"""^(?:import|export)\s*\{([^}]*)\}\s*from\b""")  # no default or namespace import
+
+
+def _js_value_specs(code: str) -> list:
+    """The modules JS/TS `code` loads at run time: every import, export … from, require and dynamic import, except
+    those that bring in types only (import type, export type … from, import { type A, type B } from), which the
+    compiler erases."""
+    out = []
+    for m in _JS_SPEC.finditer(code):
+        stmt = m.group(0)
+        if _JS_TYPE_ONLY.match(stmt):
+            continue
+        named = _JS_ONLY_NAMED.match(stmt)
+        names = [x.split() for x in named.group(1).split(",") if x.strip()] if named else []
+        if names and all(x[0] == "type" for x in names):
+            continue  # every name in the braces is a type (`import {} from` still loads the module)
+        out.append(m.group(1))
+    return out
+
+
 def _uses_playwright(repo, f, seen=None) -> bool:
-    """Does JavaScript file `f` import @playwright/test, itself or through the local modules it imports (a fixtures
-    file that extends Playwright's test)?"""
+    """Does JavaScript file `f` load @playwright/test at run time, itself or through the local modules it loads (a
+    fixtures file that extends Playwright's test)? A type imported from it, directly or by a helper, loads nothing."""
     seen = set() if seen is None else seen
     if f in seen:
         return False
     seen.add(f)
-    specs = _JS_SPEC.findall(_js_code(repo.text(f)))
+    specs = _js_value_specs(_js_code(repo.text(f)))
     if any(s == "@playwright/test" or s.startswith("@playwright/test/") for s in specs):
         return True
     d = f.rpartition("/")[0]
@@ -1217,7 +1485,11 @@ def _mirrors(rel_dir: str) -> list:
 
 
 def _widen(repo, p, why):
-    """No test maps to `p`: the tests of its directory or package, then its parents', up to its runner (all)."""
+    """No test maps to `p`: the tests that walk a folder holding it, else the tests of its directory or package, then
+    its parents', up to its runner (all)."""
+    walked = _walked_by(repo, p)
+    if walked:
+        return "some", walked, f"{why}: {len(walked)} test file(s) read the folder it is in", None
     root = _root_of(repo, p)
     rootd = "" if root == "." else root
     d = p.rpartition("/")[0]
@@ -1232,7 +1504,72 @@ def _widen(repo, p, why):
     return "all", set(), f"{why}: widened to {where}", root
 
 
+# A test that walks a folder (Path.rglob/glob/iterdir/walk, os.walk/listdir/scandir, glob.glob) reads every file under
+# it without importing one. The folder is the quoted path the test names on the line of the walk, written whole
+# (os.walk('lib/devkit')) or joined with / ((ROOT / "lib" / "devkit").rglob("*.py")).
+_TREE_WALK = re.compile(r"\.(?:r?glob|iterdir|walk)\(|\bos\.(?:walk|listdir|scandir)\(|\bglob\.i?glob\(")
+_QUOTED_CHAIN = re.compile(r"""(?:(['"])[\w.-]+(?:/[\w.-]+)*\1\s*/\s*)*(['"])[\w.-]+(?:/[\w.-]+)*\2""")
+_QUOTED = re.compile(r"""(['"])([\w./-]+)\1""")
+
+
+def _tree_readers(repo) -> dict:
+    """Test file -> the folders of this repository it walks (see _TREE_WALK); built once per repository."""
+    if "trees" not in repo._graphs:
+        dirs = set()
+        for f in repo.existing:
+            d = f.rpartition("/")[0]
+            while d and d not in dirs:
+                dirs.add(d)
+                d = d.rpartition("/")[0]
+        out = {}
+        for t in repo.tests:
+            text = repo.text(t)
+            lines = [ln for ln in text.splitlines() if _TREE_WALK.search(ln)] if _TREE_WALK.search(text) else []
+            if not lines:
+                continue
+            root = _root_of(repo, t)
+            found = set()
+            for m in _QUOTED_CHAIN.finditer("\n".join(lines)):  # the folder named on the walk's own line
+                d = "/".join(q[1].strip("/") for q in _QUOTED.findall(m.group(0))).strip("/")
+                for c in ((d, f"{root}/{d}") if root != "." else (d,)):
+                    if c in dirs:
+                        found.add(c)
+            if found:
+                out[t] = found
+        repo._graphs["trees"] = out
+    return repo._graphs["trees"]
+
+
+def _walked_by(repo, p) -> set:
+    """The tests that walk a folder containing `p` (_tree_readers)."""
+    return {t for t, ds in _tree_readers(repo).items() if t != p and any(p.startswith(d + "/") for d in ds)}
+
+
+def _quoted_by(repo, p) -> set:
+    """The tests of the code files that name `p` by its whole path in quotes: a script that reads that file at run
+    time (scripts/security_corpus.py quotes reviewed lines of lib/devkit/state.py), and tests that quote it."""
+    quoters = [f for f in repo.existing if f != p and _lang(f) and (f"'{p}'" in repo.text(f) or f'"{p}"' in repo.text(f))]
+    out = {t for t in _dependents(repo, quoters) if t in repo.tests}
+    for f in quoters:
+        out |= _mentions(repo, f)
+    return out - {p}
+
+
 def _one(repo, p):
+    """-> (mode, tests, why, scope) for one changed file, with the tests that walk a folder holding it."""
+    mode, sel, why, scope = _one_file(repo, p)
+    if mode == "all":
+        return mode, sel, why, scope
+    walked = _walked_by(repo, p) - sel
+    if not walked:
+        return mode, sel, why, scope
+    note = f"{len(walked)} test file(s) read the folder it is in"
+    if mode == "some" and sel:
+        return "some", sel | walked, f"{why}; {note}", scope
+    return "some", walked, note, None  # what nothing else selected, or a doc's "no tests", is these tests
+
+
+def _one_file(repo, p):
     """-> (mode, tests, why, scope) for one changed file."""
     g = _global_reason(p)
     d = p.rpartition("/")[0]
@@ -1262,7 +1599,8 @@ def _one(repo, p):
             return "some", sel, f"read by {refs[0]}", None
         return "none", set(), "docs: no tests", None
     if _lang(p):
-        sel = {t for t in _dependents(repo, [p]) if t in repo.tests} | _convention(repo, p) | _mentions(repo, p)
+        sel = {t for t in _dependents(repo, [p]) if t in repo.tests} | _convention(repo, p) | _mentions(repo, p) | \
+            _quoted_by(repo, p)
         sel.discard(p)
         if sel:
             return "some", sel, f"{len(sel)} test file(s) depend on it", None
@@ -1585,6 +1923,28 @@ def _case(id_, file, line, status, message="", secs=0.0, name=""):
             "secs": round(float(secs or 0), 3), "name": name or id_}
 
 
+# an assertion failure as each runner words it: an AssertionError (Python, node:assert, chai and vitest), pytest's
+# rewritten assert, pytest's own Failed (pytest.raises or pytest.warns that saw nothing, pytest.fail; never one that
+# says Timeout, as pytest-timeout's "Failed: Timeout >1.0s" and "Failed: Timeout (>1.0s) from pytest-timeout." do,
+# which check nothing of the test), an expect of jest or Playwright (a timed-out one too, and jest's
+# expect.assertions(n) and expect.hasAssertions() that counted too few), JUnit 5's AssertionFailedError
+_ASSERTION = re.compile(r"(?:E\s+)?(?:(?:[\w.]+\.)?(?:AssertionError|AssertionFailedError|JestAssertionError)\b|"
+                        r"(?:_pytest\.outcomes\.)?Failed:(?!\s*Timeout\b)|assert\b|(?:Error:\s*)?"
+                        r"(?:Timed out \d+ms waiting for )?expect(?:\.\w+)*\()")
+_RAISED = re.compile(r"(?:E\s+)?([A-Za-z_$][\w$.]*?)(?:\s*\[[^\]\n]*\])?:(?:\s|$)")
+
+
+def _failure_of(message, error=False) -> str:
+    """What a failed case's message says it failed on (a case's "failure"): "assertion" for an assertion failure, else
+    the name of what it raised as the message opens with it (TypeError, json.decoder.JSONDecodeError), or "an error"
+    when it names none. `error`: the runner reported an error rather than a failure, which is never an assertion."""
+    msg = ui.ANSI_RE.sub("", message or "").strip()
+    if _ASSERTION.match(msg) and not error:
+        return "assertion"
+    m = _RAISED.match(msg)
+    return m.group(1) if m and m.group(1) not in ("AssertionError", "assert") else "an error"
+
+
 def _relto(top, path) -> str:
     if not path:
         return ""
@@ -1698,6 +2058,8 @@ def parse_junit(text, top, base, runner) -> list:
         if bad is not None and not msg:
             msg = _first_line(body)
         out.append(_case(id_, file, line, status, msg, tc.get("time") or 0, name))
+        if bad is not None:
+            out[-1]["failure"] = _failure_of(msg, error=bad.tag == "error")
     return out
 
 
@@ -1719,9 +2081,20 @@ def parse_playwright_junit(text, top, base, runner) -> list:
         status = "failed" if bad is not None else "skipped" if tc.find("skipped") is not None else "passed"
         body = (bad.text or "") if bad is not None else ""
         hits = re.findall(re.escape(fabs) + r":(\d+):\d+", body)
-        msg = _first_line(bad.get("message") or body) if bad is not None else ""
+        kind = (bad.get("type") or "") if bad is not None else ""
+        # a release that types no failure (1.55 writes FAILURE) gives the test's place as its message: the error is in
+        # the failure's text
+        said = next((x.strip() for x in body.splitlines() if _ASSERTION.match(x.strip()) or _RAISED.match(x.strip())),
+                    "") if kind in ("", "FAILURE") else ""
+        msg = _first_line(said or bad.get("message") or body) if bad is not None else ""
         out.append(_case(f"{file}::{name}", file, int(hits[-1]) if hits else None, status, msg,
                          tc.get("time") or 0, name))
+        if bad is not None:
+            # a release that types its failures (1.64 does) names an expect matcher (expect.toBe) or an AssertionError,
+            # an assertion, or what the test raised
+            out[-1]["failure"] = ("assertion" if re.match(r"expect\.|(?:[\w.]+\.)?AssertionError$", kind) else
+                                  kind if kind not in ("", "FAILURE", "Error") else
+                                  _failure_of(msg, error=bad.tag == "error"))
     return out
 
 
@@ -1743,7 +2116,7 @@ def parse_node_junit(text, top, base, only="") -> list:
         bad = tc.find("failure")
         bad = bad if bad is not None else tc.find("error")
         status = "failed" if bad is not None else "skipped" if tc.find("skipped") is not None else "passed"
-        msg, line = "", None
+        msg, line, failure = "", None, ""
         if bad is not None:  # node ends an assertion's first line in ':' and gives the values (or a diff) after it
             lines = [ln.strip() for ln in (bad.get("message") or bad.text or "").splitlines() if ln.strip()]
             vals = [ln for ln in lines[1:] if ln != "+ actual - expected"][:2] if lines[:1] and \
@@ -1751,10 +2124,17 @@ def parse_node_junit(text, top, base, only="") -> list:
             msg = " ".join(lines[:1] + vals)
             code = re.search(r"\bexitCode: (\d+)", bad.text or "") if whole else None
             msg = f"the script exited {code.group(1)}" if code else msg
+            # the message leaves out what the test raised; the failure's text names it as its cause
+            cause = re.search(r"\bcause: ([A-Za-z_$][\w$.]*)", bad.text or "")
+            failure = (f"exit code {code.group(1)}" if code else
+                       ("assertion" if cause.group(1) == "AssertionError" else cause.group(1)) if cause else
+                       _failure_of(msg))
             m = re.search(re.escape(fabs) + r":(\d+):\d+", bad.text or "") if fabs else None
             line = int(m.group(1)) if m else None
         out.append(_case(file if whole else f"{file}::{full}", file, line, status, msg, tc.get("time") or 0,
                          file if whole else full))
+        if bad is not None:
+            out[-1]["failure"] = failure
 
     def walk(el, path):
         for ch in el:
@@ -1842,6 +2222,7 @@ def parse_jest_json(text, top) -> list:
         if not ars and tr.get("status") == "failed":
             out.append(_case(file, file, None, "failed", _first_line(tr.get("message") or tr.get("failureMessage")),
                              0, file))
+            out[-1]["failure"] = _failure_of(out[-1]["message"])
         for ar in ars:
             full = ar.get("fullName") or " ".join((ar.get("ancestorTitles") or []) + [ar.get("title") or ""])
             msgs = "\n".join(ar.get("failureMessages") or [])
@@ -1849,6 +2230,8 @@ def parse_jest_json(text, top) -> list:
             line = int(m.group(1)) if m else ((ar.get("location") or {}).get("line"))
             out.append(_case(f"{file}::{full}", file, line, _JEST_STATUS.get(ar.get("status"), "failed"),
                              _first_line(msgs), (ar.get("duration") or 0) / 1000.0, full))
+            if out[-1]["status"] == "failed":
+                out[-1]["failure"] = _failure_of(out[-1]["message"])
     return out
 
 
@@ -1967,6 +2350,9 @@ def parse_unittest(text, top, runner, names=()) -> list:
             _first_line("\n".join(b for b in body if not b.startswith("Traceback")))
         prev = cases.get(id_)
         cases[id_] = _case(id_, file or (prev or {}).get("file", ""), line, "failed", msg, 0, m.group(2))
+        # FAIL: the test's assertion failed; ERROR: it raised something else
+        cases[id_]["failure"] = ("assertion" if m.group(1) == "FAIL" else "an unexpected success"
+                                 if m.group(1) == "UNEXPECTED SUCCESS" else _failure_of(msg, error=True))
         # The innermost traceback may be production code. Keep the selected test's origin separate so proof
         # attribution does not replace its own error with another failure from the same test module.
         cases[id_]["test_file"] = _ut_file(top, runner, id_)
@@ -2092,7 +2478,12 @@ run_observed_unittest(completion)
 
 
 def observe_unittest_shell(command, work, completion):
-    """Replace only the module words; bash still evaluates the original command's other words."""
+    """Replace only the module words; bash still evaluates the original command's other words. In a multi-line step
+    only the test command's line changes."""
+    span = _unittest_span(command) if "\n" in command.strip() else None
+    if span and span[1] - span[0] < len(command):  # one logical line (a continued one too) is lexed below
+        start, end = span
+        return command[:start] + observe_unittest_shell(command[start:end], work, completion) + command[end:]
     lexer = shlex.shlex(command, posix=True)
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -2228,8 +2619,10 @@ def run_complete(runner, rc, completion=None, failures=()) -> bool:
 
 
 def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, stream=False, log=None,
-              timeout=None, isolated_imports=False) -> dict:
-    """Run one selection with one runner; stream the output when asked; parse the results.
+              timeout=None, isolated_imports=False, own_temp=False) -> dict:
+    """Run one selection with one runner; stream the output when asked; parse the results. `own_temp`: the tests get
+    a temp folder of their own (TMPDIR, TEMP and TMP), empty when the run starts and removed with it, so what one run
+    leaves there never reaches the next (dev test prove's runs).
 
     -> {runner, root, files, ids, related, all, argv, rc, secs, cases, count, passed, failed, skipped, expected_failure,
         failures, zero (the selection ran no test), complete (the selection finished), crash (no complete result),
@@ -2247,7 +2640,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
                 part_log = f"{log}.{k}" if log else None
                 parts.append(run_tests(top, runner, [f] if f in files else [],
                                        [i for i in ids if _id(i).split("::")[0] == f], env=env, stream=stream,
-                                       log=part_log, timeout=timeout))
+                                       log=part_log, timeout=timeout, own_temp=own_temp))
             return _merged_runs(parts, files, ids, log)
     if runner["name"] == "pytest" and not related and not _pytest_importlib(top, runner, env):
         # pytest's default import mode imports a test file by its name inside its packages: two test files of one
@@ -2263,7 +2656,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
         buckets = _pytest_buckets(top, runner, picked, [] if all_ else ids)
         if len(buckets) > 1:
             parts = [run_tests(top, runner, fs, i_s, env=env, stream=stream, log=f"{log}.{k}" if log else None,
-                               timeout=timeout) for k, (fs, i_s) in enumerate(buckets)]
+                               timeout=timeout, own_temp=own_temp) for k, (fs, i_s) in enumerate(buckets)]
             merged = _merged_runs(parts, [] if all_ else files, [] if all_ else ids, log)
             merged["all"] = bool(all_)
             return merged
@@ -2285,6 +2678,9 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     for k, v in cmd["env"].items():
         full_env[k] = v if k != "PYTHONPATH" or not (env or {}).get(k) else v + os.pathsep + env[k]
     full_env = identity.runner_env(full_env)  # the tests are the project's code: a dev command in them names nobody
+    if own_temp:
+        (work / "tmp").mkdir()
+        full_env.update(dict.fromkeys(("TMPDIR", "TEMP", "TMP"), str(work / "tmp")))
     import_receipt = None
     completion = unittest_completion(work) if runner["name"] == "unittest" else None
     if isolated_imports:
@@ -2296,24 +2692,37 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     log.parent.mkdir(parents=True, exist_ok=True)
     out, t0 = [], time.time()
     try:
+        # A run with a limit (dev ci --run --resume's partial rerun) gets a session of its own, so the limit or an
+        # interrupt stops every process it started, as the full step runner does (gitx._step_shell): killing only
+        # the runner left its workers and the tests' children running, holding the output open past the limit. Like
+        # every process devkit starts in a session of its own, it never carries the call token (detached_env).
         # nosemgrep: python36-compatibility-Popen1 (devkit needs Python 3.9+, where Popen takes errors=)
-        with open(log, "w") as fh, subprocess.Popen([str(x) for x in cmd["argv"]], cwd=cmd["cwd"], env=full_env,
-                                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                                   errors="replace") as proc:
+        with open(log, "w") as fh, subprocess.Popen([str(x) for x in cmd["argv"]], cwd=cmd["cwd"],
+                                                   env=identity.detached_env(full_env), stdout=subprocess.PIPE,
+                                                   stderr=subprocess.STDOUT, text=True, errors="replace",
+                                                   start_new_session=bool(timeout)) as proc:
             timer = None
             if timeout:
                 import threading
-                timer = threading.Timer(timeout, proc.kill)
+                from .gitx import _stop_group
+                timer = threading.Timer(timeout, _stop_group, (proc,))
+                timer.daemon = True
                 timer.start()
-            for ln in proc.stdout:
-                out.append(ln)
-                fh.write(ln)
-                if stream:
-                    sys.stdout.write(ln)
-                    sys.stdout.flush()
-            rc = proc.wait()
-            if timer:
-                timer.cancel()
+            try:
+                for ln in proc.stdout:
+                    out.append(ln)
+                    fh.write(ln)
+                    if stream:
+                        sys.stdout.write(ln)
+                        sys.stdout.flush()
+                rc = proc.wait()
+            except BaseException:
+                if timeout:
+                    _stop_group(proc)
+                raise
+            finally:
+                if timer:
+                    timer.cancel()
     except OSError as e:
         out.append(f"{cmd['argv'][0]}: {e}\n")
         log.write_text("".join(out))
@@ -2339,7 +2748,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     if complete and completion:
         receipt = core.read_json(completion["path"], {})
         unattributed = max(0, receipt["skipped"] - sum(c["status"] == "skipped" for c in cases))
-    shutil.rmtree(work, ignore_errors=True)
+    _remove_tree(work)  # with the tests' own temp folder, whatever they locked in it
     if unit:
         # only the launcher's receipt proves an empty selection: loader text and nested summaries cannot
         zero = not cases and not unattributed and complete
@@ -2372,6 +2781,7 @@ def run_tests(top, runner, files=(), ids=(), related=(), all_=False, env=None, s
     complete = complete and not crash
     return {**({"imports_attested": imports_attested} if isolated_imports else {}),
             "runner": runner["name"], "root": runner["root"], "files": files, "ids": [_id(i) for i in ids],
+            "source": runner.get("source") or "inferred", "declared_by": runner.get("declared_by") or "",
             "related": related, "all": bool(all_), "argv": [str(x) for x in cmd["argv"]], "cwd": cmd["cwd"],
             "rc": rc, "secs": round(secs, 2), "cases": cases, "count": count,
             "passed": sum(c["status"] == "passed" for c in cases), "failed": len(failures),
@@ -2605,6 +3015,7 @@ def _show(res, top):
 def _summary(res) -> dict:
     out = {k: res[k] for k in ("runner", "root", "files", "ids", "related", "all", "argv", "rc", "secs", "count",
                                "passed", "failed", "skipped", "zero", "crash", "log")}
+    out["source"], out["declared_by"] = res.get("source") or "inferred", res.get("declared_by") or ""
     out["not_found"] = list(res.get("not_found") or [])
     out["complete"] = res.get("complete") is True
     out["expected_failure"] = res.get("expected_failure", 0)
@@ -2685,6 +3096,18 @@ def _deleted(top, st) -> list:
             if f.get("file") and not os.path.exists(os.path.join(top, f["file"]))]
 
 
+def _not_tests(top, st) -> list:
+    """Recorded failures in a file named like a test that is no test here (a production module test_x.py outside
+    pytest's testpaths, which an older devkit selected and recorded): it is never selected again, and running its
+    names by hand fails on fixtures no test gives them: [(runner, root, id)]."""
+    fails = [f for f in (st.get("failures") or {}).get(top) or [] if f.get("file") and _runnable(f["file"])
+             and os.path.exists(os.path.join(top, f["file"]))]
+    if not fails:
+        return []
+    repo = _Repo(top)
+    return [(f.get("runner"), f.get("root"), f.get("id")) for f in fails if not repo.runnable(f["file"])]
+
+
 def _say_gone(gone) -> None:
     if gone:
         print(f"{ui.WARN} {len(gone)} recorded failure(s) no longer select a test (renamed or deleted): "
@@ -2693,9 +3116,10 @@ def _say_gone(gone) -> None:
 
 
 def _failed_groups(top, runners, st):
+    no_test = {i for _, _, i in _not_tests(top, st)}
     fails = [f for f in (st.get("failures") or {}).get(top) or []
              if (not f.get("file") or os.path.exists(os.path.join(top, f["file"])))
-             and _loadable(f.get("runner"), f.get("root"), f.get("id"))]
+             and _loadable(f.get("runner"), f.get("root"), f.get("id")) and f.get("id") not in no_test]
     out = []
     for r in runners:  # runners that share a root (an Angular workspace's projects) take the failures of their files
         mine = [f for f in fails if f.get("runner") == r["name"] and f.get("root") == r["root"] and
@@ -2893,6 +3317,12 @@ def _flow(a, top, runners):
         if deleted:
             _forget(top, set(deleted))
         gone = [i for _, _, i in deleted]
+        moved = _not_tests(top, st)
+        if moved:
+            _forget(top, set(moved))
+            print(f"{ui.WARN} {len(moved)} recorded failure(s) are in a file that is no test here (outside the "
+                  f"runner's test paths): forgotten: {', '.join(i for _, _, i in moved[:5])}"
+                  + (f" and {len(moved) - 5} more" if len(moved) > 5 else ""), file=sys.stderr)
         groups = _failed_groups(top, runners, st)
         if not groups:
             _say_gone(gone)
@@ -2985,13 +3415,56 @@ def _verdict(results, json_out, kind, advised=False) -> int:
     return 0
 
 
+def _split_lists(paths) -> list:
+    """The tests named, with a list passed as one word split into its words. zsh passes an unquoted $VAR whole, so
+    `dev test run $MODULES` was one argument holding the list, which ran as one module name that does not exist and
+    0 tests. A word with white space that names no file is such a list; white space inside the brackets of a pytest
+    id's parameters (`test_add[one two]`) is part of that id."""
+    out = []
+    for raw in paths:
+        words = _words_outside_brackets(raw)
+        if len(words) > 1 and not os.path.exists(os.path.abspath(raw)):
+            print(ui.dim(f"split one argument into {len(words)} tests (a list in one shell word: in zsh write "
+                         f"${{=VAR}} or $(cat file) to pass it as words)"), file=sys.stderr)
+            out += words
+        else:
+            out.append(raw)
+    return out
+
+
+def _words_outside_brackets(text) -> list:
+    """`text` split at the white space outside square brackets. A [ that never closes holds no parameters: it is an
+    ordinary character, so its word ends at the next white space."""
+    # level[k]: the bracket depth before text[k], unclamped; a [ at k closes where the depth first comes back to
+    # level[k], which is the next k' > k with the same level (it moves by one at a time)
+    level = [0]
+    for ch in text:
+        level.append(level[-1] + (ch == "[") - (ch == "]"))
+    closes, seen = [False] * len(text), set()
+    for k in range(len(text), -1, -1):
+        if k < len(text):
+            closes[k] = text[k] == "[" and level[k] in seen
+        seen.add(level[k])
+    words, word, depth = [], "", 0
+    for i, ch in enumerate(text):
+        if ch.isspace() and depth == 0:
+            if word:
+                words.append(word)
+            word = ""
+            continue
+        if depth or closes[i]:
+            depth += (ch == "[") - (ch == "]")
+        word += ch
+    return words + ([word] if word else [])
+
+
 def _explicit(top, runners, paths):
     """Paths (files, dirs, ids) relative to the cwd -> runner groups, plus what no runner takes: a path whose real path
     is outside the repository (`../x.test.js`, an absolute path, a symlink out of it) is no test of it."""
     groups, bad = {}, []
     tests = _Repo(top).tests
     real_top = os.path.realpath(top)
-    for raw in paths:
+    for raw in _split_lists(paths):
         file_part, sep, rest = raw.partition("::")
         absf = os.path.abspath(file_part)
         real = os.path.realpath(absf)
@@ -3067,7 +3540,10 @@ def _plan(a, top, runners) -> int:
         cmd = build_command(top, r, files=sel["files"], related=sel["related"], report="<report>",
                             all_=sel.get("all", False))
         runs.append({"runner": r["name"], "root": r["root"], "files": sel["files"], "related": sel["related"],
-                     "all": sel.get("all", False), "argv": cmd["argv"],
+                     "all": sel.get("all", False), "argv": cmd["argv"], "source": r.get("source") or "inferred",
+                     "declared_by": r.get("declared_by") or "",
+                     "selection": next((x.get("selection") for x in repo.runners() if (x["name"], x["root"]) ==
+                                        (r["name"], r["root"])), None) or "file names",
                      "estimate": estimate(st, r, all_=True) if sel.get("all") else
                      estimate(st, r, sel["files"], n_files=n_files)})
     ests = [x["estimate"] for x in runs]
@@ -3102,6 +3578,11 @@ def _plan(a, top, runners) -> int:
             f"related to {len(x['related'])} file(s)" if x["related"] else f"{len(x['files'])} file(s)"
         print(f"  would run: {x['runner']} · {what} · ~{_fmt(x['estimate'])}")
         print(ui.dim(f"    $ {core.tilde(' '.join(shlex.quote(y) for y in x['argv']))}"))
+        if x["selection"] == "listed":
+            print(ui.dim("    tests: as the runner's own listing says (dev test --listed)"))
+        print(ui.dim(f"    command: declared by {x['declared_by']}" if x["source"] == "declared" else
+                     "    command: inferred from the project's files (no test entry in its delivery policy, CI "
+                     "workflow or package.json declares one)"))
     if orphans:
         print(f"  {ui.WARN} no runner for: {', '.join(orphans[:5])}")
     reach = [t for t in radius["tests"] if t not in set(orphans)]
@@ -3120,13 +3601,383 @@ def _plan(a, top, runners) -> int:
 
 # --------------------------------------------------------------------------- dev test prove
 
-_JS_UNIT = re.compile(r"^\s*(?:it|test)(?:\.(?:only|skip|concurrent|todo|failing))?\s*\(\s*(['\"`])(.+?)\1", re.M)
 _GO_UNIT = re.compile(r"^func (Test\w+)\s*\(", re.M)
 _JVM_UNIT = re.compile(r"@(?:Test|ParameterizedTest|RepeatedTest|TestFactory|TestTemplate)\b[^\n]*\n(?:\s*@[^\n]*\n)*"
                        r"\s*(?:(?:public|private|protected|internal|open|override|suspend|static|final)\s+)*"
                        r"(?:fun\s+|void\s+|[\w<>\[\],]+\s+)?`?(\w+)`?\s*\(", re.M)
 _PHP_UNIT = re.compile(r"(?:(?:@test|#\[Test\])[^\n]*\n(?:[^\n]*\n){0,3}?\s*(?:public\s+)?function\s+(\w+)"
                        r"|function\s+(test\w*)\s*\()", re.M)
+
+
+_JS_CALL = re.compile(r"^[ \t]*(?:it|test)((?:\s*\.\s*\w+)*)\s*(?=[(`])", re.M)
+_JS_TAKES_ARG = {"each", "skipIf", "runIf", "for"}  # it.each(table)(title, …), it.skipIf(cond)(title, …)
+# members of test/it that are no test (Playwright's test.describe, test.use, test.step; vitest's test.extend)
+_JS_NOT_TEST = {"describe", "use", "step", "extend", "configure", "beforeEach", "afterEach", "beforeAll", "afterAll",
+                "info", "setTimeout", "slow", "expect", "scoped", "override"}
+_JS_HOOK = re.compile(r"^[ \t]*(?:beforeEach|afterEach|beforeAll|afterAll)\s*\(", re.M)
+_JS_DECL = re.compile(r"^[ \t]*(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function(?:\s*\*)?\s*([A-Za-z_$][\w$]*)"
+                      r"|class\s+([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?=)", re.M)
+_JS_REGEX_BEFORE = set("(,=:[!&|?{};+-*%<>~^") | {""}
+# keywords after which a slash opens a regular expression, as after an operator: `return /a*/.test(x)`
+_JS_REGEX_AFTER = {"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else",
+                   "yield", "await"}
+
+
+def _js_word_before(text: str, i: int) -> str:
+    """The word that ends right before index `i` of `text`, blanks aside, or '' when a member access (`x.return`)."""
+    k = i
+    while k > 0 and text[k - 1].isspace():
+        k -= 1
+    j = k
+    while j > 0 and (text[j - 1].isalnum() or text[j - 1] in "_$"):
+        j -= 1
+    return "" if text[j - 1:j] == "." else text[j:k]
+
+
+@functools.lru_cache(maxsize=16)
+def _js_scan(text: str) -> tuple:
+    """Where the comments and the literals of JS/TS `text` lie, in one pass -> (comments, literals): comments, [(start,
+    end)] of each comment; literals, [(start, end, kind)] of the inside of each string ("string"), template literal
+    ("template", its expressions with it) and regular expression ("regex"). A template literal's expressions are read
+    as code, their braces, strings, comments and inner templates too, so none of those ends it. A ++ or -- after a
+    value is postfix, a value itself: a slash after it divides."""
+    comments, literals, i, n, last = [], [], 0, len(text), ""
+    templates = []  # each template literal whose expression is being read: [where its inside starts, braces open]
+    while i < n:
+        c = text[i]
+        if c == "`" or c == "}" and templates and not templates[-1][1]:
+            # template text, from its backtick or from the brace that ends an expression, to its backtick or a ${
+            start = templates.pop()[0] if c == "}" else i + 1
+            j = i + 1
+            while j < n and text[j] != "`" and not text.startswith("${", j):
+                j += 2 if text[j] == "\\" else 1
+            if j < n and text[j] != "`":
+                templates.append([start, 0])
+                i, last = j + 2, "{"
+            else:
+                literals.append((start, min(j, n), "template"))
+                i, last = j + 1, "`"
+            continue
+        if templates and c in "{}":
+            templates[-1][1] += 1 if c == "{" else -1
+        if c in "'\"":
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            literals.append((i + 1, min(j, n), "string"))
+            i, last = j + 1, c
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            comments.append((i, j))
+            i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            comments.append((i, j))
+            i = j
+        elif c == "/" and (last in _JS_REGEX_BEFORE or last == "a" and _js_word_before(text, i) in _JS_REGEX_AFTER):
+            j, cls = i + 1, False
+            while j < n and text[j] != "\n" and (text[j] != "/" or cls):
+                if text[j] == "\\":
+                    j += 1
+                elif text[j] == "[":
+                    cls = True
+                elif text[j] == "]":
+                    cls = False
+                j += 1
+            literals.append((i + 1, min(j, n), "regex"))
+            i, last = j + 1, "/"
+        elif c in "+-" and text.startswith(c + c, i):
+            post = last in (")", "]") or last == "a" and _js_word_before(text, i) not in _JS_REGEX_AFTER
+            i, last = i + 2, ")" if post else c
+        else:
+            if not c.isspace():
+                last = c if not (c.isalnum() or c in "_$") else "a"
+            i += 1
+    literals += [(start, n, "template") for start, _ in templates]  # templates the text ends inside
+    return tuple(comments), tuple(literals)
+
+
+@functools.lru_cache(maxsize=16)
+def _js_mask(text: str, strings: bool = True) -> str:
+    """`text` with the insides of its strings, template literals, regular expressions and comments blanked (new lines
+    kept): brackets and keywords found in the result are code. With `strings` false only the comments are blanked, so
+    the result reads as the code does. Kept for the last texts read: each reader of one text gets the same masked text,
+    which the caches keyed by it (_js_closes) then find at once instead of comparing it with an equal copy."""
+    comments, literals = _js_scan(text)
+    out = list(text)
+    for a, b in list(comments) + ([(a, b) for a, b, _ in literals] if strings else []):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+    return "".join(out)
+
+
+_JS_BRACKET = re.compile(r"[()\[\]{}]")
+
+
+@functools.lru_cache(maxsize=16)
+def _js_closes(masked: str, typed: bool = True) -> dict:
+    """{index of each opening bracket of masked text: the index _js_close gives for it}, in one pass, kept for the last
+    texts read, so a reader that asks for many nested brackets reads the text once. A closing bracket that does not
+    match the innermost open one ends every bracket open there, as a scan from each of them ends at it. Not `typed`:
+    any closing bracket closes the innermost open one, as a count of the depth has it (_js_statement_end)."""
+    pairs, out, stack = {"(": ")", "[": "]", "{": "}"}, {}, []
+    for m in _JS_BRACKET.finditer(masked):
+        k, c = m.start(), m.group()
+        if c in pairs:
+            stack.append((pairs[c], k))
+        elif stack:
+            want, i = stack.pop()
+            out[i] = k
+            if typed and want != c:
+                out.update((j, k) for _, j in stack)
+                stack.clear()
+    out.update((j, len(masked) - 1) for _, j in stack)
+    return out
+
+
+def _js_close(masked: str, at: int) -> int:
+    """The index of the bracket closing the one at `at` in masked text (_js_mask), or the end of the text."""
+    if 0 <= at < len(masked) and masked[at] in "([{":
+        return _js_closes(masked)[at]
+    pairs, stack = {"(": ")", "[": "]", "{": "}"}, []
+    for k in range(at, len(masked)):
+        c = masked[k]
+        if c in pairs:
+            stack.append(pairs[c])
+        elif c in ")]}" and stack:
+            if stack.pop() != c:
+                return k
+            if not stack:
+                return k
+    return len(masked) - 1
+
+
+_JS_CODE = re.compile(r"\S")
+
+
+@functools.lru_cache(maxsize=16)
+def _js_went_on(masked: str) -> dict:
+    """The statement ends _js_statement_end found in masked text, kept for the last texts read: {(index of a new line
+    where a statement went on, index of the last code before it): where that statement ends}."""
+    return {}
+
+
+def _js_statement_end(masked: str, at: int) -> int:
+    """The index where the statement starting at `at` ends: a new line outside brackets after a complete expression.
+    A bracket is passed over whole, to where the depth falls back (_js_closes), and a run of blanks at once. A
+    statement that goes on at a new line ends where any other statement that went on there ended (what follows no
+    longer depends on where either started), so the declarations on each line of one long statement read it once."""
+    k, n, last, closes = at, len(masked), -1, _js_closes(masked, False)
+    went_on, passed = _js_went_on(masked), []
+
+    def end(e):
+        for key in passed:
+            went_on[key] = e
+        return e
+    while k < n:
+        c = masked[k]
+        if c in "([{":
+            k = closes[k] + 1
+            last = k - 1
+            continue
+        if c in ")]}":
+            return end(k - 1)
+        if c == ";":
+            return end(k)
+        if c == "\n":
+            known = last - 1 >= at  # from here on the scan reads as any other that came this far
+            if known and (k, last) in went_on:
+                return end(went_on[(k, last)])
+            m = _JS_CODE.search(masked, k)
+            nxt = m.start() if m else n
+            if last >= at and not masked[max(at, last - 1):last + 1].endswith((
+                    "=", ",", "(", "[", "{", "+", "-", "*", "/", "%", "&", "|", "?", ":", "<", ">", "!", ".", "=>")) and \
+                    not masked[nxt:nxt + 2].startswith((".", "?", ":", "+", "-", "*", "/", "&&", "||", "=>")):
+                return end(k - 1)
+            if known:
+                passed.append((k, last))
+            k = nxt
+            continue
+        if not c.isspace():
+            last = k
+        k += 1
+    return end(n - 1)
+
+
+@functools.lru_cache(maxsize=8)
+def _newlines(text: str) -> list:
+    """The places of the new lines of `text`, kept for the last texts read, so a line is found without a rescan."""
+    return [m.start() for m in re.finditer("\n", text)]
+
+
+def _line_of(text: str, i: int) -> int:
+    return bisect.bisect_left(_newlines(text), max(0, i)) + 1
+
+
+def _js_units(text: str) -> list:
+    """JS/TS tests: [(title, first line, last line)], each to the bracket closing its it()/test() call, so the code
+    between two tests (a helper, a describe) belongs to neither. it.each(table)(title) and it.each`table`(title)
+    are a unit named by their title template (%i, $a), whose cases _member matches."""
+    return [(title, _line_of(text, a), _line_of(text, b)) for title, a, b in _js_test_calls(text, _js_mask(text))]
+
+
+def _js_test_calls(text: str, masked: str) -> list:
+    """The tests of JS/TS text `text` (`masked`: _js_mask of it): [(title, index of its first character, index of the
+    bracket closing its call)] in the order of the text."""
+    out = []
+    for m in _JS_CALL.finditer(masked):
+        mods = re.findall(r"\w+", m.group(1))
+        if _JS_NOT_TEST & set(mods):
+            continue
+        k = m.end()
+        if mods and mods[-1] in _JS_TAKES_ARG:
+            if masked[k] == "`":
+                k = masked.find("`", k + 1) + 1
+            else:
+                k = _js_close(masked, k) + 1
+            while k < len(masked) and masked[k].isspace():
+                k += 1
+            if k <= 0 or k >= len(masked) or masked[k] != "(":
+                continue
+        if masked[k] != "(":
+            continue
+        q = k + 1
+        while q < len(text) and text[q].isspace():
+            q += 1
+        if q >= len(text) or text[q] not in "'\"`":
+            continue
+        close = text.find(text[q], q + 1)
+        while close > 0 and text[close - 1] == "\\":
+            close = text.find(text[q], close + 1)
+        if close < 0:
+            continue
+        out.append((text[q + 1:close], m.start() + len(m.group(0)) - len(m.group(0).lstrip()), _js_close(masked, k)))
+    return out
+
+
+def _js_support(text: str) -> list:
+    """The test support of a JS/TS test file outside its tests: [(name or '', first line, last line)] of its named
+    helpers (function, class, const/let/var) and, named '', its hooks (beforeEach, afterAll, …)."""
+    masked = _js_mask(text)
+    tests = [(s, e) for _, s, e in _js_units(text)]
+    out = []
+    for m in _JS_DECL.finditer(masked):
+        start = _line_of(text, m.start())
+        if any(s <= start <= e for s, e in tests):
+            continue
+        name = next(g for g in m.groups() if g)
+        if m.group(3):
+            end = _js_statement_end(masked, m.end())
+        else:
+            brace = masked.find("{", m.end())
+            end = _js_close(masked, brace) if brace >= 0 else m.end()
+        out.append((name, start, _line_of(text, end)))
+    for m in _JS_HOOK.finditer(masked):
+        start = _line_of(text, m.start())
+        if not any(s <= start <= e for s, e in tests):
+            out.append(("", start, _line_of(text, _js_close(masked, m.end() - 1))))
+    return out
+
+
+# a class member's head: its modifiers, then its name (a word, #private, a [computed] key or a quoted one)
+_JS_MEMBER = re.compile(r"(?:(?:static|async|get|set|public|private|protected|readonly|override|abstract|declare|"
+                        r"accessor)\s+)*\*?\s*(#?[A-Za-z_$][\w$]*|\[|['\"])")
+_JS_METHOD = re.compile(r"\s*[?!]?\s*(?:<[^>\n]*>)?\s*\(")  # after a member's name: it is a method
+_JS_DECORATOR = re.compile(r"@[\w$.]+")
+
+
+def _js_class_members(text: str, masked: str, brace: int) -> list | None:
+    """The members of the class whose body opens at `brace`, read at the class body's own depth only, so nothing
+    inside a member's body (a call in an arrow property, an if block) is one: [(name, first line, last line)], a
+    member's decorators included. None when the body holds something no member starts with."""
+    close, out, k = _js_close(masked, brace), [], brace + 1
+    while True:
+        while k < close and (masked[k].isspace() or masked[k] == ";"):
+            k += 1
+        if k >= close:
+            return out
+        start = k
+        while k < close and masked[k] == "@":  # decorators, each with its arguments
+            d = _JS_DECORATOR.match(masked, k)
+            k = d.end() if d else k + 1
+            if masked[k:k + 1] == "(":
+                k = _js_close(masked, k) + 1
+            while k < close and masked[k].isspace():
+                k += 1
+        m = _JS_MEMBER.match(masked, k, close)
+        if not m:
+            return None
+        at, name = m.start(1), m.group(1)
+        if name == "[":
+            end = _js_close(masked, at)
+            name, after = text[at:end + 1], end + 1
+        elif name in "'\"":
+            end = masked.find(name, at + 1, close)
+            name, after = text[at:end + 1], end + 1
+        else:
+            after = m.end()
+        method = _JS_METHOD.match(masked, after, close)
+        if method:  # a method: to the end of its body (or of a declaration without one)
+            params = _js_close(masked, method.end() - 1)
+            body = next((i for i in range(params + 1, close) if masked[i] in "{;"), close - 1)
+            end = _js_close(masked, body) if masked[body] == "{" else body
+        else:  # a field, a static block: to the end of its statement
+            end = _js_statement_end(masked, k)
+        out.append((name, _line_of(text, start), _line_of(text, end)))
+        k = max(end + 1, k + 1)
+
+
+def _js_classes(text: str) -> list:
+    """The classes outside the tests of a JS/TS test file: [(name, first line, last line, members (see
+    _js_class_members))]."""
+    masked = _js_mask(text)
+    tests = [(s, e) for _, s, e in _js_units(text)]
+    out = []
+    for m in _JS_DECL.finditer(masked):
+        if not m.group(2) or any(s <= _line_of(text, m.start()) <= e for s, e in tests):
+            continue
+        brace = masked.find("{", m.end())
+        if brace >= 0:
+            out.append((m.group(2), _line_of(text, m.start()), _line_of(text, _js_close(masked, brace)),
+                        _js_class_members(text, masked, brace)))
+    return out
+
+
+def _js_members(text: str) -> dict:
+    """The members (methods, fields) of the classes outside the tests of a JS/TS test file: {(class, member): (first
+    line, last line)}."""
+    return {(c, x): (s, e) for c, _, _, members in _js_classes(text) for x, s, e in members or ()}
+
+
+def _py_members(text) -> dict:
+    """The members (methods, attributes) of the classes without tests of a Python test module: {(class, name):
+    (first line, last line)}."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return {}
+    fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+    out, plain = {}, set()
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        mine = [i for i in node.body if isinstance(i, fn)]
+        if _py_test_class(node, plain) and any(i.name.startswith("test") for i in mine):
+            continue
+        for i in node.body:
+            if isinstance(i, (ast.Assign, ast.AnnAssign)):
+                names = [t.id for t in (i.targets if isinstance(i, ast.Assign) else [i.target])
+                         if isinstance(t, ast.Name)]
+            else:
+                names = [i.name] if isinstance(i, fn + (ast.ClassDef,)) else []
+            first = min([i.lineno] + [d.lineno for d in getattr(i, "decorator_list", [])])
+            out.update({(node.name, x): (first, getattr(i, "end_lineno", i.lineno)) for x in names})
+    return out
 
 
 def _py_test_class(node, plain) -> bool:
@@ -3142,8 +3993,9 @@ def _py_test_class(node, plain) -> bool:
     return True
 
 
-def _units(f, text) -> list:
-    """Test units of a test file: [(name, first line, last line)]; Python classes add ('Class.*', …) for setUp."""
+def _units(f, text, functions=True) -> list:
+    """Test units of a test file: [(name, first line, last line)]; Python classes add ('Class.*', …) for setUp.
+    `functions`: a module-level Python function named test… is a test (pytest's), not a helper (unittest runs none)."""
     lang = _lang(f)
     if lang == "py":
         try:
@@ -3159,7 +4011,7 @@ def _units(f, text) -> list:
 
         out, plain = [], set()
         for node in tree.body:
-            if isinstance(node, fn) and node.name.startswith("test"):
+            if isinstance(node, fn) and node.name.startswith("test") and functions:
                 out.append((node.name,) + span(node))
             elif isinstance(node, ast.ClassDef) and _py_test_class(node, plain):
                 mine = [(f"{node.name}.{i.name}",) + span(i) for i in node.body
@@ -3167,12 +4019,14 @@ def _units(f, text) -> list:
                 if mine:
                     out += mine + [(f"{node.name}.*",) + span(node)]
         return out
-    rx = {"js": _JS_UNIT, "go": _GO_UNIT, "jvm": _JVM_UNIT, "php": _PHP_UNIT}.get(lang)
+    if lang == "js":
+        return _js_units(text)
+    rx = {"go": _GO_UNIT, "jvm": _JVM_UNIT, "php": _PHP_UNIT}.get(lang)
     if rx is None:
         return []
     starts = []
     for m in rx.finditer(text):
-        name = m.group(2) if lang == "js" else next((g for g in m.groups() if g), None)
+        name = next((g for g in m.groups() if g), None)
         if name:
             starts.append((name, text.count("\n", 0, m.start()) + 1))
     total = text.count("\n") + 1
@@ -3188,10 +4042,402 @@ def _changed_lines(top, base, f) -> set:
     return lines
 
 
-def _support_spans(text) -> list:
-    """The test support of a Python test module: [(first line, last line)] of its module-level functions that are no
-    tests, its classes without tests, the methods of its test classes that are no tests (setUp, helpers), and its
-    module-level assignments. Imports and the tests themselves are not support."""
+def _covers(spans):
+    """A test of whether a line lies inside one of `spans` ([(first line, last line)]), in logarithmic time: the
+    spans sorted by their first line, each with the farthest last line of those up to it."""
+    spans = sorted(spans)
+    starts, reach, far = [s for s, _ in spans], [], 0
+    for _, e in spans:
+        far = max(far, e)
+        reach.append(far)
+
+    def inside(line) -> bool:
+        k = bisect.bisect_right(starts, line) - 1
+        return k >= 0 and reach[k] >= line
+    return inside
+
+
+# The rebuild of a changed Python test module for the run without the change. A test module rebuilds only when its
+# text outside its tests differs from the base only inside the bodies of helpers both sides hold in the same places
+# (_rebuild_helpers): the rebuilt module is then the base text with the tests now spliced in, so outside the tests it
+# is the base module byte for byte, whatever a reader takes for a comment, a docstring or layout. The comparison
+# reads each side's tests (with the comment and blank lines right above each), its helpers' bodies and its blank lines
+# outside every string (_py_layout); any other byte that differs keeps the module as it is now: a comment, a
+# docstring, a coding declaration, an import, a statement, a helper's signature. The outline (_py_parts) only names
+# the first difference. devkit rebuilds only Python test modules: a JavaScript or TypeScript module that changed
+# outside its tests keeps its change (_js_outside_tests).
+
+def _short(code: str) -> str:
+    """A line of code as a label names it: at most 60 characters."""
+    code = code.strip()
+    return code if len(code) <= 60 else code[:59] + "…"
+
+
+_BODY = "\0"  # a helper's body in the text a rebuild compares (_significant)
+
+
+def _line_starts(text: str) -> list:
+    """The index where each line of `text` starts (lines split at new lines only, as Python and JavaScript count)."""
+    return [0] + [i + 1 for i in _newlines(text)]
+
+
+def _py_layout(text, functions=True):
+    """Python test module `text` read for a rebuild -> (tests, bodies, blank), or None when it does not parse. tests:
+    [(start, end)] indexes of each test's whole lines with the comment and blank lines right above it, a test being a
+    method named test… of a class a runner collects (_py_test_class), or a module-level function so named when
+    `functions` (pytest's; unittest runs none); bodies: those of each helper's body (a module-level function or a
+    method of a module-level class, outside the tests) whose first statement starts a line after its signature; blank:
+    the numbers of the blank lines no string holds."""
+    data = text.encode("utf-8", "surrogateescape")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(data)
+    except (SyntaxError, ValueError):
+        return None
+    lines, starts = text.split("\n"), _line_starts(text)
+    fn, tests, bodies, plain = (ast.FunctionDef, ast.AsyncFunctionDef), [], [], set()
+
+    def at(ln):
+        return starts[ln - 1] if ln <= len(starts) else len(text)
+
+    def after(ln):
+        return starts[ln] if ln < len(starts) else len(text)
+
+    def first(n):
+        return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])])
+
+    def walk(body, floor, testing, nested):
+        for i, n in enumerate(body):
+            prev = body[i - 1].end_lineno if i else floor
+            if isinstance(n, fn) and n.name.startswith("test") and testing:
+                s = first(n)  # a comment on the first two lines may declare the file's encoding: it stays outside
+                while s - 1 > prev and (not lines[s - 2].strip() or s > 3 and lines[s - 2].lstrip().startswith("#")):
+                    s -= 1
+                tests.append((at(s), after(n.end_lineno)))
+            elif isinstance(n, fn):
+                b = n.body[0]
+                s = first(b)
+                col = min([b.col_offset] + [d.col_offset - 1 for d in getattr(b, "decorator_list", [])])
+                if s > n.lineno and not lines[s - 1][:col].strip():
+                    bodies.append((at(s), after(n.end_lineno)))
+            elif isinstance(n, ast.ClassDef) and not nested:
+                tested = _py_test_class(n, plain) and any(isinstance(x, fn) and x.name.startswith("test")
+                                                           for x in n.body)
+                walk(n.body, n.lineno, tested, True)
+
+    walk(tree.body, 0, functions, False)
+    code = set()  # the lines a token other than a comment or a new line holds: a string's lines are code
+    try:
+        for tok in tokenize.tokenize(io.BytesIO(data).readline):
+            if tok.type not in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT,
+                                tokenize.ENCODING, tokenize.ENDMARKER):
+                code.update(range(tok.start[0], tok.end[0] + 1))
+    except (tokenize.TokenError, SyntaxError, ValueError):
+        code = set(range(1, len(lines) + 1))
+    blank = {k for k in range(1, len(lines) + 1) if not lines[k - 1].strip() and k not in code}
+    return sorted(tests), sorted(bodies), blank
+
+
+def _js_outside_tests(text) -> list:
+    """The lines of JS/TS test module `text` outside its tests, as prove compares a module with its base to tell
+    whether it changed outside its tests (_rebuild_helpers): every line but those of a test (the outermost of nested
+    ones, from its first line to the line of the bracket that closes its call, with the comment and blank lines right
+    above it) and the blank lines no string or template literal holds. A test that shares a line with other code keeps
+    its lines, so a change to that code is never taken for the test's."""
+    masked, (_, literals) = _js_mask(text), _js_scan(text)
+    lines, starts, nl = text.split("\n"), _line_starts(text), _newlines(text)
+    inside = set()  # lines that start inside a string or a template literal
+    for a, b, kind in literals:
+        if kind != "regex":
+            k = bisect.bisect_left(nl, a)
+            while k < len(nl) and nl[k] < b:
+                inside.add(k + 2)
+                k += 1
+    blank = {k for k in range(1, len(lines) + 1) if not lines[k - 1].strip() and k not in inside}
+
+    def code(k):  # line k as the engine reads its code: strings, literals and comments blanked
+        return masked[starts[k - 1]:starts[k - 1] + len(lines[k - 1])]
+    tests, edge = set(), -1
+    for _, a, b in _js_test_calls(text, masked):
+        if a <= edge:
+            continue  # inside the test before it
+        edge = b
+        s, e = _line_of(text, a), _line_of(text, b)
+        tail = masked[b + 1:starts[e - 1] + len(lines[e - 1])]
+        if masked[starts[s - 1]:a].strip() or tail.strip() not in ("", ";"):
+            continue
+        while s > 1 and (s - 1 in blank or s - 1 not in inside and not code(s - 1).strip()):
+            s -= 1
+        tests.update(range(s, e + 1))
+    return [lines[k - 1] for k in range(1, len(lines) + 1) if k not in tests and k not in blank]
+
+
+def _significant(text, layout):
+    """`text` as a rebuild compares it (layout: _py_layout) -> (its text without the tests and the blank lines no
+    string holds, each helper's body put as _BODY; for each of its characters, the index in `text` right after it), or
+    None when a test and a helper's body overlap."""
+    tests, bodies, blank = layout
+    starts = _line_starts(text)
+    cuts = sorted([(a, b, "") for a, b in tests] + [(a, b, _BODY) for a, b in bodies])
+    for (_, b, _), (a, _, _) in zip(cuts, cuts[1:]):
+        if a < b:
+            return None
+    spans = _covers([(a, b - 1) for a, b, _ in cuts])
+    cuts = sorted(cuts + [(starts[k - 1], starts[k] if k < len(starts) else len(text), "") for k in blank
+                          if not spans(starts[k - 1])])
+    out, ends, at = [], [], 0
+    for a, b, put in cuts:
+        if a < at:  # a blank line inside a test's or a body's span
+            continue
+        out.append(text[at:a])
+        ends.extend(range(at + 1, a + 1))
+        if put:  # a body of whole lines stays a line of its own
+            put += "\n" if text[a - 1:a] in ("", "\n") and text[b - 1:b] == "\n" else ""
+            out.append(put)
+            ends.extend([b] * len(put))
+        at = b
+    out.append(text[at:])
+    ends.extend(range(at + 1, len(text) + 1))
+    return "".join(out), ends
+
+
+def _differing_line(old_text, now_text, old, now) -> str:
+    """The first line where the texts a rebuild compares (_significant) differ, as a reader names it: an added,
+    removed or edited comment, blank line or line, with its line (at the base, for one the change removed)."""
+    a, b = old[0], now[0]
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    s = a.rfind("\n", 0, i) + 1
+
+    def row(t, k):  # the line of t that starts at index k, and where the next one starts (None past the end)
+        if k >= len(t):
+            return None, None
+        e = t.find("\n", k)
+        return (t[k:], None) if e < 0 else (t[k:e], e + 1)
+    was, was_next = row(a, s)
+    got, got_next = row(b, s)
+
+    def say(verb, line, text, ends, base=False):
+        kind = ("comment" if line.strip().startswith("#") else
+                "blank line" if not line.strip() else "line")
+        where = _line_of(text, ends[s] - 1) if s < len(ends) else text.count("\n") + 1
+        shown = f" `{_short(line.replace(_BODY, '…'))}`" if line.strip() else ""
+        return f"{verb} {kind}{shown} (line {where}{' at the base' if base else ''})"
+    if got is None or was is not None and was_next is not None and row(a, was_next)[0] == got:
+        return say("a removed", was, old_text, old[1], True)
+    if was is None or got_next is not None and row(b, got_next)[0] == was:
+        return say("an added", got, now_text, now[1])
+    return say("an edited", got, now_text, now[1])
+
+
+def _py_parts(text, functions=True):
+    """The outline of Python test module `text` that names a rebuild's first difference (_first_difference), or None
+    when it does not parse: [(form, name, label, line, span)] for each statement outside the tests (as _py_layout reads
+    them), a module-level class as its head, its members one by one and its end. form: what the statement is, a
+    helper (a function or method) by its decorators and parameters only, a docstring as itself; name: (kind,
+    qualified name) for a helper or a class, None for any other; span: the helper's lines, None for any other."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            tree = ast.parse(text.encode("utf-8", "surrogateescape"))
+    except (SyntaxError, ValueError):
+        return None
+    lines, fn, plain, outline = text.split("\n"), (ast.FunctionDef, ast.AsyncFunctionDef), set(), []
+
+    def span(n):
+        return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]), n.end_lineno
+
+    def dumps(nodes):
+        return tuple(ast.dump(x) for x in nodes)
+
+    def doc(n):
+        return isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
+
+    def walk(body, cls, testing):
+        where = f"{cls}." if cls else ""
+        for i, n in enumerate(body):
+            if isinstance(n, fn) and n.name.startswith("test") and testing:
+                continue
+            first = _short(lines[n.lineno - 1]) if 0 < n.lineno <= len(lines) else ""
+            if isinstance(n, fn):
+                head = (type(n).__name__, n.name, ast.dump(n.args), dumps(n.decorator_list),
+                        ast.dump(n.returns) if n.returns else "", dumps(getattr(n, "type_params", ())))
+                outline.append((("def",) + head, ("def", where + n.name), f"helper `{where}{n.name}`", span(n)[0],
+                                span(n)))
+            elif isinstance(n, ast.ClassDef) and cls is None:
+                tested = _py_test_class(n, plain) and any(isinstance(x, fn) and x.name.startswith("test")
+                                                           for x in n.body)
+                head = (n.name, dumps(n.bases), dumps(n.keywords), dumps(n.decorator_list),
+                        dumps(getattr(n, "type_params", ())))
+                outline.append((("class",) + head, ("class", n.name), f"class `{n.name}`", span(n)[0], None))
+                walk(n.body, n.name, tested)
+                outline.append((("end", n.name), None, f"end of class `{n.name}`", n.end_lineno, None))
+            else:
+                kind = ("docstring" if i == 0 and doc(n) else
+                        "import" if isinstance(n, (ast.Import, ast.ImportFrom)) else "statement")
+                outline.append((("code", ast.dump(n)), None, f"{kind} `{first}`", n.lineno, None))
+
+    walk(tree.body, None, functions)
+    return outline
+
+
+def _first_difference(old, now) -> str:
+    """The first difference between the outlines `old` (at the base) and `now` (_py_parts), as a reader
+    names it: an added, removed or edited helper, class, import or statement, with its line (at the base, for one the
+    change removed). Past the items both share at the start and at the end, an item with a name (a helper, a class)
+    that only one side holds is added or removed; anything else there is edited."""
+    i = 0
+    while i < min(len(old), len(now)) and old[i][0] == now[i][0]:
+        i += 1
+    k = 0
+    while k < min(len(old), len(now)) - i and old[-1 - k][0] == now[-1 - k][0]:
+        k += 1
+    gone, came = old[i:len(old) - k], now[i:len(now) - k]
+
+    def say(verb, item, base=False):
+        return f"{verb} {item[2]} (line {item[3]}{' at the base' if base else ''})"
+    if not gone:
+        return say("an added", came[0])
+    if not came:
+        return say("a removed", gone[0], True)
+    a, b = gone[0], came[0]
+    if a[1] is not None and a[1] == b[1]:
+        return say("an edited", b)
+    if b[1] is not None and b[1] not in {x[1] for x in gone}:
+        return say("an added", b)
+    if a[1] is not None and a[1] not in {x[1] for x in came}:
+        return say("a removed", a, True)
+    return say("an edited", b)
+
+
+# a carriage return without a new line, which ends a line for Python where the rebuild's readers end lines at new lines
+# only: it would move what they read, a statement into a helper's body or out of a comment
+_UNSEEN_BREAK = re.compile("\r(?!\n)")
+# why a JavaScript or TypeScript test module that changed outside its tests keeps its change
+_JS_NOT_REBUILT = "devkit rebuilds only Python test modules"
+
+
+def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
+    """Python test module `f` (`text`, its text now) rebuilt for the run without the change from `old_text`, its text
+    at the base. When its text outside its tests (_py_layout: each test with the comment and blank lines right
+    above it) differs from the base only inside the bodies of helpers both sides hold in the same places, and in blank
+    lines no string holds, the rebuilt module is the base text with each test now spliced in where the module now has
+    it (after the same text outside the tests), and nothing else: outside its tests it is the base module byte for
+    byte, which the result is checked to be. Any other difference keeps the module as it is now: a comment, a
+    docstring, a coding declaration, an import, a statement, a helper's signature or decorators, a class, a helper
+    added, removed or moved. A side that holds a line break its readers do not see (_UNSEEN_BREAK) keeps the module
+    too, named by that line break. `functions`: a module-level function named test… is a test (pytest), not a helper
+    (unittest). devkit rebuilds only Python test modules: a JavaScript or TypeScript module whose lines outside its
+    tests (_js_outside_tests) differ from the base keeps its change, named by _JS_NOT_REBUILT.
+    -> None when a side does not parse, or nothing outside the tests differs but blank lines: nothing to rebuild.
+    Else {"text": the rebuilt module, or None when the module keeps its change; "first": the first difference that keeps
+    it, else ''}."""
+    if _lang(f) != "py":
+        return None if _js_outside_tests(old_text) == _js_outside_tests(text) else \
+            {"text": None, "first": _JS_NOT_REBUILT}
+    old, now = _py_layout(old_text, functions), _py_layout(text, functions)
+    if old is None or now is None:
+        return None
+    for t, where in ((text, ""), (old_text, " at the base")):
+        m = _UNSEEN_BREAK.search(t)
+        if m:
+            return {"text": None, "first": f"a carriage return without a new line, a line break the rebuild does not "
+                                           f"read (line {t.count(chr(10), 0, m.start()) + 1}{where})"}
+    a, b = _significant(old_text, old), _significant(text, now)
+    if a is None or b is None:
+        return {"text": None, "first": "a test inside a helper's body"}
+    if a[0] != b[0]:
+        o, n = _py_parts(old_text, functions), _py_parts(text, functions)
+        same = o is None or n is None or [x[0] for x in o] == [x[0] for x in n]
+        return {"text": None, "first": _differing_line(old_text, text, a, b) if same else _first_difference(o, n)}
+    bodies = [old_text[s:e] for s, e in old[1]]
+    if bodies == [text[s:e] for s, e in now[1]]:
+        return None
+    # each test now goes where its place in the compared text puts it in the base: right after the same character
+    puts = sorted((a[1][p - 1] if p else 0, k, text[s:e]) for k, (s, e) in enumerate(now[0])
+                  for p in [bisect.bisect_left(b[1], s + 1)])
+    out, at, k = [], 0, 0
+    for s, e in old[0] + [(len(old_text), len(old_text))]:
+        while k < len(puts) and puts[k][0] <= s:
+            out += [old_text[at:max(at, puts[k][0])], puts[k][2]]
+            at = max(at, puts[k][0])
+            k += 1
+        out.append(old_text[at:s])
+        at = e
+    rebuilt = "".join(out) + old_text[at:]
+    again = _py_layout(rebuilt, functions)
+    if again is None or (_significant(rebuilt, again) or ("",))[0] != a[0] or \
+            [rebuilt[s:e] for s, e in again[1]] != bodies or \
+            [rebuilt[s:e] for s, e in again[0]] != [text[s:e] for s, e in now[0]]:
+        return {"text": None, "first": "a helper or a test that shares its lines with other code"}
+    return {"text": rebuilt, "first": ""}
+
+
+def _helper_restore(top, base, f, functions=True) -> dict | None:
+    """_rebuild_helpers for test module `f` from its text at `base`; None for a module new since `base`, or neither
+    Python nor JavaScript. Both texts are read byte for byte (bytes no UTF-8 reads stay as they are)."""
+    if _lang(f) not in ("py", "js"):
+        return None
+    p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
+    if p.returncode != 0:
+        return None
+    try:
+        now = Path(top, f).read_bytes()
+    except OSError:
+        return None
+    return _rebuild_helpers(f, p.stdout.decode("utf-8", "surrogateescape"), now.decode("utf-8", "surrogateescape"),
+                            functions)
+
+
+def _support_text(top, base, f, functions=True):
+    """Test module `f` as the run without the change from `base` runs it (_rebuild_helpers): a fix inside the body of a
+    helper defined in a Python test module is part of the change, as a fix in a helper file is, so the module's tests
+    run against the base module. -> the rebuilt text, None when nothing outside the module's tests differs but blank
+    lines, or _SUPPORT_TANGLED when the module keeps its change (a JavaScript or TypeScript module that changed outside
+    its tests always does)."""
+    r = _helper_restore(top, base, f, functions)
+    return None if r is None else _SUPPORT_TANGLED if r["text"] is None else r["text"]
+
+
+# _support_text's answer for a test module that keeps its change: its text outside its tests differs from the base
+# outside its helpers' bodies, so the run without the change runs it as it is now
+_SUPPORT_TANGLED = object()
+
+
+# the test framework calls these members of a test class itself, these module-level helpers of a test module, and
+# these JavaScript hooks
+_CLASS_CALLED = {"run", "__init__", "__call__", "debug", "setUp", "tearDown", "setUpClass", "tearDownClass",
+                 "asyncSetUp", "asyncTearDown", "setup_method", "teardown_method", "setup_class", "teardown_class"}
+_MODULE_CALLED = {"setUpModule", "tearDownModule", "setup_module", "teardown_module", "setup_function",
+                  "teardown_function", "pytestmark", "load_tests"}
+_JS_HOOK_NAMES = {"beforeEach", "afterEach", "beforeAll", "afterAll"}
+
+
+def _framework_reach(lang, src, name, s, e, cls) -> str:
+    """The tests a helper reaches because the test framework calls it, whatever names it: "class" for a member of a
+    test class the framework calls (run, __init__, __call__, setUp and its kind, a dunder), "every" for such a
+    module-level helper (a module setup, pytestmark, load_tests, a pytest hook, a fixture, which pytest finds by its
+    name= alias and a conftest fixture may ask for) and for a JavaScript hook, "" for any other. `src`: the module's
+    lines, `s`..`e` the helper's, `cls` its test class or ''."""
+    if lang == "js":
+        return "every" if not name or name in _JS_HOOK_NAMES else ""
+    if cls:
+        return "class" if name in _CLASS_CALLED or name[:2] == name[-2:] == "__" else ""
+    head = []  # its decorators: the lines before its def
+    for line in src[s - 1:e]:
+        if line.lstrip().startswith(("def ", "async def ", "class ")):
+            break
+        head.append(line)
+    called = name in _MODULE_CALLED or name.startswith(("pytest_", "__")) or re.search(r"\bfixture\b", "\n".join(head))
+    return "every" if called else ""
+
+
+def _py_support(text, functions=True) -> list:
+    """The named test support of a Python test module: [(name, first line, last line, class or '')] of its
+    module-level functions that are no tests (all of them unless `functions`, see _units), its assignments and classes
+    without tests, and the methods and class attributes of its test classes that are no tests."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -3203,66 +4449,124 @@ def _support_spans(text) -> list:
     def span(n):
         return min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]), getattr(n, "end_lineno", n.lineno)
 
+    def names(n):
+        if isinstance(n, (ast.Assign, ast.AnnAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            return [t.id for t in targets if isinstance(t, ast.Name)]
+        return [n.name]
+
     out, plain = [], set()
     for node in tree.body:
-        if isinstance(node, fn) and not node.name.startswith("test") or isinstance(node, (ast.Assign, ast.AnnAssign)):
-            out.append(span(node))
+        if isinstance(node, fn) and not (node.name.startswith("test") and functions) or \
+                isinstance(node, (ast.Assign, ast.AnnAssign)):
+            out += [(x, *span(node), "") for x in names(node)]
         elif isinstance(node, ast.ClassDef):
             mine = [i for i in node.body if isinstance(i, fn)]
             if not _py_test_class(node, plain) or not any(i.name.startswith("test") for i in mine):
-                out.append(span(node))
+                out.append((node.name, *span(node), ""))
             else:
-                out += [span(i) for i in mine if not i.name.startswith("test")]
+                out += [(x, *span(i), node.name) for i in node.body
+                        if isinstance(i, fn) and not i.name.startswith("test") or isinstance(i, (ast.Assign, ast.AnnAssign))
+                        for x in names(i)]
     return out
 
 
-def _support_text(top, base, f):
-    """Test module `f` with its changed test support restored from `base` (see _support_spans): a fix in a helper
-    defined inside a test module is part of the change, as a fix in a helper file is, so the module's tests run
-    against the helper's old text without the change. A helper the change adds stays, as an added helper file does,
-    and so does every test. -> the text, or None when no support of `f` changed."""
-    if _lang(f) != "py":
-        return None
+def _body(lines, s, e) -> tuple:
+    """Lines s..e of a file as they read: trailing spaces, blank lines and comment-only lines left out."""
+    return tuple(x.rstrip() for x in lines[s - 1:e] if x.strip() and not x.strip().startswith(("#", "//")))
+
+
+def _keyed(units, lines) -> dict:
+    """(name, occurrence) -> body, for units that share a name (two describes with an 'adds' each)."""
+    out, seen = {}, {}
+    for n, s, e in units:
+        k = seen[n] = seen.get(n, -1) + 1
+        out[(n, k)] = _body(lines, s, e)
+    return out
+
+
+def _changed_units(top, base, f, functions=True):
+    """Names of the tests in `f` that are new or changed since `base`; None when the whole file counts.
+
+    A test is changed when its own text differs from the same-named test's at `base` (so a test moved or with new
+    tests inserted around it stays unchanged, whatever lines git's diff puts it next to), or when it reaches a test
+    helper of the file that changed: a helper it calls, directly or through other helpers; a helper the test framework
+    calls (_framework_reach: setUp, run, a beforeEach, a module setup, a fixture) reaches every test it runs for. Only
+    a helper the change adds that no test reaches changes no test ([]): one that was there may be reached in ways no
+    name shows, so a change to it that no test names counts the whole file, as a change elsewhere (an import) does.
+    `functions`: see _units."""
     p = subprocess.run(["git", "-C", top, "cat-file", "blob", f"{base}:{f}"], capture_output=True, env=core.GIT_ENV)
     if p.returncode != 0:
         return None
-    old = p.stdout.decode("utf-8", "replace").splitlines(keepends=True)
-    text = _read(os.path.join(top, f))
-    new, spans = text.splitlines(keepends=True), _support_spans(text)
-    picked = []
-    for m in re.finditer(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
-                         _git(top, "diff", "-U0", "--no-color", "--no-ext-diff", base, "--", f)):
-        o, oc, n, nc = (int(g) if g is not None else 1 for g in m.groups())  # a count left out is 1
-        lines = range(n, n + nc) if nc else (n, n + 1)  # -U0 writes a deletion as +<the line before it>,0
-        said = [x for x in old[o - 1:o - 1 + oc] + new[n - 1:n - 1 + nc] if x.strip() and not x.strip().startswith("#")]
-        if oc and said and all(any(s <= ln <= e for s, e in spans) for ln in lines):
-            picked.append((o, oc, n, nc))
-    for o, oc, n, nc in reversed(picked):
-        at = n - 1 if nc else n
-        new[at:at + nc] = old[o - 1:o - 1 + oc]
-    return "".join(new) if picked else None
-
-
-def _changed_units(top, base, f):
-    """Names of the tests in `f` that are new or changed since `base`; None when the whole file counts."""
-    if core.git(top, "cat-file", "-e", f"{base}:{f}")[0] != 0:
-        return None
+    old_text = p.stdout.decode("utf-8", "replace")
     text = _read(os.path.join(top, f))
     src = text.splitlines()
     lines = {ln for ln in _changed_lines(top, base, f)  # blank and comment-only lines change no test
              if 0 < ln <= len(src) and src[ln - 1].strip() and not src[ln - 1].strip().startswith(("#", "//"))}
-    units = _units(f, text)
+    units = _units(f, text, functions)
     if not lines or not units:
         return None
     tests = [(n, s, e) for n, s, e in units if not n.endswith(".*")]
-    picked = {n for n, s, e in tests if any(s <= ln <= e for ln in lines)}
-    for n, s, e in units:  # a change inside a class but outside its tests (setUp, a helper): all its tests
-        if n.endswith(".*"):
-            inside = {ln for ln in lines if s <= ln <= e}
-            mine = [t for t in tests if t[0].startswith(n[:-1])]
-            if inside - {ln for _, ts, te in mine for ln in range(ts, te + 1)}:
-                picked |= {t[0] for t in mine}
-    return sorted(picked) or None
+    old_lines = old_text.splitlines()
+    before = _keyed([u for u in _units(f, old_text, functions) if not u[0].endswith(".*")], old_lines)
+    now = _keyed(tests, src)
+    picked = {k[0] for k, body in now.items() if before.get(k) != body}
+    outside = {ln for ln in lines if not any(s <= ln <= e for _, s, e in tests)}
+    helpers_only = False  # every changed line outside the tests is inside a helper the change adds
+    if outside:
+        reached, helpers_only = _helper_callers(f, text, old_text, units, tests, outside, functions)
+        picked |= reached
+    return sorted(picked) if picked or helpers_only else None
+
+
+def _helper_callers(f, text, old_text, units, tests, lines, functions=True) -> tuple:
+    """The tests of `f` a change to its support reaches (see _changed_units); `lines`: the changed lines outside
+    every test. -> (the tests, whether every line of `lines` is inside a helper the change adds)."""
+    src, lang = text.splitlines(), _lang(f)
+    if lang == "py":
+        support = _py_support(text, functions)
+        old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in _py_support(old_text, functions)}
+        members, had = _py_members(text), set(_py_members(old_text))
+    elif lang == "js":
+        support = [(n, s, e, "") for n, s, e in _js_support(text)]
+        old = {(c, n): _body(old_text.splitlines(), s, e) for n, s, e, c in
+               [(n, s, e, "") for n, s, e in _js_support(old_text)]}
+        members, had = _js_members(text), set(_js_members(old_text))
+    else:
+        return {n for n, _, _ in tests}, False  # no helpers read here: every test, as a change outside the tests was
+    every, picked, changed = {n for n, _, _ in tests}, set(), set()
+    covered = set()
+    for name, s, e, cls in support:
+        mine = {ln for ln in lines if s <= ln <= e}
+        if not mine:
+            continue
+        covered |= mine
+        reach = _framework_reach(lang, src, name, s, e, cls)
+        if reach == "every":
+            picked |= every
+        elif reach == "class":
+            picked |= {n for n in every if n.startswith(cls + ".")}
+        elif name and old.get((cls, name)) != _body(src, s, e):
+            # a helper the change adds is changed too: a test that calls it and did not change called another of
+            # that name before (one a base class gives, or one imported)
+            changed.add(name)
+    for n, s, e in units:  # a change inside a test class outside its tests and named members: all its tests
+        if n.endswith(".*") and {ln for ln in lines - covered if s <= ln <= e}:
+            picked |= {t for t in every if t.startswith(n[:-1])}
+    reach, todo = set(changed), list(changed)
+    while todo:  # helpers that call a changed helper are changed too
+        rx = re.compile(r"(?<![\w$])" + re.escape(todo.pop()) + r"(?![\w$])")
+        for name, s, e, _ in support:
+            if name and name not in reach and rx.search("\n".join(src[s - 1:e])):
+                reach.add(name)
+                todo.append(name)
+    if reach:
+        rx = re.compile(r"(?<![\w$])(?:" + "|".join(map(re.escape, sorted(reach))) + r")(?![\w$])")
+        picked |= {n for n, s, e in tests if rx.search("\n".join(src[s - 1:e]))}
+    # the helpers the change adds, members of a class without tests too
+    added = [(s, e) for name, s, e, cls in support if name and (cls, name) not in old] + \
+        [span for k, span in members.items() if k not in had]
+    return picked, all(any(s <= ln <= e for s, e in added) for ln in lines)
 
 
 def _ut_module(runner, rel) -> str:
@@ -3311,7 +4615,22 @@ def _member(case, f, units, ids):
                    for i in (_id(x) for x in ids))
     same = case.get("test_file", case["file"]) == f or (
         f.endswith(".go") and case["file"].startswith((os.path.dirname(f) or ".") + "/"))
-    return same and (units is None or any(case["name"].endswith(u) for u in units))
+    return same and (units is None or any(_title_matches(case["name"], u) for u in units))
+
+
+_TITLE_SLOT = re.compile(r"%[sdifjoOpc#]|\$[A-Za-z_$][\w$]*(?:\.[\w$]+)*")
+
+
+def _title_matches(name: str, unit: str) -> bool:
+    """Whether a result's name is the test `unit` names: it ends with the title, or, for a title template (it.each's
+    %i, %s, $a), with the title its case filled in."""
+    if name.endswith(unit):
+        return True
+    if not _TITLE_SLOT.search(unit):
+        return False
+    parts = _TITLE_SLOT.split(unit.replace("%%", "\0"))
+    rx = ".+?".join(re.escape(x).replace("\0", "%") for x in parts)
+    return re.search(r"(?:^|\W)" + rx + r"$", name) is not None
 
 
 def _copy_files(top) -> list:
@@ -3477,6 +4796,14 @@ def _built_installs(top, dest, linked, listed) -> tuple:
     return out, stuck
 
 
+def _clear_caches(dest) -> None:
+    for d, subs, _ in os.walk(dest):
+        subs[:] = [s for s in subs if s not in DEP_DIRS and s != ".git"]
+        if "__pycache__" in subs:
+            shutil.rmtree(os.path.join(d, "__pycache__"), ignore_errors=True)
+            subs.remove("__pycache__")
+
+
 def _restore_base(top, base, dest, files) -> None:
     for f in files:
         dst = os.path.join(dest, f)
@@ -3490,11 +4817,7 @@ def _restore_base(top, base, dest, files) -> None:
                 fh.write(p.stdout)
         elif os.path.lexists(dst):
             os.remove(dst)
-    for d, subs, _ in os.walk(dest):
-        subs[:] = [s for s in subs if s not in DEP_DIRS and s != ".git"]
-        if "__pycache__" in subs:
-            shutil.rmtree(os.path.join(d, "__pycache__"), ignore_errors=True)
-            subs.remove("__pycache__")
+    _clear_caches(dest)
 
 
 def _carry_git(top, dest) -> str:
@@ -3569,7 +4892,418 @@ _IMPORTS_ADDED = "cannot be proven: imports a file the change adds"
 _IMPORT_STOPPED = "cannot be proven: stops at an import without the change"
 _SETUP_STOPPED = "cannot be proven: stops in its class or module setup without the change"
 # inconclusive outcomes, listed, never red
-_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED)
+_CHECKOUT_IMPORT = "cannot be proven: imported the checkout's "  # + the changed files it imported
+_NO_IMPORT_RECORD = "cannot be proven: no record of what the run imported"
+_NOT_FROM_COPY = "cannot be proven: imported none of the changed files from the copy"
+# a test of a module that keeps its change (_rebuild_helpers) that passes without the change: + the module's first
+# difference outside its helpers' bodies
+_HELPERS_KEPT = "cannot be proven: its module keeps a change outside its helpers' bodies: "
+# a test of a JavaScript or TypeScript module that changed outside its tests, which devkit does not rebuild
+# (_rebuild_helpers), that passes without the change
+_JS_KEPT = "cannot be proven: its module keeps its change: " + _JS_NOT_REBUILT
+# a test whose run without the change undid test support it reaches (its module rebuilt, a rebuilt module or a test
+# helper file it imports) that fails there on anything but an assertion, and passes once more with that support as it
+# is now (_prove): + what it raised
+_NOT_ASSERTION = "cannot be proven: without the change it fails on "
+
+_NOT_PROVEN = ("skipped", "expected failure", _IMPORTS_ADDED, _IMPORT_STOPPED, _SETUP_STOPPED, _NO_IMPORT_RECORD,
+               _NOT_FROM_COPY, _JS_KEPT)
+
+
+def _not_proven(verdict: str) -> bool:
+    return verdict in _NOT_PROVEN or verdict.startswith((_CHECKOUT_IMPORT, _HELPERS_KEPT, _NOT_ASSERTION))
+
+
+# The run without the change records which files each Python process ran: this sitecustomize, first on the copy's
+# PYTHONPATH, adds an audit hook before it runs the project's own sitecustomize (the next one on the path). The hook
+# sees each code object a module runs (the "exec" event: an import, runpy, a cached .pyc under its source's name), so
+# an import inside patch.dict(sys.modules), or one undone before the process ends, is still recorded; and it sees each
+# process the run starts: a Python child that skips the recorder (-I, -E or -S, or an environment whose PYTHONPATH
+# leaves out the recorder's folder) is written down as unrecorded, since what it imported is unknown; and it sees each
+# file opened for reading (the "open" event), so a changed data file the run read from the copy counts as evidence too.
+# Each process appends to its own record (<pid>.jsonl) as it goes: a path per line, {"read": <path>}, or
+# {"unrecorded": <command>}. The records
+# folder and the roots are written into this file, so a suite that clears its environment loses neither.
+_IMPORT_RECORDER = """import _thread, json, os, shlex, sys
+
+_OUT = %(out)r
+_ROOTS = [r.lower() for r in %(roots)r]
+_HERE = %(here)r
+_seen, _read, _opened, _busy = set(), set(), set(), set()  # _read: the files read, resolved; _opened: their
+# spellings as opened; _busy: the threads inside the hook, so its own work raises no event
+_PY = ("python", "python3", "pythonw")
+_SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
+_SEPARATORS = (";", "&", "|")
+_PRINTERS = ("echo", "printf")  # programs that print their words and start none of them
+
+
+def _write(item):
+    with open(os.path.join(_OUT, "%%d.jsonl" %% os.getpid()), "a") as fh:
+        fh.write(json.dumps(item) + "\\n" if item is not None else "")
+
+
+def _python(word):
+    base = os.path.basename(word).lower().removesuffix(".exe")
+    return base.rstrip("0123456789.") in _PY or os.path.realpath(word) == os.path.realpath(sys.executable)
+
+
+def _skips(argv, env):
+    \"\"\"Whether the Python command argv (with env, None: this process's) runs without the recorder.\"\"\"
+    i = 1
+    while i < len(argv):
+        w = argv[i]
+        if w == "--check-hash-based-pycs":  # the one long option that takes a value, the next word
+            i += 2
+            continue
+        if not w.startswith("-") or w in ("-", "--") or w.startswith(("-c", "-m", "--")):
+            break
+        if w.startswith(("-W", "-X")):
+            i += 2 if w in ("-W", "-X") else 1  # a separate value is the next word
+            continue
+        if set(w[1:]) & set("IES"):
+            return True
+        i += 1
+    path = (os.environ if env is None else env).get("PYTHONPATH", "")
+    return _HERE not in [os.path.realpath(p) for p in os.fsdecode(path).split(os.pathsep) if p]
+
+
+def _assignment(w):
+    name, eq, _ = w.partition("=")
+    return bool(eq) and name.isidentifier()
+
+
+def _unwrap(argv, env):
+    \"\"\"argv without its leading NAME=value words and env wrappers (/usr/bin/env -i A=1 …) -> (argv, the environment
+    the rest runs with).\"\"\"
+    argv, env = list(argv), dict(os.environ if env is None else env)
+    while argv:
+        if _assignment(argv[0]):
+            k, _, v = argv.pop(0).partition("=")
+            env[k] = v
+        elif os.path.basename(argv[0]) == "env":
+            argv.pop(0)
+            while argv and (argv[0].startswith("-") or _assignment(argv[0])):
+                w = argv.pop(0)
+                if w == "--":
+                    break
+                if w in ("-", "-i", "--ignore-environment"):
+                    env = {}
+                elif _assignment(w):
+                    k, _, v = w.partition("=")
+                    env[k] = v
+                elif w.startswith("--unset="):
+                    env.pop(w[8:], None)
+                elif w in ("-u", "--unset", "-C", "--chdir", "-P") and argv:
+                    v = argv.pop(0)
+                    if w in ("-u", "--unset"):
+                        env.pop(v, None)
+                elif w in ("-S", "--split-string") and argv:
+                    argv = shlex.split(argv.pop(0)) + argv
+        else:
+            break
+    return argv, env
+
+
+def _shell_line(argv):
+    \"\"\"The command line a shell's argv runs (sh -c, bash -lc, sh -ec), or None.\"\"\"
+    i, command = 1, False
+    while i < len(argv) and argv[i][:1] in "-+" and argv[i] not in ("-", "--"):
+        w = argv[i]
+        if w in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):  # an option whose value is the next word
+            i += 2
+            continue
+        command = command or (not w.startswith("--") and "c" in w[1:])
+        i += 1
+    if command and i < len(argv) and argv[i] == "--":  # bash -c -- 'line': the line follows the end of options
+        i += 1
+    return argv[i] if command and i < len(argv) else None
+
+
+def _pythons(argv, env, depth=0):
+    \"\"\"The Python commands argv starts -> [(argv, environment)].\"\"\"
+    argv, env = _unwrap(argv, env)
+    if not argv or depth > 4:
+        return []
+    if _python(argv[0]):
+        return [(argv, env)]
+    if os.path.basename(argv[0]) in _SHELLS:
+        line = _shell_line(argv)
+        return _in_line(line, env, depth + 1) if line is not None else []
+    if os.path.basename(argv[0]) in _PRINTERS:
+        return []
+    # a program that runs the rest of its words (timeout 30 python, nice -n 5 python, xargs sh -c …, timeout 30 env -i
+    # python): what starts at its first word that is a Python, a shell or env
+    for i, w in enumerate(argv[1:], 1):
+        if _python(w) or os.path.basename(w) in _SHELLS + ("env",):
+            return _pythons(argv[i:], env, depth + 1)
+    return []
+
+
+def _substitutions(line):
+    \"\"\"The command lines inside a shell line's $( ) and backticks, outside single quotes: each runs, whatever the
+    command around it (echo, printf) does with its output.\"\"\"
+    found, i, quote = [], 0, ""
+    while i < len(line):
+        c = line[i]
+        if c == "\\\\" and quote != "'":
+            i += 2
+            continue
+        if c in "'\\"" and quote in ("", c):  # a quote opens, or closes the one open
+            quote = "" if quote == c else c
+        elif quote != "'" and line.startswith("$(", i):
+            depth, j = 0, i + 1
+            while j < len(line):
+                depth += {"(": 1, ")": -1}.get(line[j], 0)
+                if not depth:
+                    break
+                j += 1
+            found.append(line[i + 2:j])
+            i = j
+        elif quote != "'" and c == "`":
+            j = line.find("`", i + 1)
+            j = len(line) if j < 0 else j
+            found.append(line[i + 1:j])
+            i = j
+        i += 1
+    return found
+
+
+def _in_line(line, env, depth=0):
+    \"\"\"The Python commands a shell line starts: each command of it and of its command substitutions, or the first
+    Python word in it (time python, nohup python …).\"\"\"
+    if depth > 4:
+        return []
+    found = [x for inner in _substitutions(line) for x in _in_line(inner, env, depth + 1)]
+    spaced = line
+    for sep in _SEPARATORS:
+        spaced = spaced.replace(sep, " %%s " %% sep)
+    try:
+        words = shlex.split(spaced)
+    except ValueError:
+        words = spaced.split()
+    commands, here = [], []
+    for w in words + [";"]:
+        if w in _SEPARATORS:
+            commands, here = commands + [here], []
+        else:
+            here.append(w)
+    for c in commands:
+        found += _pythons(c, env, depth)
+    return found
+
+
+def _words(x):
+    if isinstance(x, (str, bytes, os.PathLike)):
+        return [os.fsdecode(x)]
+    return [os.fsdecode(w) for w in x or () if isinstance(w, (str, bytes, os.PathLike))]
+
+
+def _env(e):
+    if e is None or not hasattr(e, "items"):
+        return None
+    return {os.fsdecode(k): os.fsdecode(v) for k, v in e.items() if isinstance(v, (str, bytes))}
+
+
+def _started(argv, found):
+    if any(_skips(a, e) for a, e in found):
+        _write({"unrecorded": " ".join(argv)[:300]})
+
+
+def _hook(event, args):
+    me = _thread.get_ident()
+    if me in _busy:
+        return
+    _busy.add(me)
+    try:
+        if event == "exec":
+            f = getattr(args[0], "co_filename", None)
+            if isinstance(f, str) and f not in _seen and os.path.isabs(f):
+                _seen.add(f)
+                real = os.path.realpath(f)
+                low = real.lower()
+                if any(low == r or low.startswith(r + os.sep) for r in _ROOTS):
+                    _write(real)
+        elif event == "open" and isinstance(args[0], (str, bytes)) and args[0] not in _opened:
+            # a file read for its data (a module's source is the exec event's): {"read": path}. An open that empties
+            # the file first (w+, x+, O_TRUNC, O_EXCL) reads none of its old content.
+            mode, flags = args[1], args[2] or 0
+            reading = ("r" in mode or "a" in mode and "+" in mode) if isinstance(mode, str) else \\
+                flags & getattr(os, "O_ACCMODE", 3) != os.O_WRONLY and not flags & (os.O_TRUNC | os.O_EXCL)
+            if not reading:
+                return
+            _opened.add(args[0])  # this spelling was read: the next read of it is the same file
+            real = os.path.realpath(os.fsdecode(args[0]))
+            low = real.lower()
+            if real not in _read and not low.endswith((".py", ".pyc")) and \\
+                    any(low.startswith(r + os.sep) for r in _ROOTS):
+                _read.add(real)
+                _write({"read": real})
+        elif event == "subprocess.Popen":
+            exe, argv, env = args[0], _words(args[1]), _env(args[3])
+            if isinstance(args[1], (str, bytes)):
+                _started(argv, _in_line(argv[0], env))
+            else:
+                exe = _words(exe)[0] if exe is not None and _words(exe) else None
+                # executable= runs that program with argv[0] as its name only
+                run = [exe] + argv[1:] if exe and argv and _python(exe) and not _python(argv[0]) else argv
+                _started(argv, _pythons(run, env))
+        elif event in ("os.exec", "os.posix_spawn"):
+            argv = _words(args[1])
+            _started(argv, _pythons(argv, _env(args[2])))
+        elif event == "os.spawn":
+            argv = _words(args[2])
+            _started(argv, _pythons(argv, _env(args[3])))
+        elif event == "os.system":
+            argv = _words(args[0])
+            _started(argv, _in_line(argv[0], None) if argv else [])
+    except Exception:
+        pass
+    finally:
+        _busy.discard(me)
+
+
+if _OUT:
+    _write(None)
+    sys.addaudithook(_hook)
+
+
+def _project_sitecustomize():
+    import importlib.machinery, importlib.util
+    for p in list(sys.path):
+        if os.path.realpath(p or os.curdir) == _HERE:
+            continue
+        spec = importlib.machinery.PathFinder.find_spec("sitecustomize", [p or os.curdir])
+        if spec and spec.loader and os.path.dirname(os.path.realpath(spec.origin or "")) != _HERE:
+            spec.loader.exec_module(importlib.util.module_from_spec(spec))
+            break
+
+
+_project_sitecustomize()
+"""
+
+
+def _import_recorder(dest, top, name="imports") -> tuple:
+    """A folder with the recorder (_IMPORT_RECORDER) beside the copy, <dest>-<name> -> (folder for PYTHONPATH, records
+    folder, environment for the run)."""
+    folder = Path(f"{dest}-{name}")
+    records = folder / "records"
+    records.mkdir(parents=True, exist_ok=True)
+    roots = [os.path.realpath(top), os.path.realpath(dest)]
+    (folder / "sitecustomize.py").write_text(_IMPORT_RECORDER % {"out": str(records), "roots": roots,
+                                                                 "here": os.path.realpath(folder)})
+    return str(folder), str(records), {}
+
+
+def _checkout_builds(linked, real_top) -> set:
+    """The top-level names a linked virtual environment holds as a built copy of the checkout's own package (a
+    dist-info whose direct_url.json names a folder of the checkout, not editable)."""
+    names = set()
+    for link in linked:
+        if os.path.basename(link) not in (".venv", "venv"):
+            continue
+        for info in sorted(Path(link).glob("lib/python*/site-packages/*.dist-info")) + \
+                sorted(Path(link).glob("Lib/site-packages/*.dist-info")):
+            origin = core.read_json(info / "direct_url.json", {}) or {}
+            url = str(origin.get("url") or "") if isinstance(origin, dict) else ""
+            if not url.startswith("file://") or (origin.get("dir_info") or {}).get("editable"):
+                continue
+            src = os.path.realpath(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+            if src == real_top or src.startswith(real_top + os.sep) or real_top.startswith(src + os.sep):
+                for line in _read(info / "RECORD").splitlines():
+                    head = line.split(",", 1)[0].split("/", 1)[0]
+                    if head.endswith(".py") or "/" in line.split(",", 1)[0]:
+                        names.add(head[:-3] if head.endswith(".py") else head)
+    return names
+
+
+def _linked_checkout_sources(top, linked, changed) -> list:
+    """The changed JS/TS files a linked node_modules reaches in the checkout: the copy links the checkout's
+    node_modules, and its links to workspace packages (npm, pnpm and yarn workspaces) resolve there, into the
+    checkout's own packages, where the change stays. A run that imports such a package loads the checkout's code."""
+    real_top = os.path.realpath(top)
+    js = [f for f in changed if _lang(f) == "js"]
+    targets = set()
+    for link in linked if js else ():
+        if os.path.basename(link) != "node_modules":
+            continue
+        folder = os.path.realpath(link)
+        entries = []
+        with contextlib.suppress(OSError):
+            for entry in os.scandir(folder):
+                if entry.name.startswith("@") and entry.is_dir(follow_symlinks=False):
+                    with contextlib.suppress(OSError):
+                        entries += list(os.scandir(entry.path))
+                else:
+                    entries.append(entry)
+        for entry in entries:
+            if entry.is_symlink():
+                t = os.path.realpath(entry.path)
+                if t.startswith(real_top + os.sep) and "node_modules" not in t[len(real_top):].split(os.sep):
+                    targets.add(t)
+    return sorted(f for f in js if any(os.path.realpath(os.path.join(top, f)).startswith(t + os.sep)
+                                       for t in targets))
+
+
+def _file_ids(paths) -> dict:
+    """The files of `paths` by identity (device, inode) -> {identity: path}: a path in another letter case on a
+    case-insensitive disk, or through a link, is the same file."""
+    out = {}
+    for x in paths:
+        with contextlib.suppress(OSError):
+            st = os.stat(x)
+            out[(st.st_dev, st.st_ino)] = x
+    return out
+
+
+def _import_evidence(records, top, dest, changed, linked) -> dict:
+    """Where the run without the change imported the changed Python files from -> {from_copy, from_checkout,
+    recorded, unrecorded}: from_copy, the files imported from the copy (the change undone), and the changed data files
+    it read there; from_checkout, those
+    imported from the checkout, where the change stays, or from a built copy of the checkout's package in its
+    environment; recorded, how many processes left a record; unrecorded, the Python processes the run started that
+    skipped the recorder. Files are compared by identity, not by how their path is spelled."""
+    seen, read, recorded, unrecorded = set(), set(), 0, []
+    for rec in sorted(Path(records).glob("*.jsonl")):
+        recorded += 1
+        for line in _read(rec).splitlines():
+            with contextlib.suppress(ValueError):  # the test's own code runs in the process that writes the record
+                item = core.load_json(line)
+                if isinstance(item, str):
+                    seen.add(item)
+                elif isinstance(item, dict) and isinstance(item.get("unrecorded"), str):
+                    unrecorded.append(item["unrecorded"])
+                elif isinstance(item, dict) and isinstance(item.get("read"), str):
+                    read.add(item["read"])
+    real_top, real_dest = os.path.realpath(top), os.path.realpath(dest)
+    builds = _checkout_builds(linked, real_top)
+    ids = _file_ids(seen)
+
+    def ran(path):
+        with contextlib.suppress(OSError):
+            st = os.stat(path)
+            return (st.st_dev, st.st_ino) in ids
+        return False
+
+    from_copy, from_checkout = [], []
+    for f in (x for x in changed if x.endswith(".py")):
+        if ran(os.path.join(real_top, f)):
+            from_checkout.append(f)
+            continue
+        inside = [x.split("/site-packages/", 1)[1] for x in seen if "/site-packages/" in x]
+        if any(i.split("/", 1)[0].removesuffix(".py") in builds and (f == i or f.endswith("/" + i)) for i in inside):
+            from_checkout.append(f)
+        elif ran(os.path.join(real_dest, f)):
+            from_copy.append(f)
+    # a changed data file the run read from the copy is evidence too: the run saw it without the change
+    data = _file_ids(read)
+    for f in (x for x in changed if not x.endswith(".py")):
+        with contextlib.suppress(OSError):
+            st = os.stat(os.path.join(real_dest, f))
+            if (st.st_dev, st.st_ino) in data:
+                from_copy.append(f)
+    linked_js = _linked_checkout_sources(top, linked, changed)
+    return {"from_copy": sorted(from_copy), "from_checkout": sorted(from_checkout + linked_js), "recorded": recorded,
+            "unrecorded": sorted(set(unrecorded)), "py": sorted(from_checkout), "js": linked_js}
 # how a runner says a module or file could not be imported or found
 _IMPORT_FAILED = re.compile(r"ModuleNotFoundError|ImportError|No module named|Failed to import|collection failure|"
                             r"Cannot find module|ERR_MODULE_NOT_FOUND|Failed to (?:load|resolve)|could not be resolved")
@@ -3614,7 +5348,6 @@ def _proof_path(top):
 
 PROOF_FILES = 4096
 PROOF_BYTES = 64 * 1024 * 1024
-PROOF_SECONDS = 0.2
 _PROOF_CACHES = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
 
@@ -3624,10 +5357,11 @@ def _proof_snapshot(top, files=None):
     `files`: the copy's list (default _copy_files(top)), so the checkout and its copy are compared over the same files:
     tracked and untracked ones, not ignored ones (build output, local caches), which the copy leaves out. Interpreter
     and tool caches are no input. Linked dependency trees and symbolic links cannot be certified by a checkout-only
-    receipt. Hashes stay local.
+    receipt. The bound is work (PROOF_FILES files, PROOF_BYTES bytes), never wall-clock time, so a loaded machine
+    gets the same evidence. Hashes stay local.
     """
     root, hashes = Path(top).resolve(), {}
-    deadline, remaining = time.monotonic() + PROOF_SECONDS, PROOF_BYTES
+    remaining = PROOF_BYTES
     listed = _copy_files(str(root)) if files is None else list(files)
     if not listed or len(listed) > PROOF_FILES or _dep_folders(str(root), listed):
         return {}
@@ -3645,7 +5379,7 @@ def _proof_snapshot(top, files=None):
                 return {}
             raw = path.read_bytes()
             remaining -= len(raw)
-            if remaining < 0 or time.monotonic() > deadline:
+            if remaining < 0:
                 return {}
             hashes[rel] = hashlib.sha256(raw).hexdigest()
     except (OSError, ValueError):
@@ -3726,6 +5460,42 @@ _PROVE_OWNER = re.compile(r"devkit-prove-(?:git-)?(\d+)-")
 PROVE_COPY_DAYS = 1
 
 
+_REMOVE_PASSES = 256  # _remove_tree's passes: one per level of folders a stopped test left locked
+
+
+def _remove_tree(path) -> bool:
+    """Remove folder `path` with all it holds, read-only and unreadable folders a test left in it too: a removal
+    refused there makes the folder and what failed readable and writable for their owner and is tried again. A pass
+    lists a folder only once an earlier one unlocked it, one more level for each folder locked inside another, so the
+    passes go on while one unlocks something. Links are removed, never followed. -> whether `path` is gone (a file
+    locked beyond its owner's mode, as an immutable flag locks it, keeps it)."""
+    unlocked = []  # what this pass gave back to its owner
+
+    def unlock(func, p, _exc):
+        for d in (os.path.dirname(p), p):
+            try:
+                if not os.path.islink(d):
+                    mode = os.lstat(d).st_mode & 0o7777
+                    if mode | 0o700 != mode:
+                        os.chmod(d, mode | 0o700)
+                        unlocked.append(d)
+            except OSError:
+                pass
+        if func in (os.unlink, os.remove, os.rmdir):
+            try:
+                func(p)
+            except OSError:
+                pass
+    for _ in range(_REMOVE_PASSES):  # bounded: a process still running in the copy could keep locking new folders
+        if not os.path.lexists(path):
+            break
+        unlocked.clear()
+        shutil.rmtree(path, onerror=unlock)
+        if not unlocked:  # each pass unlocks something new or ends
+            break
+    return not os.path.lexists(path)
+
+
 def _process_gone(pid) -> bool:
     try:
         os.kill(pid, 0)
@@ -3768,8 +5538,7 @@ def _sweep(parent, prefix, owner_name, now=None) -> list:
         owner = owner_name.match(entry.name)
         if owner and not _process_gone(int(owner.group(1))):
             continue
-        shutil.rmtree(entry.path, ignore_errors=True)
-        if not os.path.lexists(entry.path):
+        if _remove_tree(entry.path):  # what a stopped test locked in it too
             gone.append(entry.name)
     return gone
 
@@ -3787,7 +5556,7 @@ def _prove(a, top, runners) -> int:
     outside = []  # changed tests outside the scope of the crew lane that runs this
     if a.tests:
         tests = []
-        for t in a.tests:
+        for t in _split_lists(a.tests):
             rel = os.path.relpath(os.path.abspath(t), top).replace("\\", "/")
             if rel in repo.ex and (repo.runnable(rel) or _node_script(repo, every, rel, named=True)):
                 tests.append(rel)
@@ -3799,9 +5568,21 @@ def _prove(a, top, runners) -> int:
         tests, outside = lane_files(top, [f for f in changed if f in repo.ex and (repo.runnable(f) or f in scripts)])
     # test helpers, conftest.py, fixtures: part of the change, restored with it
     helpers = [f for f in changed if repo.is_test(f) and not repo.runnable(f) and f not in scripts and f not in tests]
-    # helpers defined inside the changed test modules (outside every test): their fixes are part of the change too
-    inner = {f: text for f in tests for text in [_support_text(top, base, f)] if text is not None}
-    if not prod and not helpers and not inner:
+    # helpers defined inside the changed test modules (outside every test): a fix inside their bodies is part of the
+    # change too, so such a Python module is rebuilt as the base module with its tests now (_rebuild_helpers); a
+    # JavaScript or TypeScript module that changed outside its tests keeps its change
+    inner, kept = {}, {}  # kept: the modules that keep their change, each with its first difference
+    # a module-level function named test… is a test only where the runner runs one: unittest runs none
+    functions = {f: (owner(runners, f) or {}).get("name") != "unittest" for f in tests}
+    for f in tests:
+        restored = _helper_restore(top, base, f, functions[f])
+        if restored is None:
+            continue
+        if restored["text"] is None:
+            kept[f] = restored["first"]
+        else:
+            inner[f] = restored["text"]
+    if not prod and not helpers and not inner and not kept:
         return _refuse(f"no production change to prove against: only test modules changed since {label}",
                        "prove checks that each new test fails without your change (code outside the tests, a test "
                        "helper or a fixture); compare with --since <ref>")
@@ -3816,15 +5597,33 @@ def _prove(a, top, runners) -> int:
     # the tests that import a file the change adds cannot reach an assertion without it
     added = [f for f in undo if not at_base[f]]
     needs_added = _dependents(repo, added) if added else set()
-    plan = []
+    # the test support the run without the change undoes: the rebuilt modules and the helper files restored. A test
+    # that reaches it (its own module, or one it imports, as the import graph or the run's record shows) proves the
+    # change by an assertion failure; any other failure there runs once more with the support as it is now, where only
+    # an assertion failure proves the production change, and another error or a pass leaves it unproven (a name or
+    # member only the support's edit gives says nothing about what the test asserts, and the same error again may come
+    # from what the run without the change left outside the copy)
+    support = set(inner) | {h for h in undo if h in helpers}
+    reaches = {}  # test file -> the support files it imports, by the import graph
+    for g in sorted(support):
+        for x in _dependents(repo, [g]):
+            reaches.setdefault(x, set()).add(g)
+    plan, unreached = [], []  # unreached: changed test files whose change reaches none of their tests
     for f in tests:
         r = owner(runners, f)
         if r is None:
             skipped.append((f, _no_runner(a, f)))
             continue
-        units = _changed_units(top, base, f)  # a named file too: its new or changed tests (all, when none changed)
+        # a named file too: its new or changed tests (all, when none changed)
+        units = _changed_units(top, base, f, functions[f])
+        if units == []:  # only helpers no test calls changed: a named file runs all its tests, as before
+            if not a.tests:
+                unreached.append(f)
+                continue
+            units = None
         plan.append((r, f, units, _unit_ids(top, r, f, units) if units else None))
     if not plan:
+        skipped += [(f, "no test of it changed or calls a helper that changed") for f in unreached]
         return _refuse("nothing to prove here: " + "; ".join(f"{f} ({why})" for f, why in skipped),
                        "dev test plan shows the runners found here")
     isolated = bool(getattr(a, "isolated_imports", False))
@@ -3849,6 +5648,8 @@ def _prove(a, top, runners) -> int:
     dest = tempfile.mkdtemp(prefix=f"{PROVE_COPY}{os.getpid()}-", dir=str(parent))
     env = {"PYTHONDONTWRITEBYTECODE": "1"}
     found, problem, gitless, built_stuck = {}, None, "", []
+    rerun, again_now = set(), {}  # tests run once more with the support as it is now, and whether they failed there
+    evidence = {"from_copy": [], "from_checkout": [], "recorded": 0, "unrecorded": [], "py": [], "js": []}
     # Ordinary proof execution is unchanged, but its import environment is not attested for lesson suppression.
     listed = _copy_files(top)  # one list: what the copy holds is what the evidence names, on both sides
     proof_hashes = _proof_snapshot(top, listed) if isolated else {}
@@ -3876,7 +5677,7 @@ def _prove(a, top, runners) -> int:
         answered, first = set(), {}  # selected names some case answered to; each runner's first result
         for n in range(runs):
             for r, sel, members in groups.values():
-                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env,
+                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env, own_temp=True,
                                 **({"isolated_imports": True} if isolated else {}))
                 imports_attested = imports_attested and res.get("imports_attested") is True
                 if res["zero"]:
@@ -3884,9 +5685,8 @@ def _prove(a, top, runners) -> int:
                     break
                 first.setdefault(id(r), res)
                 for key, c in place(res, members):
-                    rec = found.setdefault(key, {"file": key[0], "id": key[1], "passes": 0, "skips": 0,
-                                                 "expected_failures": 0,
-                                                 "message": ""})
+                    rec = found.setdefault(key, {"file": key[0], "id": key[1], "name": c.get("name", ""),
+                                                 "passes": 0, "skips": 0, "expected_failures": 0, "message": ""})
                     rec["passes"] += c["status"] == "passed"
                     rec["skips"] += c["status"] == "skipped"
                     rec["expected_failures"] += c["status"] == "expected_failure"
@@ -3903,50 +5703,124 @@ def _prove(a, top, runners) -> int:
                     cover = _cover(res, f, _id(i))
                     found.setdefault((f, _id(i)), {"file": f, "id": _id(i), "passes": 0,
                                                    "message": cover[1] if cover else "did not run"})
-        without = {}
+        without, by_file = {}, {}  # by_file: a test file's own import evidence, when the run's was incomplete
         if not problem:
             for f, text in inner.items():  # before _restore_base, which clears the copy's bytecode caches
-                Path(dest, f).write_text(text)
+                Path(dest, f).write_bytes(text.encode("utf-8", "surrogateescape"))
             _restore_base(top, base, dest, undo)
+            recorder, records, recorder_env = _import_recorder(dest, top)
+            bare = dict(env, **recorder_env, PYTHONPATH=os.pathsep.join(
+                [p for p in [env.get("PYTHONPATH") or os.environ.get("PYTHONPATH"), recorder] if p]))
             for r, sel, members in groups.values():
-                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=env,
+                res = run_tests(dest, r, files=sel["files"], ids=sel["ids"], env=bare, own_temp=True,
                                 **({"isolated_imports": True} if isolated else {}))
                 imports_attested = imports_attested and res.get("imports_attested") is True
                 for key, c in place(res, members):
-                    without[key] = (c["status"], c["message"], "load" if c.get("load_failed") else "")
+                    without[key] = (c["status"], c["message"], "load" if c.get("load_failed") else "",
+                                    c.get("failure") or "an error its runner did not name")
                 # a test with no result of its own: only a failure that stopped it before it ran says what happened
                 # to it; else it did not run, as far as anyone can tell
                 for f, units, ids in members:
                     for key in [k for k in found if k[0] == f and k not in without]:
                         cover = _cover(res, f, key[1])
-                        without[key] = ("failed", _tail_line(cover[1]), cover[0]) if cover else ("not run", "", "")
+                        without[key] = ("failed", _tail_line(cover[1]), cover[0], "") if cover else \
+                            ("not run", "", "", "")
+            evidence = _import_evidence(records, top, dest, undo, linked)
+            seen = set(_import_evidence(records, top, dest, sorted(support), linked)["from_copy"]) if support else set()
+            # a Python child that skipped the recorder leaves the run's record incomplete: run each test file again
+            # with a record of its own, so only the files that start such a child lose their proof. Only a Python
+            # test file outside --isolated-imports has its verdict read from a record: no other file runs again.
+            each = [(r, f, ids) for r, _, ms in groups.values() for f, _, ids in ms]
+            if evidence["unrecorded"] and len(each) > 1:
+                for n, (r, f, ids) in enumerate(each):
+                    if _lang(f) != "py" or isolated:
+                        continue
+                    recorder, records, recorder_env = _import_recorder(dest, top, f"imports-{n}")
+                    one = dict(bare, **recorder_env, PYTHONPATH=os.pathsep.join(
+                        [p for p in [env.get("PYTHONPATH") or os.environ.get("PYTHONPATH"), recorder] if p]))
+                    again = run_tests(dest, r, files=[] if ids else [f], ids=list(ids or []), env=one, own_temp=True)
+                    by_file[f] = _import_evidence(records, top, dest, undo, linked)
+                    if not any(not c.get("load_failed") for c in again["cases"]):
+                        # the file did not load this time (the first run left state that stops it): its record says
+                        # nothing about what its tests import
+                        by_file[f]["recorded"] = 0
+            rerun = {key for key, (st, msg, stop, failure) in without.items()
+                     if st == "failed" and failure != "assertion" and stop not in ("load", "setup") and
+                     not _stopped_at_import(msg) and (key[0] in support or reaches.get(key[0]) or
+                                                      _lang(key[0]) == "py" and seen - {key[0]})}
+            # a fresh copy, as the first runs had: what a run left in this one (a folder its test stopped before
+            # removing) would fail the rerun for a reason that is no part of the change. It sits where this one was,
+            # so the PYTHONPATH folders and the package links beside it lead into it as they did. A copy that cannot
+            # be removed gives no rerun: its tests stay unproven
+            if rerun and _remove_tree(dest):
+                os.makedirs(dest)
+                _copy_worktree(top, dest, listed)
+                _carry_git(top, dest)
+                _restore_base(top, base, dest, [f for f in undo if f not in support])
+                for r, sel, members in groups.values():
+                    mine = [m for m in members if any(k[0] == m[0] for k in rerun)]
+                    if not mine:
+                        continue
+                    res = run_tests(dest, r, files=[f for f, _, ids in mine if not ids],
+                                    ids=[i for _, _, ids in mine for i in ids or ()], env=env, own_temp=True,
+                                    **({"isolated_imports": True} if isolated else {}))
+                    # only an assertion failure proves, as in the run without the change: an error there may come from
+                    # what an earlier run left outside the copy (a folder in the home folder or beside the copy)
+                    for key, c in place(res, mine):
+                        if key in rerun:
+                            again_now[key] = again_now.get(key, False) or c["status"] == "failed" and \
+                                c.get("failure") == "assertion" and not c.get("load_failed") and \
+                                not _stopped_at_import(c["message"])
     finally:
-        shutil.rmtree(dest, ignore_errors=True)
+        _remove_tree(dest)
         shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any
+        for folder in glob.glob(glob.escape(dest) + "-imports*"):  # the import recorders and their records
+            shutil.rmtree(folder, ignore_errors=True)
     if problem:
         return _zero_problem(problem, tests)
     rows = []
+    py_undo = any(f.endswith(".py") for f in undo)
     for key, rec in sorted(found.items()):
-        st, msg, stop = without.get(key, ("not run", "", ""))
+        st, msg, stop, failure = without.get(key, ("not run", "", "", ""))
         p = rec["passes"]
         # Neither a skipped assertion nor an expected failure is a passing run of the changed behavior.
         inconclusive = rec.get("skips", 0) + rec.get("expected_failures", 0) == runs
         # A test proves the change only by its own failure: one that stopped it before it ran (its module did not
         # load, its class setup failed) says nothing about its assertions.
+        lang = _lang(rec["file"])
+        py = lang == "py" and not isolated
+        stayed = evidence["py"] if py else evidence["js"] if lang == "js" else []
+        mine = by_file.get(rec["file"], evidence)
         verdict = (("expected failure" if rec.get("expected_failures") else "skipped") if inconclusive else
                    "flaky" if 0 < p < runs else
                    "fails with the change" if p == 0 else
+                   # its module ran as it is now, its change outside the helpers' bodies (anywhere outside the tests of
+                   # a JavaScript or TypeScript one) in place: a pass says nothing about the change, as only the
+                   # production change was undone
+                   (_JS_KEPT if lang == "js" else _HELPERS_KEPT + kept[rec["file"]])
+                   if rec["file"] in kept and st == "passed" else
+                   # the run without the change ran the checkout's changed code: its result says nothing
+                   _CHECKOUT_IMPORT + ", ".join(stayed) if stayed else
+                   _NO_IMPORT_RECORD if py and py_undo and (not mine["recorded"] or mine["unrecorded"]) else
                    _IMPORTS_ADDED if st == "failed" and rec["file"] in needs_added and (
                        stop == "load" or _IMPORT_FAILED.search(msg)) else
                    _IMPORT_STOPPED if st == "failed" and (stop == "load" or _stopped_at_import(msg)) else
                    _SETUP_STOPPED if st == "failed" and stop == "setup" else
+                   # a failure proves the change only when the changed code it ran came from the copy
+                   _NOT_FROM_COPY if st == "failed" and py and py_undo and not mine["from_copy"] else
+                   # a test that reached the support the run undid proves the change by an assertion failure, or by
+                   # failing once more on an assertion with that support as it is now: anything else it raises (a name
+                   # or member only the support's edit gives) says nothing about what it asserts
+                   f"{_NOT_ASSERTION}{failure}, not on an assertion" if key in rerun and not again_now.get(key) else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
         rows.append({"id": rec["id"], "file": rec["file"], "with_change": f"{p}/{runs}", "without_change": st,
-                     "verdict": verdict, "message": msg if st == "failed" else rec["message"]})
+                     "verdict": verdict, "message": msg if st == "failed" else rec["message"],
+                     # no record of a JavaScript run's imports: only the workspace links were checked
+                     **({"imports_checked": "workspace links only"} if lang == "js" else {})})
     # 0: every test that ran proves the change; 1: one does not; 2: none could be proven (skipped, or it imports a
     # file the change adds)
-    red = [x for x in rows if x["verdict"] not in _NOT_PROVEN and x["verdict"] != "proves the change"]
+    red = [x for x in rows if not _not_proven(x["verdict"]) and x["verdict"] != "proves the change"]
     rc = 1 if red or not rows else 0 if any(x["verdict"] == "proves the change" for x in rows) else 2
     prevention_eligible = bool(_record_prevention_proofs(top, rows, proof_hashes, base,
                                                         imports_attested=imports_attested))
@@ -3954,10 +5828,14 @@ def _prove(a, top, runners) -> int:
         print(json.dumps({**({"prevention_eligible": prevention_eligible} if isolated else {}),
                           "base": label, "production": prod, "helpers": helpers,
                           **({"test_module_helpers": sorted(inner)} if inner else {}),
+                          **({"test_module_helpers_kept": sorted(kept)} if kept else {}),
                           "git": f"none: {gitless}" if gitless else "carried", "runs": runs, "tests": rows,
+                          "imports": {k: evidence[k] for k in ("from_copy", "from_checkout")},
+                          **({"unrecorded": evidence["unrecorded"]} if evidence["unrecorded"] else {}),
                           **({"built_installs": built_stuck} if built_stuck else {}),
                           "skipped": [{"file": f, "why": why} for f, why in skipped],
-                          **({"outside_lane": outside} if outside else {}), "exit": rc}, indent=1))
+                          **({"outside_lane": outside} if outside else {}),
+                          **({"no_changed_tests": unreached} if unreached else {}), "exit": rc}, indent=1))
         return rc
     change = prod + helpers + [f"{f} (its helpers)" for f in sorted(inner)]
     print(ui.section(f"Prove · {len(rows)} new or changed test(s) · change: "
@@ -3981,6 +5859,8 @@ def _prove(a, top, runners) -> int:
         print(f"  {ui.WARN} lesson prevention remains unverified: no causal receipt with attested checkout/stdlib "
               "imports and a current bounded checkout snapshot")
     _outside_note(outside)
+    if unreached:
+        print(ui.dim(f"  left out, no test of them changed or calls a helper that changed: {', '.join(unreached)}"))
     if skipped:
         print(f"{ui.WARN} not proven, left out because they cannot run here:")
         for f, why in skipped:
@@ -3997,16 +5877,47 @@ def _prove(a, top, runners) -> int:
                                            "error, before any assertion:"),
                 (_SETUP_STOPPED, ui.WARN, "cannot be proven: without the change their class or module setup fails, "
                                           "before any assertion:"),
+                (_NO_IMPORT_RECORD, ui.WARN, "cannot be proven: the run without the change left no record of the "
+                                             "files it imported (a Python started with -I, -S or -E, or with a "
+                                             "PYTHONPATH without devkit's recorder, skips the record" +
+                 (": " + "; ".join(f"`{c}`" for c in evidence["unrecorded"][:3]) if evidence["unrecorded"] else "") +
+                 "):"),
+                (_HELPERS_KEPT, ui.WARN, "cannot be proven: their module keeps a change outside its helpers' bodies "
+                                         "(named below), so the run without the change ran it as it is now, and they "
+                                         "pass:"),
+                (_JS_KEPT, ui.WARN, "cannot be proven: their JavaScript or TypeScript module changed outside its "
+                                    "tests, and devkit rebuilds only Python test modules, so the run without the "
+                                    "change ran it as it is now, and they pass:"),
+                (_NOT_ASSERTION, ui.WARN, "cannot be proven: without the change their test support (their module "
+                                          "rebuilt, a rebuilt module or a test helper file they import) came back as "
+                                          "at the base, and they fail on an error, not on an assertion, and pass "
+                                          "with that support as it is now:"),
+                (_NOT_FROM_COPY, ui.WARN, "cannot be proven: the run without the change imported none of the changed "
+                                          "Python files from the copy, so nothing shows that it ran the code without "
+                                          "the change:"),
                 ("proves the change", ui.OK, "fail without the change, as expected:"))
+    for stayed, how in ((evidence["py"], "an environment or a .pth that puts the checkout's folder on the path: "
+                                         "install the package editable, or point it at the source folder"),
+                        (evidence["js"], "node_modules links the workspace package into the checkout: prove the "
+                                         "package's own tests, which import it by path")):
+        if stayed:
+            sections = ((_CHECKOUT_IMPORT + ", ".join(stayed), ui.WARN,
+                         f"cannot be proven: without the change they imported the checkout's {', '.join(stayed)}, "
+                         f"where the change stays ({how}):"),) + sections
     for verdict, mark, title in sections:
-        mine = [x for x in rows if x["verdict"] == verdict]
+        mine = [x for x in rows if x["verdict"] == verdict or
+                verdict in (_HELPERS_KEPT, _NOT_ASSERTION) and x["verdict"].startswith(verdict)]
         if not mine:
             continue
         print(f"{mark} {title}")
         for x in mine:
             extra = f"  passed {x['with_change'].replace('/', ' of ')} runs" if verdict == "flaky" else \
+                f"  · {x['verdict'][len(verdict):]}" if verdict == _HELPERS_KEPT else \
                 f"  · {x['message'][:120]}" if x["message"] and verdict != "does not test the change" else ""
             print(f"    {x['file']}{'' if x['id'] == x['file'] else '  ' + x['id']}{extra}")
+        if verdict == "proves the change" and any(x.get("imports_checked") for x in mine):
+            print(ui.dim("    for JavaScript, prove checks only that no node_modules link resolves a workspace package "
+                         "into the checkout: nothing records which files the run without the change imported"))
     if rc == 2:
         print(f"{ui.WARN} nothing proven: no new or changed test here could be proven against the change")
     return rc
@@ -4063,6 +5974,13 @@ def _options(p, paths=False, sub=False):
     p.add_argument("--runner", metavar="NAME", help="only this runner: " + ", ".join(RUNNER_LANG), **keep)
     p.add_argument("--json", action="store_true", **keep)
     p.add_argument("-v", "--verbose", action="store_true", help="stream the runner's full output", **keep)
+    _listed_option(p, keep)
+
+
+def _listed_option(p, keep):
+    p.add_argument("--listed", action="store_true", help="the files that hold tests are those the runner's own listing "
+                   "names (pytest --collect-only, unittest discovery, vitest list, playwright --list), cached; config "
+                   "test.listing turns it on for every run", **keep)
 
 
 def register(add):
@@ -4080,6 +5998,7 @@ def register(add):
     q.add_argument("--since", metavar="REF", **_KEEP)
     q.add_argument("--runner", metavar="NAME", **_KEEP)
     q.add_argument("--json", action="store_true", **_KEEP)
+    _listed_option(q, _KEEP)
     q = sp.add_parser("prove", help="each new or changed test passes N times with the change and fails without it")
     q.add_argument("tests", nargs="*", help="test files (default: the new or changed ones)")
     q.add_argument("--since", metavar="REF", help="the base without your change (default: merge-base with origin, or "
@@ -4091,6 +6010,7 @@ def register(add):
                         "for lesson prevention receipts (checkout root, src and test folders)")
     q.add_argument("--runner", metavar="NAME", **_KEEP)
     q.add_argument("--json", action="store_true", **_KEEP)
+    _listed_option(q, _KEEP)
     try:
         mod = _audit_module()
         q = sp.add_parser("audit", help="tests that cannot fail: no or trivial assertions, skips, sleeps")
@@ -4109,6 +6029,8 @@ def cmd_test(a) -> int:
         os.chdir(cli._resolve(None, a.project)["path"])
     if sub == "audit":
         return _audit(a)
+    if getattr(a, "listed", False):
+        os.environ["DEVKIT_TEST_LISTING"] = "1"  # every _Repo of this command, and the dev processes it starts
     top = _top()
     if not top:
         return _refuse("not inside a git repository")
@@ -4166,14 +6088,191 @@ def _positionals(args, takes_value) -> list:
     return out
 
 
+_SHELL_OPTIONS = {"pipefail", "errexit", "nounset", "xtrace", "verbose"}
+_SHELL_WORDS = {"if": "a conditional", "then": "a conditional", "elif": "a conditional", "else": "a conditional",
+                "fi": "a conditional", "case": "a conditional", "esac": "a conditional", "for": "a loop",
+                "while": "a loop", "until": "a loop", "select": "a loop", "do": "a loop", "done": "a loop",
+                "function": "a function", "{": "a command group", "}": "a command group",
+                "(": "a subshell", ")": "a subshell"}
+
+
+def _step_lines(command):
+    """A step's text -> its logical lines [(first line number, start offset, end offset, text)], continuations
+    joined."""
+    out, start, number, buf = [], 0, 1, None
+    pos = 0
+    for i, ln in enumerate(command.split("\n"), 1):
+        end = pos + len(ln)
+        if buf is None:
+            buf, start, number = "", pos, i
+        if ln.endswith("\\") and not ln.endswith("\\\\"):
+            buf += ln[:-1] + " "
+        else:
+            out.append((number, start, end, buf + ln))
+            buf = None
+        pos = end + 1
+    if buf is not None:
+        out.append((number, start, pos - 1, buf))
+    return out
+
+
+def _shell_words(text):
+    """A line -> its words with comments dropped and operators as words of their own, or None when it does not
+    parse."""
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|<>()")
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _harmless(words, cwd, top, shell, env):
+    """Whether a line cannot change what a later test command runs; applies its cd, assignments and exports to
+    `cwd`, `shell` and `env`. -> (True, new cwd) or (False, cwd)."""
+    name = words[0]
+    assign = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+    if name in ("echo", "printf", ":", "true"):
+        return True, cwd
+    if all(assign.fullmatch(w) for w in words):  # NAME=value: a shell variable, exported later or never
+        for w in words:
+            k, _, v = w.partition("=")
+            known = "$" not in v and "~" not in v  # a value the shell expands is not known here
+            if k in env or k in os.environ:  # an exported name (PATH, one exported above): the test sees it
+                if not known:
+                    return False, cwd
+                env[k] = v
+            shell[k] = v if known else None
+        return True, cwd
+    if name == "export" and words[1:]:
+        for w in words[1:]:
+            if assign.fullmatch(w):
+                k, _, v = w.partition("=")
+                if "~" in v:  # the shell expands it to a home folder
+                    return False, cwd
+                shell[k] = env[k] = v
+            elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", w) and shell.get(w) is not None:
+                env[w] = shell[w]
+            else:
+                return False, cwd
+        return True, cwd
+    if name == "set" and words[1:]:  # -e, -u, -x, -v and -o pipefail; never -a, which exports every assignment
+        rest = list(words[1:])
+        while rest:
+            flag = rest.pop(0)
+            if not re.fullmatch(r"[+-][euxvo]+", flag):
+                return False, cwd
+            if "o" in flag and (not rest or rest.pop(0) not in _SHELL_OPTIONS):
+                return False, cwd
+        return True, cwd
+    if name == "cd" and len(words) == 2 and not words[1].startswith(("-", "~")):
+        new = os.path.normpath(os.path.join(cwd, words[1]))
+        rel = os.path.relpath(os.path.realpath(new), os.path.realpath(top))  # a link out of it leaves it too
+        return (False, cwd) if rel == ".." or rel.startswith(".." + os.sep) else (True, new)
+    return False, cwd
+
+
+def _segment_runners(words, cwd, top):
+    """The test commands a line runs between its operators, a case pattern or a keyword before them dropped."""
+    out, segment = [], []
+    for w in words + [";"]:
+        if w and set(w) <= set(";&|<>()"):
+            if segment and segment[0] in _SHELL_WORDS:
+                segment = segment[1:]
+            if segment:
+                r = recognize(shlex.join(segment), cwd, top)
+                if r:
+                    out.append(r)
+            segment = []
+        else:
+            segment.append(w)
+    return out
+
+
+def step_runner(command, cwd, top):
+    """A CI step's command -> (runner or None, why or None): the runner of the one test command it runs, with the
+    folder its `cd` lines lead to and the variables it exports, or why devkit re-runs it whole.
+
+    A multi-line step is recognized when exactly one line is a recognizable test command and every other line cannot
+    change what that command runs: blank lines, comments, assignments, export, echo or printf, cd, and set -e, -u, -x
+    or -o pipefail. Two test commands, a loop, a conditional, a function, a here-document, a command substitution or
+    any other command leave it unrecognized, and `why` says which line; a step with no test command at all says
+    nothing. A one-line step is `recognize`'s, without a reason."""
+    cmd = (command or "").strip()
+    if "\n" not in cmd:
+        return recognize(cmd, cwd, top), None
+    top, cwd = str(top), str(cwd)
+    shell, env, tests, refused = {}, {}, [], None
+    for number, _, _, text in _step_lines(command):
+        words = _shell_words(text)
+        if words == []:
+            continue
+        shown = " ".join(text.split())[:80]
+        reason = None
+        if words is None:
+            reason = f"line {number} does not parse (`{shown}`)"
+        elif "<<" in words or "<<-" in words:
+            reason = f"a here-document (line {number})"
+        elif words[0] in _SHELL_WORDS or words[1:2] == ["()"] or words[1:3] == ["(", ")"]:
+            reason = f"{_SHELL_WORDS.get(words[0], 'a function')} (line {number})"
+        elif words[0] in ("[", "[[", "test") and ({"&&", "||"} & set(words)):
+            reason = f"a conditional (line {number})"
+        if reason:
+            refused = refused or reason
+            tests += [(number, r) for r in _segment_runners(words or [], cwd, top)]
+            continue
+        if "`" in text or "$(" in text:
+            refused = refused or f"line {number} runs a command of its own (`{shown}`)"
+            continue
+        operators = any(w and set(w) <= set(";&|<>()") for w in words)
+        if not operators and words[0] in ("export", "cd") and "$" in text:
+            refused = refused or f"line {number} needs the shell to expand a value (`{shown}`)"
+            continue
+        if not operators:
+            ok, new = _harmless(words, cwd, top, shell, env)
+            if ok:
+                cwd = new
+                continue
+        found = _segment_runners(words, cwd, top)
+        tests += [(number, dict(r, env=dict(env, **r["env"]))) for r in found]  # the exports its line sees
+        if found and operators:
+            refused = refused or f"line {number} runs the test command with other commands (`{shown}`)"
+        elif not found:
+            refused = refused or f"line {number} is neither the test command nor a line that cannot change what it " \
+                                 f"runs (`{shown}`)"
+    if not tests:
+        return None, None
+    if len(tests) > 1:
+        return None, "a multi-line step devkit re-runs whole: two test commands (lines " + \
+            ", ".join(str(n) for n, _ in tests) + ")"
+    if refused:
+        return None, "a multi-line step devkit re-runs whole: " + refused
+    return tests[0][1], None
+
+
+def _unittest_span(command):
+    """The (start, end) offsets of the line that runs `-m unittest` in a multi-line step, as step_runner picks it:
+    never a comment or a line step_runner takes as harmless (echo, `:`, an assignment), or None."""
+    for _, start, end, text in _step_lines(command):
+        words = _shell_words(text) or []
+        if not words or (not any(w and set(w) <= set(";&|<>()") for w in words)
+                         and _harmless(words, ".", ".", {}, {})[0]):
+            continue
+        if any(words[i:i + 2] == ["-m", "unittest"] for i in range(len(words))):
+            return start, end
+    return None
+
+
 def recognize(command, cwd, top):
     """A CI step that is one plain test-runner call -> a runner rooted at the step's directory, or None.
 
     None for pipelines, `&&` chains, make targets and selectors devkit cannot reproduce (-k, --filter, -run …): such
     a step is re-run whole. `failfast` is set when a failing run may have skipped tests (-x, --bail, a multi-module
-    reactor), so only a whole re-run can follow a failure."""
+    reactor), so only a whole re-run can follow a failure. A multi-line step is `step_runner`'s."""
     cmd = (command or "").strip()
-    if not cmd or "\n" in cmd or re.search(r"&&|\|\||[;|`<>&]|\$\(", cmd):
+    if "\n" in cmd:
+        return step_runner(cmd, cwd, top)[0]
+    if not cmd or re.search(r"&&|\|\||[;|`<>&]|\$\(", cmd):
         return None
     try:
         argv = shlex.split(cmd)
