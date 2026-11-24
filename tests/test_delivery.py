@@ -136,6 +136,17 @@ class RecordTests(unittest.TestCase):
         for tag in ("v0.1.0-alpha.17", "release-0.1", "v0.1.0a"):
             self.assertIn("PEP 440", delivery.tag_violation("acme/weave", tag) or "", tag)
 
+    def test_a_refused_tag_is_told_in_the_policys_own_spelling(self):
+        # dev release tags in the policy's format (delivery.release_tag), so the refusal names that spelling too
+        for scheme, fmt, bad, told in (("calver", "YY.MM.PATCH", "1.4.0", "tag it as <that>"),
+                                       ("calver", "vYY.MM.PATCH", "v1.4.0", "tag it as v<that>"),
+                                       ("semver", "MAJOR.MINOR.PATCH", "release-1", "Use MAJOR.MINOR.PATCH"),
+                                       ("semver", "vMAJOR.MINOR.PATCH", "release-1", "Use vMAJOR.MINOR.PATCH"),
+                                       ("pep440", "MAJOR.MINOR.MICRO[{a|b|rc}N]", "release-0.1", "for example 0.1.0a17")):
+            with self.subTest(fmt=fmt):
+                delivery.record("acme/tags", {"versioning": scheme, "tag_format": fmt}, "the test's policy", a=A)
+                self.assertIn(told, delivery.tag_violation("acme/tags", bad) or "")
+
     def test_job_timeout_is_a_policy_field(self):
         p = delivery.set_field({}, "job_timeout_minutes", "45")
         self.assertEqual(p["job_timeout_minutes"], 45)

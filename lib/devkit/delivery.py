@@ -344,23 +344,24 @@ def tag_violation(scope: str, tag: str):
     p = load(scope)
     if not p or not tag or not p.get("versioning"):
         return None
+    v = "v" if str(p.get("tag_format") or "v").startswith("v") else ""  # the spelling dev release tags in
     if p["versioning"] == "calver":
         m = CALVER_RE.match(tag)
         if m and 1 <= int(m.group(2)) <= 12:
             return None
         return (f"`{tag}` does not follow this project's CalVer policy ({p.get('tag_format')}). The next version is "
-                f"`dev calver --next`; tag it as v<that>, or change the policy with `dev delivery apply --set "
+                f"`dev calver --next`; tag it as {v}<that>, or change the policy with `dev delivery apply --set "
                 f"versioning=… --why \"…\"`.")
     if p["versioning"] == "semver":
         if SEMVER_RE.match(tag):
             return None
-        return (f"`{tag}` is not a SemVer tag ({p.get('tag_format')}). Use vMAJOR.MINOR.PATCH, or change the policy "
+        return (f"`{tag}` is not a SemVer tag ({p.get('tag_format')}). Use {v}MAJOR.MINOR.PATCH, or change the policy "
                 f"with `dev delivery apply --set versioning=… --why \"…\"`.")
     if p["versioning"] == "pep440":
         if PEP440_RE.match(tag):
             return None
-        return (f"`{tag}` is not a PEP 440 version tag ({p.get('tag_format')}). Use v{PEP440_FORMAT}, for example "
-                f"v0.1.0a17, or change the policy with `dev delivery apply --set versioning=… --why \"…\"`.")
+        return (f"`{tag}` is not a PEP 440 version tag ({p.get('tag_format')}). Use {v}{PEP440_FORMAT}, for example "
+                f"{v}0.1.0a17, or change the policy with `dev delivery apply --set versioning=… --why \"…\"`.")
     return None
 
 
