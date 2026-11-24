@@ -5579,6 +5579,30 @@ _PROVE_OWNER = re.compile(r"devkit-prove-(?:git-)?(\d+)-")
 PROVE_COPY_DAYS = 1
 
 
+def _remove_tree(path) -> bool:
+    """Remove folder `path` with all it holds, a read-only folder a test left in it too: a removal refused there makes
+    the folder and what failed readable and writable for their owner and is tried again, and a second pass reads a
+    folder the first could not list. Links are removed, never followed. -> whether `path` is gone (a file locked
+    beyond its owner's mode, as an immutable flag locks it, keeps it)."""
+    def unlock(func, p, _exc):
+        for d in (os.path.dirname(p), p):
+            try:
+                if not os.path.islink(d):
+                    os.chmod(d, os.lstat(d).st_mode & 0o7777 | 0o700)
+            except OSError:
+                pass
+        if func in (os.unlink, os.remove, os.rmdir):
+            try:
+                func(p)
+            except OSError:
+                pass
+    for _ in range(2):
+        if not os.path.lexists(path):
+            return True
+        shutil.rmtree(path, onerror=unlock)
+    return not os.path.lexists(path)
+
+
 def _process_gone(pid) -> bool:
     try:
         os.kill(pid, 0)
@@ -5830,11 +5854,11 @@ def _prove(a, top, runners) -> int:
                      if st == "failed" and failure != "assertion" and stop not in ("load", "setup") and
                      not _stopped_at_import(msg) and (key[0] in support or reaches.get(key[0]) or
                                                       _lang(key[0]) == "py" and seen - {key[0]})}
-            if rerun:
-                # a fresh copy, as the first runs had: what a run left in this one (a folder its test stopped before
-                # removing) would fail the rerun for a reason that is no part of the change. It sits where this one
-                # was, so the PYTHONPATH folders and the package links beside it lead into it as they did
-                shutil.rmtree(dest, ignore_errors=True)
+            # a fresh copy, as the first runs had: what a run left in this one (a folder its test stopped before
+            # removing) would fail the rerun for a reason that is no part of the change. It sits where this one was,
+            # so the PYTHONPATH folders and the package links beside it lead into it as they did. A copy that cannot
+            # be removed gives no rerun: its tests stay unproven
+            if rerun and _remove_tree(dest):
                 os.makedirs(dest)
                 _copy_worktree(top, dest, listed)
                 _carry_git(top, dest)
@@ -5851,7 +5875,7 @@ def _prove(a, top, runners) -> int:
                             again_now[key] = again_now.get(key, False) or c["status"] == "failed" and \
                                 not c.get("load_failed") and not _stopped_at_import(c["message"])
     finally:
-        shutil.rmtree(dest, ignore_errors=True)
+        _remove_tree(dest)
         shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any
         for folder in glob.glob(glob.escape(dest) + "-imports*"):  # the import recorders and their records
             shutil.rmtree(folder, ignore_errors=True)

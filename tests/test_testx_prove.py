@@ -6,6 +6,7 @@ Run: python3 -m unittest tests.test_testx_prove -v"""
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -737,6 +738,52 @@ class CleanRerunTests(unittest.TestCase):
         rc, rows, text = prove_rows(before, after)
         self.assertEqual([("test_calc.CalcTests.test_x", "cannot be proven: without the change it fails on "
                                                          "AttributeError, not on an assertion")], rows, text)
+
+
+def locked_folder(lock, unlock):
+    """A new test for fake_module's module: it makes the folder `locked` beside itself with a file in it, runs `lock`,
+    checks a member only the helper's edit gives, then runs `unlock` and removes the folder. Without the change it
+    stops before the unlock, so the folder stays locked in the copy."""
+    return ("\n    def test_x(self):\n        out = Path(__file__).resolve().parent / 'locked'\n        out.mkdir()\n"
+            "        (out / 'f').write_text('x')\n        " + lock + "\n"
+            "        self.assertEqual(make().extra(), 1)\n        " + unlock + "\n        shutil.rmtree(out)\n")
+
+
+LOCKED_BASE = "import os\nimport shutil\nimport stat\n" + fake_module(OLD_MAKE + "\n\n")
+
+
+class LockedCopyTests(unittest.TestCase):
+    # the rerun starts from a fresh copy: a read-only folder that the run without the change left in the copy is made
+    # writable and removed; a copy that still cannot be removed gives no rerun, so its tests cannot be proven, never a
+    # traceback. The copy is gone when prove ends
+    def test_a_read_only_folder_left_in_the_copy_is_removed_for_the_rerun(self):
+        after = LOCKED_BASE.replace(OLD_MAKE, NEW_MAKE) + locked_folder("out.chmod(0o555)", "out.chmod(0o755)")
+        with Env() as e:
+            r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": LOCKED_BASE}))
+            edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
+            rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            left = [p.name for p in testx.TMP_ROOT.iterdir() if p.name.startswith(testx.PROVE_COPY)]
+        self.assertEqual([("test_calc.CalcTests.test_x", "cannot be proven: without the change it fails on "
+                                                         "AttributeError, not on an assertion")],
+                         [(x["id"], x["verdict"]) for x in json.loads(out)["tests"]], out + err)
+        self.assertEqual([], left)
+
+    @unittest.skipUnless(hasattr(os, "chflags") and hasattr(stat, "UF_IMMUTABLE"), "no file flags on this system")
+    def test_a_copy_that_cannot_be_removed_leaves_the_rerun_s_tests_unproven(self):
+        after = LOCKED_BASE.replace(OLD_MAKE, NEW_MAKE) + locked_folder("os.chflags(out / 'f', stat.UF_IMMUTABLE)",
+                                                                        "os.chflags(out / 'f', 0)")
+        with Env() as e:
+            try:
+                r = e.repo(dict(PROVE_BASE, **{"tests/test_calc.py": LOCKED_BASE}))
+                edit(r, {"tests/test_calc.py": after, "calc.py": MUL})
+                rc, out, err = dev(r, "prove", "--json", "--runs", "1")
+            finally:  # unlock what the stopped test locked, so the temporary folder can go
+                for p in e.root.rglob("*"):
+                    if not p.is_symlink() and p.lstat().st_flags & stat.UF_IMMUTABLE:
+                        os.chflags(p, 0, follow_symlinks=False)
+        self.assertEqual([("test_calc.CalcTests.test_x", "cannot be proven: without the change it fails on "
+                                                         "AttributeError, not on an assertion")],
+                         [(x["id"], x["verdict"]) for x in json.loads(out)["tests"]], out + err)
 
 
 class UnittestModuleFunctionTests(unittest.TestCase):
