@@ -1924,12 +1924,13 @@ def _case(id_, file, line, status, message="", secs=0.0, name=""):
 
 
 # an assertion failure as each runner words it: an AssertionError (Python, node:assert, chai and vitest), pytest's
-# rewritten assert, pytest's Failed (pytest.raises or pytest.warns that saw nothing, pytest.fail), an expect of jest
-# or Playwright (a timed-out one too, and jest's expect.assertions(n) and expect.hasAssertions() that counted too few),
-# JUnit 5's AssertionFailedError
+# rewritten assert, pytest's own Failed (pytest.raises or pytest.warns that saw nothing, pytest.fail; never
+# pytest-timeout's "Failed: Timeout >1.0s", which checks nothing of the test), an expect of jest or Playwright (a
+# timed-out one too, and jest's expect.assertions(n) and expect.hasAssertions() that counted too few), JUnit 5's
+# AssertionFailedError
 _ASSERTION = re.compile(r"(?:E\s+)?(?:(?:[\w.]+\.)?(?:AssertionError|AssertionFailedError|JestAssertionError)\b|"
-                        r"(?:[\w.]+\.)?Failed:|assert\b|(?:Error:\s*)?(?:Timed out \d+ms waiting for )?"
-                        r"expect(?:\.\w+)*\()")
+                        r"(?:_pytest\.outcomes\.)?Failed:(?!\s*Timeout >)|assert\b|(?:Error:\s*)?"
+                        r"(?:Timed out \d+ms waiting for )?expect(?:\.\w+)*\()")
 _RAISED = re.compile(r"(?:E\s+)?([A-Za-z_$][\w$.]*?)(?:\s*\[[^\]\n]*\])?:(?:\s|$)")
 
 

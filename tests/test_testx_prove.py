@@ -587,6 +587,21 @@ class FailureKindTests(unittest.TestCase):
                          {c["id"]: c.get("failure") for c in testx.parse_playwright_junit(report, top, top, {})})
 
 
+class FailedTimeoutTests(unittest.TestCase):
+    # pytest-timeout fails a test that ran too long with pytest's Failed ("Failed: Timeout >1.0s"), which is no check of
+    # the test: only pytest's own Failed, bare or as _pytest.outcomes.Failed, is an assertion, and a Failed of another
+    # module is named by what was raised
+    def test_only_pytest_s_own_failed_and_never_a_timeout_is_an_assertion(self):
+        top = "/w"
+        messages = ["Failed: Timeout &gt;1.0s", "_pytest.outcomes.Failed: add is off by one", "plugin.Failed: lost",
+                    "Failed: DID NOT RAISE &lt;class 'ValueError'&gt;"]
+        report = ('<testsuites><testsuite name="pytest">' + "".join(
+            f'<testcase classname="tests.test_x" name="test_{i}"><failure message="{m}">x</failure></testcase>'
+            for i, m in enumerate(messages)) + "</testsuite></testsuites>")
+        self.assertEqual(["Failed", "assertion", "plugin.Failed", "assertion"],
+                         [c.get("failure") for c in testx.parse_junit(report, top, top, "pytest")])
+
+
 class RebuildVerdictTests(unittest.TestCase):
     # under a rebuild, a failure without the change proves only when it is an assertion failure: one that raises
     # anything else (a TypeError on a member only the helper edit gives) cannot be proven, named by what it raised. A
