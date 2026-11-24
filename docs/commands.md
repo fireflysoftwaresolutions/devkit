@@ -998,9 +998,9 @@ lists what it has), also when another remote has them.
    (`git fetch`, `git log --left-right`, `git rebase origin/<branch>`, or `dev push --force-with-lease` on your own
    branch).
 4. No WIP commit, and the project's backup policy allows it (below). Then, on a public repository, no commit that
-   reads as a security fix (a `security` scope, a CVE, a red-team test that still expects a failure): devkit suggests `dev branch embargo` first,
-   and `--public` pushes it anyway. Public or private is the visibility of the repository the push goes to, not
-   origin's.
+   reads as a security fix (a `security` scope, a CVE, a red-team test that still expects a failure): devkit suggests
+   `dev branch embargo` first, and `--public` pushes it anyway. Public or private is the visibility of the repository
+   the push goes to, not origin's.
 5. The CI configuration of the commit it sends shows that the push starts no CI run. It reads the GitHub Actions
    `push` branches, `branches-ignore`, tags and paths filters, the pull request of the branch (a draft whose jobs
    skip drafts starts none, looked up on the repository the push goes to), and the jobs' `if:`; GitLab rules, Bitbucket `default` and `branches`, Azure `trigger` and `pr`. CI that
