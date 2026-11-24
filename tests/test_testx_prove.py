@@ -769,6 +769,38 @@ class JsReaderCostTests(unittest.TestCase):
             self.fail("the JS readers took more than 30 s on 5,000 nested declarations, hooks, tests or classes")
         self.assertEqual("read", p.stdout.strip(), p.stderr)
 
+    # a declaration on each of 20,000 lines that each end in an operator is one statement: each declaration ends where
+    # the one before it found the statement's end, so the readers take about a second here; a reader that scans from
+    # each declaration to that end takes many minutes
+    def test_a_statement_over_thousands_of_declaration_lines_reads_in_linear_time(self):
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+                "for line in ('const x = 1 +', 'let y = a ||', 'var z = b,'):\n"
+                "    text = (line + '\\n') * 20000 + '1;\\nfunction g() {\\n  return 1;\\n}\\n'\n"
+                "    testx._js_entries(text), testx._js_support(text), testx._js_parts(text)\n"
+                "    assert testx._rebuild_helpers('a.test.js', text, text.replace('return 1;', 'return 2;'))['text'] == "
+                "text\n"
+                "print('read')\n")
+        lib = str(Path(__file__).resolve().parents[1] / "lib")
+        try:
+            p = subprocess.run([sys.executable, "-I", "-c", code, lib], capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            self.fail("the JS readers took more than 20 s on 20,000 declaration lines of one statement")
+        self.assertEqual("read", p.stdout.strip(), p.stderr)
+
+    # every reader of one module gets the same masked text, and a rebuilt module equal to the base is the base's text,
+    # so the caches keyed by a text find it at once: a fix in each of 32,000 helpers between as many tests rebuilds in
+    # about 4 s here, where comparing each lookup's text with an equal copy takes a minute
+    def test_a_fix_among_thousands_of_helpers_and_tests_rebuilds_in_linear_time(self):
+        code = ("import sys\nsys.path.insert(0, sys.argv[1])\nfrom devkit import testx\n"
+                "text = \"function g() {\\n  return 1;\\n}\\ntest('t', () => {});\\n\" * 32000\n"
+                "assert testx._rebuild_helpers('a.test.js', text, text.replace('return 1', 'return 2'))['text'] == text\n"
+                "print('rebuilt')\n")
+        lib = str(Path(__file__).resolve().parents[1] / "lib")
+        try:
+            p = subprocess.run([sys.executable, "-I", "-c", code, lib], capture_output=True, text=True, timeout=25)
+        except subprocess.TimeoutExpired:
+            self.fail("rebuilding a fix in each of 32,000 helpers between as many tests took more than 25 s")
+        self.assertEqual("rebuilt", p.stdout.strip(), p.stderr)
 
 
 PY_SHARED = """

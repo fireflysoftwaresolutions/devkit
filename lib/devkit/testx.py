@@ -3683,10 +3683,12 @@ def _js_scan(text: str) -> tuple:
     return tuple(comments), tuple(literals)
 
 
+@functools.lru_cache(maxsize=16)
 def _js_mask(text: str, strings: bool = True) -> str:
     """`text` with the insides of its strings, template literals, regular expressions and comments blanked (new lines
     kept): brackets and keywords found in the result are code. With `strings` false only the comments are blanked, so
-    the result reads as the code does."""
+    the result reads as the code does. Kept for the last texts read: each reader of one text gets the same masked text,
+    which the caches keyed by it (_js_closes) then find at once instead of comparing it with an equal copy."""
     comments, literals = _js_scan(text)
     out = list(text)
     for a, b in list(comments) + ([(a, b) for a, b, _ in literals] if strings else []):
@@ -3740,11 +3742,25 @@ def _js_close(masked: str, at: int) -> int:
 _JS_CODE = re.compile(r"\S")
 
 
+@functools.lru_cache(maxsize=16)
+def _js_went_on(masked: str) -> dict:
+    """The statement ends _js_statement_end found in masked text, kept for the last texts read: {(index of a new line
+    where a statement went on, index of the last code before it): where that statement ends}."""
+    return {}
+
+
 def _js_statement_end(masked: str, at: int) -> int:
     """The index where the statement starting at `at` ends: a new line outside brackets after a complete expression.
-    A bracket is passed over whole, to where the depth falls back (_js_closes), and a run of blanks at once, so each
-    character is read once."""
+    A bracket is passed over whole, to where the depth falls back (_js_closes), and a run of blanks at once. A
+    statement that goes on at a new line ends where any other statement that went on there ended (what follows no
+    longer depends on where either started), so the declarations on each line of one long statement read it once."""
     k, n, last, closes = at, len(masked), -1, _js_closes(masked, False)
+    went_on, passed = _js_went_on(masked), []
+
+    def end(e):
+        for key in passed:
+            went_on[key] = e
+        return e
     while k < n:
         c = masked[k]
         if c in "([{":
@@ -3752,22 +3768,27 @@ def _js_statement_end(masked: str, at: int) -> int:
             last = k - 1
             continue
         if c in ")]}":
-            return k - 1
+            return end(k - 1)
         if c == ";":
-            return k
+            return end(k)
         if c == "\n":
+            known = last - 1 >= at  # from here on the scan reads as any other that came this far
+            if known and (k, last) in went_on:
+                return end(went_on[(k, last)])
             m = _JS_CODE.search(masked, k)
             nxt = m.start() if m else n
             if last >= at and not masked[max(at, last - 1):last + 1].endswith((
                     "=", ",", "(", "[", "{", "+", "-", "*", "/", "%", "&", "|", "?", ":", "<", ">", "!", ".", "=>")) and \
                     not masked[nxt:nxt + 2].startswith((".", "?", ":", "+", "-", "*", "/", "&&", "||", "=>")):
-                return k - 1
+                return end(k - 1)
+            if known:
+                passed.append((k, last))
             k = nxt
             continue
         if not c.isspace():
             last = k
         k += 1
-    return n - 1
+    return end(n - 1)
 
 
 @functools.lru_cache(maxsize=8)
@@ -4442,6 +4463,7 @@ def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
         out.append(old_text[at:s])
         at = e
     rebuilt = "".join(out) + old_text[at:]
+    rebuilt = old_text if rebuilt == old_text else rebuilt  # the caches keyed by a text find the base's at once
     again = read(rebuilt)
     if again is None or again[3] or (_significant(rebuilt, again) or ("",))[0] != a[0] or \
             [rebuilt[s:e] for s, e in again[1]] != bodies or \
