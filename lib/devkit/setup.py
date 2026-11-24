@@ -18,6 +18,7 @@ import shlex
 import sys
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import textwrap
@@ -3131,6 +3132,54 @@ DOCTOR_WARN = "warn"  # a doctor row's verdict besides True and False: worth kno
 DOCTOR_CHECKS_FAILED = 1  # the doctor's exit when it ran and a check failed (2: it refused to run; 70: it crashed)
 
 
+def _regular_text(f: Path):
+    """A regular file's text, a byte that is not UTF-8 replaced, or None when it does not open or is no regular file:
+    a FIFO or a device a repository ships in its place would hold the reader forever. Links are followed, as Claude
+    Code follows them."""
+    try:
+        fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            return stream.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def project_hooks_check(cwd=None) -> tuple:
+    """dev doctor's row for the current project's Claude settings (.claude/settings.json and settings.local.json in
+    the working folder and in its repository's top folder): a disableAllHooks that is not false turns every hook off,
+    devkit's included, from the session's start, where no ConfigChange hook sees it. The user settings have their own
+    check (policy.diff_claude). Each file is read as Claude Code reads it (policy.hooks_off)."""
+    from . import policy
+    cwd = Path(cwd or os.getcwd())
+    folders = [cwd]
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel")
+    if top:
+        folders.append(Path(top))
+    seen, bad = {os.path.realpath(CLAUDE_HOME / "settings.json")}, []
+    for folder in folders:
+        for name in ("settings.json", "settings.local.json"):
+            f = folder / ".claude" / name
+            if os.path.realpath(f) in seen:
+                continue
+            seen.add(os.path.realpath(f))
+            text = _regular_text(f)
+            if text is None:
+                continue
+            off = policy.hooks_off(text)
+            if off is not None:
+                bad.append((f, off))
+    detail = "; ".join(f"{tilde(f)} sets disableAllHooks to {v}" for f, v in bad)
+    fix = (f"set disableAllHooks to false or remove it in {', '.join(tilde(f) for f, _ in bad)}, then start a new "
+           f"session")
+    return ("Agents", "project settings keep hooks on", not bad, detail or "no project settings turn hooks off",
+            fix if bad else "")
+
+
 def doctor_job_ran(job: dict, rc) -> bool:
     """Whether a scheduled job's last run did its work. The doctor job exits DOCTOR_CHECKS_FAILED when a check it ran
     failed: it ran, and those checks are this doctor's own rows, so counting its exit too would count them twice."""
@@ -3402,6 +3451,7 @@ def doctor() -> int:
     check("Agents", "no project switches devkit off", not offs,
           "; ".join(f"{tilde(f)}: {w}" for f, w in offs[:3]) or "no .claude/.codex override disables devkit",
           "remove the override (devkit must stay active), or change devkit's own config")
+    check(*project_hooks_check())
     recent = [core.read_json(f, {}) or {} for f in (STATE / "sessions").glob("*.json")
               if time.time() - f.stat().st_mtime < 7 * 86400] if (STATE / "sessions").exists() else []
     by_agent = {}

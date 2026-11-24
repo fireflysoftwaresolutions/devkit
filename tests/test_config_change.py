@@ -448,6 +448,51 @@ class ConfigChangeTests(unittest.TestCase):
         self.assertIn(str(self.settings.name), out.getvalue())
         self.assertIn("1e400", out.getvalue())
 
+    def test_disable_all_hooks_in_the_project_or_local_settings_is_refused_and_left_in_the_file(self):
+        for name, source in (("settings.json", "project_settings"), ("settings.local.json", "local_settings")):
+            for value in (True, "true", 1, None):
+                with self.subTest(source=source, value=value):
+                    settings = {"permissions": {"allow": ["Bash(make test)"]}, "disableAllHooks": value}
+                    code, err, after = self.project_change(name, source, settings)
+                    self.assertEqual(code, 2)
+                    self.assertIn("disableAllHooks", err)
+                    self.assertIn("set it to false or remove it", err)
+                    self.assertEqual(after, settings)  # the repository's file, left as it is
+                    self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "disableAllHooks")
+        settings = {"permissions": {"allow": ["Bash(make test)"]}, "disableAllHooks": False}
+        self.assertEqual(self.project_change("settings.json", "project_settings", settings), (0, "", settings))
+        self.assertEqual(self.spawned, [])
+
+    def test_disable_all_hooks_and_a_devkit_variable_in_project_settings_are_both_refused(self):
+        code, err, after = self.project_change("settings.local.json", "local_settings", {
+            "disableAllHooks": True, "env": {"DEVKIT_GUARD": "off", "NODE_ENV": "test"}})
+        self.assertEqual(code, 2)
+        self.assertIn("env.DEVKIT_GUARD", err)
+        self.assertIn("disableAllHooks", err)
+        self.assertEqual(after, {"disableAllHooks": True, "env": {"NODE_ENV": "test"}})
+        self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "disableAllHooks, env.DEVKIT_GUARD")
+
+    def test_disable_all_hooks_in_project_settings_devkit_cannot_parse_is_refused(self):
+        f = self.root / "repo" / ".claude" / "settings.json"
+        f.parent.mkdir(parents=True)
+        for raw in (b'{"disableAllHooks": true, "note": "caf\xe9"}', b'{"disable\\u0041llHooks": 1, "x": NaN}'):
+            with self.subTest(raw=raw):
+                f.write_bytes(raw)
+                payload = {"session_id": "s1", "hook_event_name": "ConfigChange", "source": "project_settings",
+                           "file_path": str(f)}
+                err = io.StringIO()
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stderr(err), \
+                        self.assertRaises(SystemExit) as done:
+                    hooks.config_change("claude")
+                self.assertEqual(done.exception.code, 2)
+                self.assertIn("refused disableAllHooks", err.getvalue())
+                self.assertEqual(f.read_bytes(), raw)
+        f.write_bytes(b'{"disableAllHooks": false, "note": "caf\xe9"}')
+        payload = {"session_id": "s1", "hook_event_name": "ConfigChange", "source": "project_settings",
+                   "file_path": str(f)}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            hooks.config_change("claude")  # false turns nothing off: no refusal
+
     def test_a_settings_file_that_is_json_null_is_refused_as_no_settings_object(self):
         self.settings.write_text("null")
         code, err = self.change_written()

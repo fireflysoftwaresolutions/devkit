@@ -348,5 +348,73 @@ class BrokenPythonTests(unittest.TestCase):
         self.assertTrue(setup.python_runtime_check(modules=("zlib", "json"))[2])
 
 
+
+class ProjectHooksOffTests(unittest.TestCase):
+    """A project's or local Claude settings file that sets disableAllHooks turns every hook off, devkit's too, from the
+    session's start, where no ConfigChange hook sees it: dev doctor names the file and the fix."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.repo = self.root / "repo"
+        (self.repo / "src").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        p = mock.patch.object(setup, "CLAUDE_HOME", self.root / "home" / ".claude")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def settings(self, folder: Path, name: str, text: str) -> Path:
+        f = folder / ".claude" / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        return f
+
+    def test_a_project_setting_that_turns_hooks_off_fails_naming_the_file_and_the_fix(self):
+        for name, value in (("settings.json", "true"), ("settings.local.json", '"yes"'), ("settings.json", "1")):
+            with self.subTest(name=name, value=value):
+                f = self.settings(self.repo, name, '{"permissions": {}, "disableAllHooks": ' + value + "}")
+                group, row, ok, detail, fix = setup.project_hooks_check(self.repo / "src")
+                self.assertEqual((group, ok), ("Agents", False))
+                self.assertIn(f"{f.name} sets disableAllHooks to {value}", detail)
+                self.assertIn("set disableAllHooks to false or remove it", fix)
+                self.assertIn(f.name, fix)
+                f.unlink()
+
+    def test_a_file_devkit_cannot_parse_is_read_from_its_text(self):
+        self.settings(self.repo, "settings.local.json", '{"disable\\u0041llHooks": true, "x": NaN')
+        _, _, ok, detail, _ = setup.project_hooks_check(self.repo)
+        self.assertFalse(ok)
+        self.assertIn("settings.local.json sets disableAllHooks to true", detail)
+
+    def test_the_working_folder_outside_a_repository_is_checked_too(self):
+        plain = self.root / "plain"
+        self.settings(plain, "settings.json", '{"disableAllHooks": true}')
+        _, _, ok, detail, _ = setup.project_hooks_check(plain)
+        self.assertFalse(ok)
+        self.assertIn("settings.json sets disableAllHooks to true", detail)
+
+    def test_a_settings_path_that_is_no_regular_file_is_skipped_without_blocking(self):
+        # a repository can ship .claude/settings.local.json as a FIFO: opening it would wait for a writer forever
+        import threading
+        (self.repo / ".claude").mkdir()
+        os.mkfifo(self.repo / ".claude" / "settings.local.json")
+        rows = []
+        t = threading.Thread(target=lambda: rows.append(setup.project_hooks_check(self.repo)), daemon=True)
+        t.start()
+        t.join(10)
+        self.assertFalse(t.is_alive(), "dev doctor waited on a FIFO")
+        self.assertTrue(rows[0][2])
+
+    def test_hooks_left_on_pass(self):
+        self.settings(self.repo, "settings.json", '{"disableAllHooks": false, "env": {"NODE_ENV": "test"}}')
+        self.settings(self.repo, "settings.local.json", '{"note": "disableAllHooks: true is not set here"}')
+        self.assertEqual(setup.project_hooks_check(self.repo / "src")[2:4], (True, "no project settings turn hooks off"))
+
+    def test_the_user_settings_are_left_to_their_own_check(self):
+        home = self.root / "home"
+        self.settings(home, "settings.json", '{"disableAllHooks": true}')
+        self.assertTrue(setup.project_hooks_check(home)[2])
+
 if __name__ == "__main__":
     unittest.main()

@@ -1403,10 +1403,10 @@ def _not_settings(value) -> str:
 
 def config_change(agent: str):
     """Claude ConfigChange. The user settings: refuse changes to devkit-managed keys, then restore the file. The
-    project and local settings: refuse a DEVKIT_* variable in their env block and remove it; devkit
-    manages nothing else there. Exit 2 refuses; hooks.run turns any exception into exit 0, which would let the change
-    pass, so an error of the check itself refuses the change too, recorded as a devkit bug that blocked the
-    developer."""
+    project and local settings: refuse a DEVKIT_* variable in their env block and remove it, and refuse a
+    disableAllHooks that is not false, left in the file (the repository's; dev doctor names it); devkit manages
+    nothing else there. Exit 2 refuses; hooks.run turns any exception into exit 0, which would let the change pass, so
+    an error of the check itself refuses the change too, recorded as a devkit bug that blocked the developer."""
     try:
         _config_change(agent)
     except SystemExit:
@@ -1447,9 +1447,11 @@ def _config_change(agent: str):
         drift = [] if project else [d for d in policy.diff_claude(settings)
                                     if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
         env_keys, fixed = _devkit_env_fix(path, settings, managed=not project)
+        # project and local settings: every hook off, devkit's too (the user settings' is drift, policy.diff_claude)
+        off = settings.get("disableAllHooks", False) if project and isinstance(settings, dict) else False
     except Exception as e:  # a hook that crashed exits without blocking: the change would pass unchecked
         _refuse_unchecked(path, project, type(e).__name__)
-    if not drift and not env_keys:
+    if not drift and not env_keys and off is False:
         return
     unwritten = ""
     if fixed is not None:
@@ -1458,6 +1460,8 @@ def _config_change(agent: str):
         except OSError as e:  # still refused: the refusal says the values stay as the change left them
             unwritten = f"{type(e).__name__}: {e.strerror or e}"
     ks = sorted({d.key for d in drift} | {f"env.{k}" for k in env_keys})
+    if off is not False:
+        ks = sorted(ks + ["disableAllHooks"])
     keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
     if not project and core.older_copy():
         # The user settings differ from what this older copy would write, most likely because a newer release was
@@ -1479,10 +1483,16 @@ def _config_change(agent: str):
     from . import audit
     audit.record("config.blocked", path, keys, "blocked")
     if project:
-        done = (f"refused {keys} in {path}, and could not remove them ({unwritten}): remove them from the file"
-                if unwritten else f"removed {keys} from {path}")
-        print(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings file "
-              f"sets them: {done}. Change devkit's configuration with dev config.", file=sys.stderr)
+        said = []
+        if env_keys:
+            env = ", ".join(f"env.{k}" for k in env_keys)
+            done = (f"refused {env} in {path}, and could not remove them ({unwritten}): remove them from the file"
+                    if unwritten else f"removed {env} from {path}")
+            said.append(f"devkit's DEVKIT_* variables say who calls devkit and where its state lives, so no settings "
+                        f"file sets them: {done}. Change devkit's configuration with dev config.")
+        if off is not False:
+            said.append(_hooks_off_refusal(path, json.dumps(off)))
+        print(" ".join(said), file=sys.stderr)
         sys.exit(2)
     _quietly("config-change", policy._log, f"blocked change to devkit-managed keys: {keys}")
     _quietly("config-change", _spawn, ["config", "repair", "--quiet"])
@@ -1492,6 +1502,13 @@ def _config_change(agent: str):
           f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`."
           f"{more}", file=sys.stderr)
     sys.exit(2)
+
+
+def _hooks_off_refusal(path: str, value: str) -> str:
+    """The refusal of a disableAllHooks that is not false in a project's or local settings (config_change)."""
+    return (f"disableAllHooks turns every hook off, devkit's too: refused disableAllHooks {value} in {tilde(path)}, "
+            f"left in the file as written. In that file, set it to false or remove it: a new session reads it, and "
+            f"would start without devkit's hooks.")
 
 
 def _refuse_unchecked(path: str, project: bool, why: str):
@@ -1551,9 +1568,9 @@ def _refuse_unreadable(path: str, project: bool):
     config_change refuses a file it can read, and never rewritten: devkit names what to fix. The user settings are
     refused whole, since devkit cannot check the keys it manages there (policy.diff_claude), naming the DEVKIT_*
     variables they set (policy.devkit_env) that differ from devkit's. A project's or local settings are refused when
-    their text sets any DEVKIT_* variable. The text is read as Claude Code reads it, a byte that is not UTF-8
-    replaced; a file whose text devkit then fails to read, or a failure of devkit's own configuration, is refused
-    too: a hook that crashed would let the change pass."""
+    their text sets any DEVKIT_* variable, or a disableAllHooks that is not false (policy.hooks_off). The text is read
+    as Claude Code reads it, a byte that is not UTF-8 replaced; a file whose text devkit then fails to read, or a
+    failure of devkit's own configuration, is refused too: a hook that crashed would let the change pass."""
     from . import audit, policy
     try:
         raw = Path(path).read_bytes()
@@ -1583,13 +1600,19 @@ def _refuse_unreadable(path: str, project: bool):
         _refuse_unread_user(path, why, f" It sets devkit's DEVKIT_* variables {keys}: remove them." if keys else "",
                             keys)
     keys = ", ".join(f"env.{k}" for k in sorted(have))
-    if not keys:
+    off = policy.hooks_off(raw.decode("utf-8", "replace"))
+    if not keys and off is None:
         return
-    _log(f"config-change blocked, settings devkit cannot parse: {keys}")
-    audit.record("config.blocked", path, keys, "blocked")
-    print(f"devkit cannot parse {tilde(path)} ({why}), and it sets devkit's DEVKIT_* variables, which say who calls "
-          f"devkit and where its state lives: refused {keys}. Remove them from the file; change devkit's "
-          f"configuration with dev config.", file=sys.stderr)
+    _log(f"config-change blocked, settings devkit cannot parse: {keys or 'disableAllHooks'}")
+    audit.record("config.blocked", path, ", ".join(k for k in ("disableAllHooks" if off is not None else "", keys) if k),
+                 "blocked")
+    said = [f"devkit cannot parse {tilde(path)} ({why})."]
+    if keys:
+        said.append(f"It sets devkit's DEVKIT_* variables, which say who calls devkit and where its state lives: "
+                    f"refused {keys}. Remove them from the file; change devkit's configuration with dev config.")
+    if off is not None:
+        said.append(_hooks_off_refusal(path, off))
+    print(" ".join(said), file=sys.stderr)
     sys.exit(2)
 
 
