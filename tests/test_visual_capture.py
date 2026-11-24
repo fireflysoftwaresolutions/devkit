@@ -942,8 +942,8 @@ class TheBoundCoversTheBrowsersStart(unittest.TestCase):
 # to its close ends `exit_ms` after Playwright's own, the way a browser that disconnected keeps writing its profile
 # for a moment, or never ends (`exit_ms` null: a browser that does not answer). Prints, when node exits, how the
 # capture ended, how often the browser was closed, whether the capture killed a process group or looked for the
-# processes that name its folder, and, when the capture's folder was removed, whether that first close had ended and
-# how many processes still named the folder.
+# processes that name its folder (a listing that throws with `ps_fails`), and, when the capture's folder was removed,
+# whether that first close had ended and how many processes still named the folder.
 CLOSE_DRIVER = r"""
 const fs = require('fs');
 const path = require('path');
@@ -951,7 +951,10 @@ const childProcess = require('child_process');
 const [module, input] = [process.argv[1], JSON.parse(fs.readFileSync(0, 'utf8'))];
 const execFileSync = childProcess.execFileSync;
 childProcess.execFileSync = (file, args, options) => {
-  if (file === 'ps' && String(args).includes('pgid=')) out.looked = true;
+  if (file === 'ps' && String(args).includes('pgid=')) {
+    out.looked = true;
+    if (input.ps_fails) throw new Error('ps: operation not permitted');
+  }
   return execFileSync(file, args, options);
 };
 const capture = require(module);
@@ -986,7 +989,9 @@ fs.rmSync = (target, options) => {
   return rmSync(target, options);
 };
 capture.run(input.request, { chromium: { launch } }).then(
-  () => { out.code = null; }, (e) => { out.code = e.code; });
+  () => { out.code = null; }, (e) => { out.code = e.code; })
+  // a browser the capture could not stop keeps node's connection to it open
+  .then(() => { if (input.ps_fails) process.exit(0); });
 process.on('exit', () => { fs.writeSync(1, JSON.stringify(out)); });
 """
 
@@ -1010,11 +1015,12 @@ class TheBoundEndsWhatTheCaptureStarted(unittest.TestCase):
         self.server = _Server().__enter__()
         self.addCleanup(self.server.__exit__)
 
-    def close_at_the_bound(self, exit_ms):
+    def close_at_the_bound(self, exit_ms, **extra):
         payload = {"request": self.run_.request(f"{self.server.base}/page.html", recipe=recipe(steps=["wait 10000"])),
-                   "core": PLAYWRIGHT["core"], "bound": 3, "exit_ms": exit_ms}
+                   "core": PLAYWRIGHT["core"], "bound": 3, "exit_ms": exit_ms, **extra}
         p = noderun.run([NODE, "-e", CLOSE_DRIVER, str(MODULE)], json.dumps(payload), timeout=90,
                         env=self.run_.env(), tmpdir=str(self.run_.tmp), cwd=str(self.run_.work))
+        self.stderr = p.stderr
         self.assertEqual(p.returncode, 0, p.stderr[-2000:])
         out = json.loads(p.stdout)
         self.assertEqual(out["code"], "time-bound", out)
@@ -1039,6 +1045,28 @@ class TheBoundEndsWhatTheCaptureStarted(unittest.TestCase):
         ps = subprocess.run(["ps", "-A", "-ww", "-o", "command="], capture_output=True, text=True, timeout=30).stdout
         self.assertEqual([line for line in ps.splitlines() if str(self.run_.tmp) in line], [],
                          "the browser outlived the capture")
+
+    def test_a_process_listing_that_fails_at_the_bound_is_reported_on_stderr(self):
+        # the browser does not close and ps cannot list the processes, so the capture can neither stop the browser nor
+        # wait for it: it says so, for the bound's kill and for the wait after it
+        self.addCleanup(self._kill_named, self.run_.tmp)
+        out = self.close_at_the_bound(None, ps_fails=True)
+        self.assertTrue(out["looked"], out)
+        self.assertIn("capture: ps could not list the processes (ps: operation not permitted), so a browser still "
+                      f"running in {self.run_.tmp}", self.stderr)
+        self.assertIn("is neither stopped nor waited for", self.stderr)
+
+    @staticmethod
+    def _kill_named(folder):
+        # the browser this test left running, found by its profile in the run's folder
+        ps = subprocess.run(["ps", "-A", "-ww", "-o", "pgid=,command="], capture_output=True, text=True,
+                            timeout=30).stdout
+        for group in {int(line.split()[0]) for line in ps.splitlines() if str(folder) + "/" in line}:
+            if group > 1 and group != os.getpgrp():
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except OSError:
+                    pass
 
     def test_a_detector_still_running_at_the_bound_is_stopped_with_its_engine_and_the_capture_process_ends(self):
         # the bound leaves the capture time to reach its checks (step 8) on a loaded Mac; the detector it starts there
