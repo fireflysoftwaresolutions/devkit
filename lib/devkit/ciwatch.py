@@ -1719,8 +1719,8 @@ def _shell_calls(path, now: float) -> tuple:
             args = p.get("arguments") if p.get("type") == "function_call" else p.get("input")
             if isinstance(args, str):
                 try:
-                    args = json.loads(args)
-                except ValueError:
+                    args = core.load_json(args)
+                except ValueError:  # not JSON, or nested too deep: the text is the command
                     args = {"command": args}
             args = args if isinstance(args, dict) else {}
             calls.append(call(args.get("command") or args.get("cmd") or "", args.get("workdir") or "",

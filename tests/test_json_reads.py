@@ -28,8 +28,8 @@ _hermetic.activate()
 import test_acceptance_hooks as acceptance  # noqa: E402  (the hook entry run as an agent's harness runs it)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import (audit, bugs, canary, continuity, core, gates, language, lessonlint, lessons,  # noqa: E402
-                    scope, skillguard, state)
+from devkit import (audit, bugs, canary, ciwatch, continuity, core, gates, language, lessonlint,  # noqa: E402
+                    lessons, scope, skillguard, state)
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
 # inside every reader's window (canary reads the last 400 KB of a transcript).
@@ -274,6 +274,16 @@ class ForeignTextReaderTests(TempFolder):
                 self.assertIsNone(bugs.parse_record(bugs.RECORD_MARK + "\n" + block))
         self.assertEqual(bugs.parse_payload('```json\n{"devkit_bug": 1}\n```'), {"devkit_bug": 1})
 
+    def test_deep_codex_shell_arguments_read_as_unreadable_ones(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                args = '{"cmd": "git push", "x": ' + deep(d) + "}"
+                t = self.write("r.jsonl", lines(codex_call("exec_command", '{"cmd": "uv run pytest -q"}'),
+                                                codex_call("exec_command", args, "call_2"),
+                                                codex_call("exec_command", "not JSON", "call_3")))
+                calls, _ = ciwatch._shell_calls(str(t), 2_000_000_000)
+                self.assertEqual([c["command"] for c in calls], ["uv run pytest -q", args, "not JSON"])
+
 
 # --------------------------------------------------------------------------- the guard
 
@@ -327,8 +337,6 @@ REVIEWED = {
     ("cistatus", "_http"): (1, TOOL),
     ("ciwatch", "_final_jobs"): (1, TOOL),
     ("ciwatch", "_gh_pr"): (1, TOOL),
-    ("ciwatch", "_shell_calls"): (1, "OPEN: the arguments of a Codex shell call in a session's rollout, which its "
-                                     "model wrote"),
     ("ciwatch", "job_annotation"): (1, TOOL),
     ("cli", "_config_broken"): (1, CONFIG),
     ("cli", "_config_validate"): (1, SHIPPED),
