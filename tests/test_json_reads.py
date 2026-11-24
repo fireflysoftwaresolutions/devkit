@@ -477,7 +477,7 @@ class HookReaderTests(TempFolder):
             p.start()
             self.addCleanup(p.stop)
         with self.assertRaises(SystemExit) as stop, mock.patch("sys.stderr", io.StringIO()) as err:
-            hooks._refuse_unparsed_env(str(f), True)
+            hooks._refuse_unreadable(str(f), True)
         self.assertEqual(stop.exception.code, 2)
         self.assertIn("cannot read", err.getvalue())
         self.assertEqual([r["detail"] for r in audit.records(1, "config.blocked")], ["unreadable"])
@@ -655,6 +655,7 @@ class HookInputTests(acceptance.Sandbox):
                          "file_path": str(f), "cwd": str(self.repo)}))
                     self.assertEqual(code, 2)
                     self.assertIn(f"env.{key}", err)
+                    self.assertIn(f"(it nests deeper than {core.JSON_MAX_DEPTH} levels)", err)
                     self.assertEqual(f.read_text(), text)  # a file devkit cannot parse it cannot rewrite either
                     self.assertIn(f"env.{key}", self.audit("config.blocked")[-1]["detail"])
             with self.subTest(source="local_settings, no DEVKIT_* variable", depth=d):
@@ -718,6 +719,7 @@ class HookInputTests(acceptance.Sandbox):
                      "file_path": str(f), "cwd": str(self.repo)}))
                 self.assertEqual(code, 2)
                 self.assertIn(f"env.{key}", err)
+                self.assertIn("(it holds a byte that is not UTF-8)", err)
                 self.assertEqual(f.read_bytes(), raw)
                 self.assertIn(f"env.{key}", self.audit("config.blocked")[-1]["detail"])
         with self.subTest(source="local_settings, no DEVKIT_* variable"):
@@ -728,6 +730,31 @@ class HookInputTests(acceptance.Sandbox):
             self.assertEqual((code, err), (0, ""))
         self.assertEqual(self.failures(), [])
 
+
+    def test_config_change_refuses_a_user_settings_file_it_cannot_read(self):
+        """The hook checks the user settings for every key devkit manages (policy.diff_claude), and Claude Code still
+        reads a file with a byte that is not UTF-8 or nested past devkit's depth bound: a file devkit cannot read it
+        cannot check, so the change is refused whole, the file left as it is, and the refusal says why."""
+        user = self.home / ".claude" / "settings.json"
+        user.parent.mkdir(exist_ok=True)
+        cases = [(b'{"note": "caf\xe9"}', "(it holds a byte that is not UTF-8)"),
+                 (b'{"note": "cafe",', "(it is not JSON)")]
+        cases += [(('{"note": "cafe", "x": ' + deep(d) + "}").encode(),
+                   f"(it nests deeper than {core.JSON_MAX_DEPTH} levels)") for d in DEPTHS]
+        cases.append((b'{"note": "caf\xe9", "x": ' + deep(DEPTHS[0]).encode() + b"}",
+                      f"(it holds a byte that is not UTF-8, and it nests deeper than {core.JSON_MAX_DEPTH} levels)"))
+        for raw, why in cases:
+            with self.subTest(why=why, size=len(raw)):
+                user.write_bytes(raw)
+                code, _, err = self.dev_hook("config-change", json.dumps(
+                    {"session_id": acceptance.CLAUDE_SID, "hook_event_name": "ConfigChange", "source": "user_settings",
+                     "file_path": str(user), "cwd": str(self.repo)}))
+                self.assertEqual(code, 2)
+                self.assertIn(why, err)
+                self.assertIn("cannot check the settings devkit manages", err)
+                self.assertEqual(user.read_bytes(), raw)  # a file devkit cannot read it cannot rewrite either
+                self.assertEqual(self.audit("config.blocked")[-1]["detail"], "unreadable")
+        self.assertEqual(self.failures(), [])
 
 @unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
 class HookInputPython39Tests(HookInputTests):

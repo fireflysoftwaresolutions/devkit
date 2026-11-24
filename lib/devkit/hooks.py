@@ -1389,8 +1389,10 @@ def config_change(agent: str):
     path = data.get("file_path") or str(core.CLAUDE_HOME / "settings.json")
     project = data.get("source") in ("project_settings", "local_settings")
     settings = core.read_json(path, None)
+    if settings is None and not project and not os.path.lexists(path):
+        settings = {}  # no user settings: none of devkit's managed keys, checked as an empty file is
     if settings is None:
-        _refuse_unparsed_env(path, project)
+        _refuse_unreadable(path, project)
         return
     drift = [] if project else [d for d in policy.diff_claude(settings)
                                 if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
@@ -1430,36 +1432,79 @@ def config_change(agent: str):
     sys.exit(2)
 
 
-def _refuse_unparsed_env(path: str, project: bool):
-    """A settings file devkit cannot parse (not JSON, or nested deeper than core.JSON_MAX_DEPTH, which Claude Code
-    still reads) that sets DEVKIT_* variables in its text (policy.devkit_env): refused with exit 2 and recorded, as
-    config_change refuses them in a file it can parse. devkit cannot rewrite such a file, so it names the keys to
-    remove. A project's or local settings may set none; the user settings only devkit's own values. The text is read
-    as Claude Code reads it, a byte that is not UTF-8 replaced; a file devkit then fails to read is refused whole."""
+def _unreadable_why(raw: bytes) -> str:
+    """Why devkit cannot read a settings file's bytes, in the words of a refusal: a byte that is not UTF-8 (Claude Code
+    reads it replaced), not JSON, or nested deeper than core.JSON_MAX_DEPTH (Claude Code reads it all the same)."""
+    why = []
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        why.append("it holds a byte that is not UTF-8")
+    try:
+        core.load_json(raw.decode("utf-8", "replace"))
+    except json.JSONDecodeError:
+        why.append("it is not JSON")
+    except ValueError:  # load_json's own: past the parser's stack or JSON_MAX_DEPTH
+        why.append(f"it nests deeper than {core.JSON_MAX_DEPTH} levels")
+    return ", and ".join(why) or "it changed while devkit read it"
+
+
+def _refuse_unreadable(path: str, project: bool):
+    """A settings file devkit cannot read (core.read_json gave nothing: a byte that is not UTF-8, not JSON, or nested
+    deeper than core.JSON_MAX_DEPTH, all of which Claude Code may still read), recorded and refused with exit 2 as
+    config_change refuses a file it can read, and never rewritten: devkit names what to fix. The user settings are
+    refused whole, since devkit cannot check the keys it manages there (policy.diff_claude), naming the DEVKIT_*
+    variables they set (policy.devkit_env) that differ from devkit's. A project's or local settings are refused when
+    their text sets any DEVKIT_* variable. The text is read as Claude Code reads it, a byte that is not UTF-8
+    replaced; a file whose text devkit then fails to read, or a failure of devkit's own configuration, is refused
+    too: a hook that crashed would let the change pass."""
     from . import audit, policy
     try:
-        text = Path(path).read_bytes().decode("utf-8", "replace")
-    except OSError:  # gone or unreadable: no agent reads it either
-        return
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        if project:  # gone or unreadable: no agent reads it either
+            return
+        _refuse_unread_user(path, f"it does not open: {type(e).__name__}", "")
+    why = _unreadable_why(raw)
     try:
-        have = policy.devkit_env(text)
-        want = {} if project else {p[1]: json.dumps(v) for p, v in policy.claude_desired()[0].items()
-                                   if len(p) == 2 and p[0] == "env" and str(p[1]).startswith("DEVKIT_")}
+        have = policy.devkit_env(raw.decode("utf-8", "replace"))
     except Exception as e:  # what it sets is unknown: a hook that crashed would let the change pass
         _log(f"config-change blocked, settings devkit cannot read: {type(e).__name__}")
         audit.record("config.blocked", path, "unreadable", "blocked")
-        print(f"devkit cannot read {tilde(path)}, so it cannot tell whether it sets devkit's DEVKIT_* variables, "
-              f"which say who calls devkit and where its state lives: refused the change. Make the file plain JSON.",
-              file=sys.stderr)
+        print(f"devkit cannot read {tilde(path)} ({why}), so it cannot tell whether it sets devkit's DEVKIT_* "
+              f"variables, which say who calls devkit and where its state lives: refused the change. Make the file "
+              f"plain JSON.", file=sys.stderr)
         sys.exit(2)
-    keys = ", ".join(f"env.{k}" for k in sorted(k for k, v in have.items() if want.get(k) != v))
+    if not project:
+        try:
+            want = {p[1]: json.dumps(v) for p, v in policy.claude_desired()[0].items()
+                    if len(p) == 2 and p[0] == "env" and str(p[1]).startswith("DEVKIT_")}
+        except Exception as e:  # devkit's own configuration, not the file: still refused, the keys left unnamed
+            _log(f"config-change blocked, devkit's configuration failed: {type(e).__name__}")
+            _refuse_unread_user(path, why, f" devkit's own configuration also failed to load ({type(e).__name__}): "
+                                           f"run dev doctor.")
+        keys = ", ".join(f"env.{k}" for k in sorted(k for k, v in have.items() if want.get(k) != v))
+        _refuse_unread_user(path, why, f" It sets devkit's DEVKIT_* variables {keys}: remove them." if keys else "",
+                            keys)
+    keys = ", ".join(f"env.{k}" for k in sorted(have))
     if not keys:
         return
     _log(f"config-change blocked, settings devkit cannot parse: {keys}")
     audit.record("config.blocked", path, keys, "blocked")
-    print(f"devkit cannot parse {tilde(path)} (it is not JSON, or it nests deeper than {core.JSON_MAX_DEPTH} "
-          f"levels), and it sets devkit's DEVKIT_* variables, which say who calls devkit and where its state lives: "
-          f"refused {keys}. Remove them from the file; change devkit's configuration with dev config.",
+    print(f"devkit cannot parse {tilde(path)} ({why}), and it sets devkit's DEVKIT_* variables, which say who calls "
+          f"devkit and where its state lives: refused {keys}. Remove them from the file; change devkit's "
+          f"configuration with dev config.", file=sys.stderr)
+    sys.exit(2)
+
+
+def _refuse_unread_user(path: str, why: str, more: str, keys: str = ""):
+    """Refuse a change to the user settings devkit cannot read (_refuse_unreadable): exit 2, recorded with the DEVKIT_*
+    keys it names, or as unreadable."""
+    from . import audit
+    _log(f"config-change blocked, user settings devkit cannot read: {keys or why}")
+    audit.record("config.blocked", path, keys or "unreadable", "blocked")
+    print(f"devkit cannot read {tilde(path)} ({why}), so it cannot check the settings devkit manages there: refused "
+          f"the change. Make the file plain JSON (UTF-8, nested at most {core.JSON_MAX_DEPTH} levels).{more}",
           file=sys.stderr)
     sys.exit(2)
 

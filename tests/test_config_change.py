@@ -88,6 +88,47 @@ class ConfigChangeTests(unittest.TestCase):
     def test_user_settings_without_devkit_variables_pass(self):
         self.assertEqual(self.change(managed_settings()), (0, ""))
 
+    def test_removed_user_settings_are_refused_like_an_empty_file_and_repaired(self):
+        self.settings.write_text("{}")
+        empty = self.change_written()
+        self.settings.unlink()
+        code, err = self.change_written()
+        self.assertEqual((code, err), empty)
+        self.assertEqual(code, 2)
+        self.assertIn("devkit manages these settings", err)
+        self.assertEqual(self.spawned, [["config", "repair", "--quiet"]] * 2)
+
+    def test_user_settings_that_do_not_open_are_refused_and_left_alone(self):
+        self.settings.mkdir()  # there, but no file devkit can open: Claude Code's own read is unknown
+        code, err = self.change_written()
+        self.assertEqual(code, 2)
+        self.assertIn("(it does not open: IsADirectoryError)", err)
+        self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unreadable")
+        self.assertEqual(self.spawned, [])
+
+    def test_unreadable_user_settings_are_refused_when_devkit_configuration_fails_too(self):
+        self.settings.write_bytes(b'{"env": {"DEVKIT_GUARD": "off"}, "note": "caf\xe9"}')
+        with mock.patch.object(policy, "claude_desired", side_effect=KeyError("hooks")):
+            code, err = self.change_written()
+        self.assertEqual(code, 2)
+        self.assertIn("(it holds a byte that is not UTF-8)", err)
+        self.assertIn("devkit's own configuration also failed to load (KeyError)", err)
+        self.assertEqual(audit.records(1, action="config.blocked")[-1]["detail"], "unreadable")
+        self.assertEqual(self.spawned, [])  # a file devkit cannot read it never rewrites
+
+    def change_written(self):
+        """The ConfigChange hook on the user settings as they are on disk -> (exit code, stderr)."""
+        payload = {"session_id": "s1", "hook_event_name": "ConfigChange", "source": "user_settings",
+                   "file_path": str(self.settings)}
+        err = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stderr(err):
+            try:
+                hooks.config_change("claude")
+                code = 0
+            except SystemExit as e:
+                code = e.code
+        return code, err.getvalue()
+
     def project_change(self, name, source, settings):
         f = self.settings.parent.parent / "repo" / ".claude" / name
         f.parent.mkdir(parents=True, exist_ok=True)
