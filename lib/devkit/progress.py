@@ -7167,7 +7167,10 @@ def scratch_names(member: str, step: str = "") -> list:
 def lane_scratch(run: dict, aid: str) -> list:
     """The folders lane `aid` writes in (scratch_names of its crew member): the folder of the step it runs
     (launch_step) first, then that of each other step it has run (`assigned_steps`), latest first, so the folder its
-    brief named stays its own after another step joins it, then the member's plain folder. A helper writes in the
+    brief named stays its own after another step joins it, then the member's plain folder. A past step's folder stays
+    the lane's only while no other live lane owns that step (a reopened step another lane took), and a step whose
+    name gives another step's folder (folder_twin, a run saved before such names were refused) has none: its lane
+    writes in the member's plain folder, the one `dev progress assign` lets its scope name. A helper writes in the
     folders of the member that launched it. [] for a lane that names no crew member."""
     chain = lane_chain(run, aid)
     if not chain:
@@ -7180,12 +7183,21 @@ def lane_scratch(run: dict, aid: str) -> list:
         m = None
     if not m or m.get("main"):
         return []
+    plan, agents = run.get("plan") or [], run.get("agents") or {}
+
+    def own(name):  # its folder is this lane's: no other live lane owns the step, and no other step gives that folder
+        x = next((p for p in plan if isinstance(p, dict) and p.get("name") == name), None)
+        owner = (x or {}).get("owner") or "main"
+        theirs = owner != "main" and owner not in chain and (agents.get(owner) or {}).get("state") == "running"
+        return not theirs and not folder_twin(plan, name, skip=x)
+
     step = launch_step(run, chain[-1])
     steps = ([step["name"]] if step else []) + [n for n in reversed(head.get("assigned_steps") or [])
                                                  if isinstance(n, str) and n]
     out = []
     for name in steps:
-        out += [f for f in scratch_names(m["id"], name)[:-1] if f not in out]
+        if own(name):
+            out += [f for f in scratch_names(m["id"], name)[:-1] if f not in out]
     return out + scratch_names(m["id"])
 
 

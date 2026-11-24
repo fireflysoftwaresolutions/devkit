@@ -233,5 +233,51 @@ class OldTwinRunAddStepTests(unittest.TestCase):
                              ["base", "api v2", "api-v2", "web"])
 
 
+class MovedStepFolderTests(ClaudeSessionCase):
+    """The Senior engineer's first lane runs api, closes it and takes ui; api is reopened, and a second lane launched
+    for it takes it. The first lane kept scratchpad/neo-api/ among its folders, the past step's, so both lanes wrote
+    in it: a past step's folder stays a lane's only while no other live lane owns that step."""
+
+    def test_a_reopened_step_a_second_lane_took_leaves_the_first_lanes_folders(self):
+        launch("a1", "devkit:neo", "Neo: api", at=T0 + 2)
+        pg.step("api built", which="api", check="✓ 2 of 2 tests", from_agent="a1", now=T0 + 60)
+        pg.reopen("api", why="needs more", now=T0 + 120)
+        pg.assign("api", "Neo", now=T0 + 130, why="two lanes of one member")
+        launch("a2", "devkit:neo", "Neo: api", at=T0 + 140)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual({s["name"]: s.get("owner") for s in run["plan"]}, {"api": "a2", "ui": "a1"})
+        self.assertEqual(pg.lane_scratch(run, "a2"), ["neo-api", "neo"])
+        self.assertEqual(pg.lane_scratch(run, "a1"), ["neo-ui", "neo"])
+
+
+class OldTwinRunFolderTests(ClaudeSessionCase):
+    """A run saved before such names were refused holds "Diseño" and "diseno", whose lanes' folder would be one,
+    scratchpad/neo-diseno/. Each lane, and the brief of each step, names the member's plain folder instead, as
+    `dev progress assign` lets each scope name only that one."""
+
+    def setUp(self):
+        super().setUp()
+        run = pg.load_run("claude", "s1")
+        run["plan"] += [pg._new_step("Diseño", 30), pg._new_step("diseno", 30)]
+        pg.run_path("claude", "s1").write_text(json.dumps(run))
+        for step in ("Diseño", "diseno"):
+            pg.assign(step, "Neo", now=T0 + 1, why="two lanes of one member")
+
+    def test_two_lanes_of_steps_that_share_a_folder_write_in_the_members_plain_folder(self):
+        launch("a1", "devkit:neo", "Neo: Diseño", at=T0 + 2)
+        launch("a2", "devkit:neo", "Neo: diseno", at=T0 + 3)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual({s["name"]: s.get("owner") for s in run["plan"]}["diseno"], "a2")
+        self.assertEqual(pg.lane_scratch(run, "a1"), ["neo"])
+        self.assertEqual(pg.lane_scratch(run, "a2"), ["neo"])
+
+    def test_the_brief_of_a_step_that_shares_a_folder_names_the_members_plain_folder(self):
+        neo = crew.member("neo")
+        with tempfile.TemporaryDirectory() as d:
+            text = ui.ANSI_RE.sub("", crew.brief_text(neo, "Design it.", "", step="diseno", cwd=d))
+        self.assertIn("`scratchpad/neo/`", text)
+        self.assertNotIn("neo-diseno", text)
+
+
 if __name__ == "__main__":
     unittest.main()

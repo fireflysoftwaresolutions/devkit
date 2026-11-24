@@ -976,6 +976,19 @@ def _step_name(step) -> str:
     return "" if w.isdigit() else w
 
 
+def _folder_step(step_name: str) -> str:
+    """The step whose lane folder a brief names: `step_name`, or '' when another step of the current session's run
+    gives its lanes the same scratch folder (progress.folder_twin, a run saved before such names were refused), so
+    the brief names the member's plain folder, the one its lane writes in (progress.lane_scratch)."""
+    try:
+        from . import progress
+        plan = progress.normalize(progress.load_run(*progress.current_session()) or {}).get("plan") or []
+        s = next((x for x in plan if isinstance(x, dict) and x.get("name") == step_name), None)
+        return "" if s and progress.folder_twin(plan, step_name, skip=s) else step_name
+    except Exception:
+        return step_name
+
+
 def show_text(m: dict, roster=None) -> str:
     roster = roster or load()
     tier = {"strong": "the session's model at high effort", "standard": "the session's model and effort",
@@ -1125,9 +1138,9 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
                  '`dev crew ask "<question>"`.')
     # each lane keeps its scratch files in its own folder of the session scratchpad, for its step when it has one
     # (progress.scratch_names, the folder the launch hook makes), so no lane overwrites another's, not even one of
-    # the same member
+    # the same member; a step whose name gives another step's folder has none (_folder_step)
     from . import progress
-    folder = (progress.scratch_names(m["id"], step_name) or [m["id"]])[0]
+    folder = (progress.scratch_names(m["id"], _folder_step(step_name)) or [m["id"]])[0]
     b += ["", f"Your scratch folder is `scratchpad/{folder}/` in the session scratchpad: put logs, probes and other "
               "temporary files there, never at the scratchpad's top level or in another member's or another lane's "
               "folder."]

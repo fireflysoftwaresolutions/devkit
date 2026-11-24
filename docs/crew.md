@@ -605,8 +605,8 @@ lanes on different branches, never share a folder. The step's name is written in
 hyphens: `Session graph (v2)` becomes `session-graph-v2`. To keep two steps out of one folder, `dev progress
 start` and `dev progress add` refuse a step whose name differs from another step's only in case, accents, spaces, or
 punctuation (`api v2` and `api-v2`), and `dev crew delegate` numbers its step apart (`API v2 (2)`). A run saved
-before that rule may hold two such steps: it still takes other steps. A file tool's write outside the
-lane's folder gets advice
+before that rule may hold two such steps: it still takes other steps, and the lanes and briefs of those two name the
+member's plain folder. A file tool's write outside the lane's folder gets advice
 in the member's context. A helper uses its member's lane folder. The shared top level and the other lanes' folders
 hold their work, so a cleanup that stays in its own folder never deletes another lane's files.
 
@@ -617,7 +617,8 @@ A Claude Code lane learns its step only when it binds to its launch, just after 
 at its first tool call), so devkit creates the step's folder then; until then the lane has the member's plain folder.
 When another step joins a running lane (a review that joins a reviewer's lane, or the next step of the member),
 devkit creates that step's folder at the lane's next tool call, and the lane keeps the folder of each step it ran:
-the folder its brief named stays its own.
+the folder its brief named stays its own, until another running lane owns that step (a reopened step that a new
+lane took).
 A read-only member writes only inside its own folder; a shell write elsewhere is detected and counted for it (see
 [Guardrails](#guardrails)). Nothing is created when the session has no scratchpad, or for a helper that names no
 crew member.
