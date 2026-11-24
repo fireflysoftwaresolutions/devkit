@@ -3,9 +3,11 @@
 This page lists every `dev` command and option. `dev help` (or `dev -h`) prints the grouped list, and
 `dev <command> -h` prints the options of one command.
 
-A `<query>` is a project id, a project name, a path, or part of an id. A path may be any folder of the project; with a
-worktree's path the command works in that worktree and its branch. When more than one project matches and you are in a
-terminal, an fzf picker opens.
+A `<query>` is a project id, a project name, a path, or part of an id. A path starts with `/`, `~`, or `.` and may be
+any folder of the project; with a worktree's path the command works in that worktree and its branch. An exact id,
+alias, or path wins over an exact name, which wins over a name that starts with the query, then one that holds it.
+When two or more projects match equally well and not exactly one of them is on this Mac, the command lists each match
+with the command for it and exits with `2`: devkit never guesses.
 
 Commands that fail print a reason on stderr and exit with a non-zero code: `2` for usage problems (an unknown or
 ambiguous project, a bad argument, a missing `--why`), `1` for an operation that did not complete, `70` when devkit
