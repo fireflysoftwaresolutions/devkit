@@ -1823,7 +1823,9 @@ only to the agent. When the list is busy, does not parse, or cannot be written, 
 drift, and `dev ext update --apply` says it was not recorded. It says why for each agent's copy it updates (Claude Code's
 and Codex's without `--agent`) and goes on with the next: a list another devkit process holds exits with `75`, so run
 the command again in a moment; a list that does not parse, is unsafe, or cannot be written exits with `2`, with the
-repair to make first. The command exits with the highest code. `dev ext ack` exits the same way.
+repair to make first. When the copies fail in different ways, the command exits with the code that asks the most of
+you: `2` (repair) before `1` (failed), and `1` before `75` (run it again). `dev ext ack`, which writes one list,
+exits with `75` or `2` by the same rule.
 
 ### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
 
