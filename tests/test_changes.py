@@ -185,6 +185,15 @@ class MergeTests(unittest.TestCase):
                 run = subprocess.run([lint, "CHANGELOG.md"], cwd=d, capture_output=True, text=True, timeout=120)
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
+    def test_mixed_line_endings_become_the_most_common_one(self):
+        lines = (PREAMBLE + "\n" + OLD).split("\n")
+        want = changes.merge(PREAMBLE + "\n" + OLD, "26.11.28", "2026-11-23", [changes.parse(LOGIN, "changes/b.md")])
+        for first, rest in (("\n", "\r\n"), ("\r\n", "\n")):
+            with self.subTest(first=first, rest=rest):
+                text = lines[0] + first + rest.join(lines[1:])
+                out = changes.merge(text, "26.11.28", "2026-11-23", [changes.parse(LOGIN, "changes/b.md")])
+                self.assertEqual(out, want.replace("\n", rest))
+
     def test_an_unreleased_section_stays_on_top(self):
         unreleased = "## [Unreleased]\n\n### Added\n\n- Not yet.\n"
         out = changes.merge(PREAMBLE + "\n" + unreleased + "\n" + OLD, "26.11.28", "2026-11-23",

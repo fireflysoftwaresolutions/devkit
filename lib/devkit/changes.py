@@ -248,9 +248,12 @@ def merge(changelog: str, version: str, date: str, parts: list) -> str:
     the newest release (the first `##` heading that names a version), below an Unreleased section and any other `##`
     heading; with no release yet, at the end, before the link definitions there. The link definitions at the end of
     the file stay there when the version's section is the last one, too. Headings in fenced code blocks are code.
-    The text keeps the line ending of the CHANGELOG's first line: \\r\\n or \\n."""
+    The text keeps the CHANGELOG's most common line ending, \\r\\n or \\n, everywhere (the first line's on a tie), so a
+    file with a stray ending of the other kind keeps the one most of its lines have."""
+    crlf = changelog.count("\r\n")
+    lf = changelog.count("\n") - crlf
     first = re.search(r"\r?\n", changelog)
-    newline = first.group(0) if first else "\n"
+    newline = "\r\n" if crlf > lf or (crlf == lf and first and first.group(0) == "\r\n") else "\n"
     lines = changelog.replace("\r\n", "\n").split("\n")
     code = _fenced(lines)
     head = re.compile(r"^##\s*\[?v?" + re.escape(version) + r"\]?(\s|$)")
