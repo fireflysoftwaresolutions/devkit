@@ -1893,7 +1893,60 @@ class LedgerFolderTests(TextPinCase):
         return json.dumps({"session": sid, "tool_use_id": tid, "ts": ts, "pin_by": "text", "background": True,
                            "caller": "main", "agent": "claude", "cmd": "dev watch --wait"})
 
+    # in a background record's reader: a linked session folder is never listed, read or cleaned
+    def test_kept_background_records_are_never_read_or_removed_through_a_linked_session_folder(self):
+        outside = self.linked()
+        now = time.time()
+        (outside / ".toolu_k.background").write_text(self.kept_record("s-link", "toolu_k", now))
+        (outside / ".toolu_old.background").write_text(self.kept_record("s-link", "toolu_old", now - 1000))
+        self.assertEqual(identity._kept_background("s-link", now), [])
+        self.assertEqual(sorted(os.listdir(outside)), [".toolu_k.background", ".toolu_old.background"])
+        # swapped for a link once the reader opened it: the stale record of the folder it opened goes, nothing outside
+        folder = pg.CALLS / "s-swap"
+        folder.mkdir()
+        (folder / ".toolu_old.background").write_text(self.kept_record("s-swap", "toolu_old", now - 1000))
+        moved, real = self.root / "moved", os.listdir
+
+        def swap(p):
+            if not os.path.islink(folder):
+                os.rename(folder, moved)
+                os.symlink(outside, folder)
+            return real(p)
+        with mock.patch.object(os, "listdir", swap):
+            self.assertEqual(identity._kept_background("s-swap", now), [])
+        self.assertTrue(os.path.islink(folder))  # the swap happened
+        self.assertEqual(os.listdir(moved), [])
+        self.assertEqual(sorted(os.listdir(outside)), [".toolu_k.background", ".toolu_old.background"])
+
+    # a background call's record and a call's contest flag are never written or removed through a linked folder
+    def test_a_call_never_keeps_or_drops_its_marks_through_a_linked_session_folder(self):
+        outside = self.linked()
+        (outside / ".toolu_k.contested").write_text("")
+        entry = json.loads(self.kept_record("s-link", "toolu_k", time.time()))
+        identity.keep_background(entry)
+        identity._drop_marks("s-link", "toolu_k")
+        self.assertEqual(os.listdir(outside), [".toolu_k.contested"])
+
     # the hook's ledger writes (call_opened, call_note) never change the mode of a folder a link points to, nor
+    # a ledger entry, a kept record or the ledger's own folder that is a FIFO never blocks a reader: it reads as none
+    def test_a_fifo_in_the_ledger_never_blocks_a_reader(self):
+        import threading
+        folder = pg.CALLS / "s1"
+        folder.mkdir(parents=True)
+        os.mkfifo(folder / "toolu_f.json")
+        os.mkfifo(folder / ".toolu_g.background")
+        got = {}
+
+        def read():
+            got["entry"] = pg.call_entry({"session_id": "s1", "tool_use_id": "toolu_f"})
+            got["kept"] = identity._read_kept(folder / ".toolu_g.background")
+            pg.call_closed({"session_id": "s1", "tool_use_id": "toolu_f", "hook_event_name": "PostToolUse"})
+            got["done"] = True
+        t = threading.Thread(target=read, daemon=True)
+        t.start()
+        t.join(10)
+        self.assertEqual(got, {"entry": {}, "kept": None, "done": True})
+
     # a ledger entry that is a link is never read, whatever it points to
     def test_a_ledger_entry_that_is_a_link_is_never_read(self):
         folder = pg.CALLS / "s1"

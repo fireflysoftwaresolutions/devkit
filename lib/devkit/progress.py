@@ -596,10 +596,24 @@ def _dev_arg_hashes(cmd: str, cwd) -> list:
     return list(dict.fromkeys(args_hash(d) for d in found if d))
 
 
+def _read_ledger(sid: str, name: str):
+    """File `name` of session `sid`'s ledger folder, read through that folder opened without following a link, and
+    never through a link or from anything but a regular file (_read_entry_at); None when it cannot be read."""
+    try:
+        from . import identity
+        fd = identity.ledger_folder(sid)
+    except OSError:
+        return None
+    try:
+        return _read_entry_at(fd, name)
+    finally:
+        os.close(fd)
+
+
 def call_entry(data: dict) -> dict:
-    """The open ledger entry of this call; {} when it has none."""
+    """The open ledger entry of this call; {} when it has none (or it cannot be read as one: _read_ledger)."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
-    e = core.read_json(CALLS / sid / f"{tid}.json", None) if tid and sid else None
+    e = _read_ledger(sid, f"{tid}.json") if tid and sid else None
     return e if isinstance(e, dict) else {}
 
 
@@ -646,12 +660,9 @@ def call_closed(data: dict, ended: str = ""):
         return
     entry = CALLS / sid / f"{tid}.json"
     # a call refused before it ran, or denied at its permission check, never started a shell: no record of it
-    e = core.read_json(entry, None) if data.get("hook_event_name") not in ("PreToolUse", "PermissionDenied") else None
+    e = _read_ledger(sid, entry.name) if data.get("hook_event_name") not in ("PreToolUse", "PermissionDenied") else None
     if not isinstance(e, dict) or not e.get("ts") or e.get("closed"):
-        try:
-            entry.unlink()
-        except OSError:
-            pass
+        _unlink_ledger(sid, entry.name)
         return
     now = time.time()
     background = _ran_in_background(e, data)
@@ -681,10 +692,22 @@ def call_closed(data: dict, ended: str = ""):
                f"the record of closed shell calls could not be written ({type(err).__name__}): the call's entry stays "
                f"in the ledger as a later call for {SHELL_KEEP} s", "flagged", tool_use_id=tid, session=sid[:40])
         return
+    _unlink_ledger(sid, entry.name)
+
+
+def _unlink_ledger(sid: str, name: str):
+    """Remove file `name` of session `sid`'s ledger folder, through that folder opened without following a link."""
     try:
-        entry.unlink()
+        from . import identity
+        fd = identity.ledger_folder(sid)
+    except OSError:
+        return
+    try:
+        os.unlink(name, dir_fd=fd)
     except OSError:
         pass
+    finally:
+        os.close(fd)
 
 
 def shells_since(sid: str, since: float, now: float | None = None, strict: bool = False) -> list:
@@ -871,19 +894,22 @@ def open_calls(sid: str, now: float | None = None, closed_too: bool = False) -> 
 
 
 def _read_entry_at(fd: int, name: str):
-    """Ledger entry `name` of the open session folder `fd`, never through a link; None when it cannot be read."""
+    """Ledger entry `name` of the open session folder `fd`, never through a link and only from a regular file (a FIFO
+    is never waited on); None when it cannot be read."""
     try:
         f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     except OSError:
         return None
     try:
         with os.fdopen(f, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
             return json.loads(fh.read())
     except (OSError, ValueError):
         return None
 
 
-def _open_calls_at(fd: int, sid: str, now: float, closed_too: bool) -> list:
+def _open_calls_at(fd: int, sid: str, now: float, closed_too: bool, budget: list | None = None) -> list:
     """open_calls in the session folder open at `fd`: every name is read and removed from that folder (dir_fd)."""
     out = []
     for name in os.listdir(fd):

@@ -609,12 +609,21 @@ def _drop_marks(sid: str, tid: str):
     if not tid:
         return
     pin = pin_path(sid, tid)
-    for f in (used_path(sid, tid), uses_path(sid, tid), contest_path(sid, tid), pin,
-              pin.with_name(pin.name + ".contested")):
+    for f in (used_path(sid, tid), uses_path(sid, tid), pin, pin.with_name(pin.name + ".contested")):
         try:
             f.unlink()
         except OSError:
             pass
+    try:  # the contest flag, in the session's folder opened without following a link
+        folder = ledger_folder(sid)
+    except OSError:
+        return
+    try:
+        os.unlink(contest_path("-", tid).name, dir_fd=folder)
+    except OSError:
+        pass
+    finally:
+        os.close(folder)
 
 
 def note_closed(agent: str, sid: str, tid: str, entry: dict | None = None, ended: str = ""):
@@ -1385,37 +1394,61 @@ def background_path(sid: str, tid: str):
     return progress.CALLS / progress._safe_name(sid) / f".{progress._safe_name(tid)}.background"
 
 
+def ledger_folder(sid: str) -> int:
+    """Session `sid`'s folder in the ledger, open for reading and never through a link (O_NOFOLLOW): a descriptor the
+    caller closes, through which every name in it is read, written and removed (dir_fd). OSError when it is missing,
+    a link or anything but a folder."""
+    import stat
+    from . import progress
+    fd = os.open(progress.CALLS / progress._safe_name(sid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError(errno.ENOTDIR, "not a folder", str(sid))
+    return fd
+
+
 def keep_background(entry: dict):
     """The PostToolUse of a background shell call (it closes as soon as it starts), text-pinned or carrying its token:
     its entry is kept for BACKGROUND_KEEP_S so the dev command it starts can still name its caller for a read or a
-    wait (never a state change)."""
+    wait (never a state change). Written in the session's folder opened without following a link (ledger_folder)."""
     if entry.get("pin_by") not in ("text", "shell", "dev") or not entry.get("background"):
         return
-    path = background_path(str(entry.get("session") or ""), str(entry.get("tool_use_id") or ""))
-    for _ in range(2):  # a file or link already there is removed, never written through
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        except FileExistsError:
+    name = background_path("-", str(entry.get("tool_use_id") or "")).name
+    try:
+        folder = ledger_folder(str(entry.get("session") or ""))
+    except OSError:
+        return
+    try:
+        for _ in range(2):  # a file or link already there is removed, never written through
             try:
-                os.unlink(path)
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+            except FileExistsError:
+                try:
+                    os.unlink(name, dir_fd=folder)
+                except OSError:
+                    return
+                continue
             except OSError:
                 return
-            continue
-        except OSError:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(entry))
             return
-        with os.fdopen(fd, "w") as fh:
-            fh.write(json.dumps(entry))
-        return
+    finally:
+        os.close(folder)
 
 
-def _read_kept(path):
-    """A kept background record, never through a link; None when it cannot be read as one."""
+def _read_kept(path, dir_fd: int | None = None):
+    """A kept background record, never through a link, and only a regular file (a FIFO is never waited on); None when
+    it cannot be read as one. `dir_fd`: the open folder `path` (a name) is in."""
+    import stat
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except OSError:
         return None
     try:
         with os.fdopen(fd) as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
             e = json.loads(fh.read(1 << 20))
     except (OSError, ValueError):
         return None
@@ -1423,24 +1456,30 @@ def _read_kept(path):
 
 
 def _kept_background(sid: str, now: float) -> list:
-    """The background shell calls of session `sid` kept for their reads and waits; older ones go."""
-    from . import progress
+    """The background shell calls of session `sid` kept for their reads and waits; older ones go. The session's folder
+    is opened once, never through a link (ledger_folder), and every record is read and removed through it."""
     out = []
     try:
-        files = list((progress.CALLS / progress._safe_name(sid)).glob(".*.background"))
+        folder = ledger_folder(sid)
     except OSError:
         return []
-    for f in files:
-        e = _read_kept(f)
-        if e is None or now - float(e.get("ts") or 0) > BACKGROUND_KEEP_S:
-            try:
-                f.unlink()
-            except OSError:
-                pass
-            if e is not None:  # its pin and use marks, kept with it, go with it
-                _drop_marks(sid, str(e.get("tool_use_id") or ""))
-            continue
-        out.append(e)
+    try:
+        names = [n for n in os.listdir(folder) if n.startswith(".") and n.endswith(".background")]
+        for name in names:
+            e = _read_kept(name, folder)
+            if e is None or now - float(e.get("ts") or 0) > BACKGROUND_KEEP_S:
+                try:
+                    os.unlink(name, dir_fd=folder)
+                except OSError:
+                    pass
+                if e is not None:  # its pin and use marks, kept with it, go with it
+                    _drop_marks(sid, str(e.get("tool_use_id") or ""))
+                continue
+            out.append(e)
+    except OSError:
+        return out
+    finally:
+        os.close(folder)
     return out
 
 
