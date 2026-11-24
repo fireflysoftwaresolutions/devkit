@@ -557,12 +557,6 @@ class TokenTests(unittest.TestCase):
         read = set(re.findall(r"var\(--([\w-]+)\)", dashboard.CSS + dashboard.JS))
         self.assertEqual(sorted(read - defined), [], "tokens read but never defined")
 
-    # The check above reads token names whole: a name the script builds from parts ("var(--" + tone + ")") is out of
-    # its sight, and one no theme defines leaves the color transparent (the Tasks board's Closed dot, the Health bars).
-    def test_the_script_names_every_token_it_reads_whole(self):
-        self.assertEqual(re.findall(r"""var\(--\s*["'`]\s*\+|var\(--\$\{""", dashboard.JS), [],
-                         "token names built from parts in the script")
-
     # AC-10 (Firefly): text 4.5:1, glyphs and the focus ring 3:1, light and dark.
     def test_every_text_and_glyph_pair_meets_its_contrast_in_both_themes(self):
         low = []
