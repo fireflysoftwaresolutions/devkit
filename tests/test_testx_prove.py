@@ -483,26 +483,116 @@ class UnseenLineBreakTests(unittest.TestCase):
                 self.assertEqual({"text": None, "first": first}, rebuilt("test/util.test.mjs", before, after))
 
 
-class HelperIndentGuardTests(unittest.TestCase):
-    # a JS reader that takes a regular expression for a division, or a division for a regular expression, can misplace
-    # a helper's closing brace and read the statements after the helper as its body: a line of code in a helper's body
-    # (outside strings and template literals) indented no deeper than the helper's first line keeps the module, named
-    # by that line
-    def test_a_line_of_code_not_indented_under_its_helper_keeps_the_module(self):
-        head = 'import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n'
-        t = 'test("t", () => {\n  assert.equal(globalThis.LIMIT, %s);\n});\n'
-        cases = {  # name: (the code between the imports and the test, the first difference)
-            "a regular expression after a closing parenthesis": (
-                "function h(s) {\n  if (s) /'/.test(s); }\nglobalThis.LIMIT = %s;\nif (globalThis.LIMIT) /}/.test('x');"
-                "\n\n", "a line of code in a helper's body not indented under the helper (line 6)"),
-            "a division after a variable named of": (
-                "const of = 4;\nfunction h() {\n  return of / 2; // {\n}\nglobalThis.LIMIT = %s;\nlet r = of / 2; // }"
-                "\n\n", "a line of code in a helper's body not indented under the helper (line 7)"),
+JS_IMPORTS = 'import assert from "node:assert/strict";\nimport { test } from "node:test";\n\n'
+JS_LIMIT_TEST = 'test("t", () => {\n  assert.equal(globalThis.LIMIT, %s);\n});\n'
+JS_H_TEST = 'test("t", () => {\n  assert.equal(h(), 1);\n});\n'
+
+
+def node_strips_types():
+    """Whether the node on PATH can strip TypeScript's types (module.stripTypeScriptTypes, Node 22.13 and later)."""
+    node = shutil.which("node")
+    return bool(node) and subprocess.run(
+        [node, "-e", "process.exit(typeof require('node:module').stripTypeScriptTypes === 'function' ? 0 : 1)"],
+        capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed, so Node cannot read the bodies here")
+class JsNodeReadTests(unittest.TestCase):
+    # after the reader cuts a JS/TS module, Node reads each helper body and each test it cut, all of a module in one
+    # run: a body Node does not read as one whole function body keeps the module, named by it. A misread boundary
+    # leaves a brace or a token open in Node's view, so this holds for misreads nobody has found: here two the reader
+    # still makes, with the code after the helper indented as if inside it. A body only an async function, a generator
+    # or a class method reads (await, yield, super, a private name, import.meta) is one function body too: its fix
+    # rebuilds
+    def test_a_fix_rebuilds_only_when_node_reads_each_body_as_one_function_body(self):
+        helpers = {
+            "await": "async function h() {\n  return await %s;\n}\n\n",
+            "yield": "function* h() {\n  yield %s;\n}\n\n",
+            "super and a private name": "class B extends Object {\n  #n = 1;\n\n  h() {\n"
+                                        "    return super.toString() && this.#n * %s;\n  }\n}\n\n",
+            "import.meta": "function h() {\n  return import.meta.url && %s;\n}\n\n",
         }
-        for name, (mid, first) in cases.items():
+        for name, mid in helpers.items():
             with self.subTest(name):
-                self.assertEqual({"text": None, "first": first},
-                                 rebuilt("test/util.test.mjs", head + mid % "2" + t % "2", head + mid % "3" + t % "3"))
+                before = JS_IMPORTS + mid % "1" + JS_H_TEST
+                self.assertEqual({"text": before, "first": ""},
+                                 rebuilt("test/util.test.mjs", before, JS_IMPORTS + mid % "2 - 1" + JS_H_TEST))
+        cases = {  # name: (the code between the imports and the test, the line of the helper)
+            "a division after a variable named of": (
+                "const of = 4;\nfunction h() {\n  return of / 2; // {\n  }\n  globalThis.LIMIT = %s;\n"
+                "  let r = of / 2; // }\n\n", 5),
+            "a regular expression after a closing parenthesis": (
+                "function h(s) {\n  if (s) /'/.test(s); }\n  globalThis.LIMIT = %s;\n"
+                "  if (globalThis.LIMIT) /}/.test('x');\n\n", 4),
+            "a division after a variable named of, the code after the helper not indented": (
+                "const of = 4;\nfunction h() {\n  return of / 2; // {\n}\nglobalThis.LIMIT = %s;\nlet r = of / 2; // }"
+                "\n\n", 5),
+            "a regular expression after a closing parenthesis, the code after the helper not indented": (
+                "function h(s) {\n  if (s) /'/.test(s); }\nglobalThis.LIMIT = %s;\nif (globalThis.LIMIT) /}/.test('x');"
+                "\n\n", 4),
+        }
+        for name, (mid, line) in cases.items():
+            with self.subTest(name):
+                got = rebuilt("test/util.test.mjs", JS_IMPORTS + mid % "2" + JS_LIMIT_TEST % "2",
+                              JS_IMPORTS + mid % "3" + JS_LIMIT_TEST % "3")
+                self.assertIsNone(got["text"])
+                self.assertRegex(got["first"], rf"^a helper's body that Node does not read as one function body "
+                                               rf"\(line {line}\): \S")
+
+    # TypeScript's types are stripped (by Node) before Node reads a body; a body of a .jsx or .tsx module that may hold
+    # JSX (a <), which Node does not read, keeps the module
+    def test_a_typescript_body_is_read_without_its_types_and_one_that_may_hold_jsx_keeps_the_module(self):
+        if not node_strips_types():
+            self.skipTest("this node cannot strip TypeScript's types (Node 22.13 and later)")
+        typed = "function h(x: number = 1): number {\n  return (x as number) * %s;\n}\n\n"
+        before = JS_IMPORTS + typed % "1" + JS_H_TEST
+        self.assertEqual({"text": before, "first": ""},
+                         rebuilt("test/util.test.ts", before, JS_IMPORTS + typed % "(2 - 1)" + JS_H_TEST))
+        jsx = "function h() {\n  return <p>Don't</p> && %s;\n}\n\n"
+        for f in ("test/util.test.jsx", "test/util.test.tsx"):
+            with self.subTest(f):
+                self.assertEqual({"text": None, "first": "a helper's body that Node does not read as one function body "
+                                                         "(line 4): it may hold JSX, which Node does not read"},
+                                 rebuilt(f, JS_IMPORTS + jsx % "1" + JS_H_TEST, JS_IMPORTS + jsx % "2 - 1" + JS_H_TEST))
+
+    # with no node to read the bodies, nothing vouches for the reader's cut: the module keeps its change
+    def test_without_node_the_module_keeps_its_change(self):
+        mid = "function h() {\n  return %s;\n}\n\n"
+        with mock.patch.dict(os.environ, {"PATH": ""}):
+            got = rebuilt("test/util.test.mjs", JS_IMPORTS + mid % "1" + JS_H_TEST,
+                          JS_IMPORTS + mid % "2 - 1" + JS_H_TEST)
+        self.assertEqual({"text": None, "first": "no Node to read the bodies the rebuild cuts (node is not on PATH)"},
+                         got)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed, so Node cannot read the bodies here")
+class JsReaderFixTests(unittest.TestCase):
+    # three constructs the JS reader misread, so their modules kept a helper fix: a postfix ++ or -- before a division,
+    # a brace in a template literal's expression (an object literal, an inner template), and an HTML-like comment of a
+    # .cjs module (<!-- anywhere, --> at the start of a line). Their fix rebuilds now. A .js module may be a script or a
+    # module, where such a comment is code: Node reads its bodies both ways, so a body that holds one keeps the module
+    def test_a_postfix_operator_a_template_brace_and_an_html_like_comment_are_read_as_the_engine_does(self):
+        cases = {  # name: (file, the code between the imports and the test)
+            "a postfix ++ before a division": (
+                "test/x.test.mjs", "let i = 4;\nfunction h() {\n  const a = i++ / 2; // {\n  return %s;\n}\n\n"),
+            "a postfix -- before a division": (
+                "test/x.test.mjs", "let i = 4;\nfunction h() {\n  const a = i-- / 2; // {\n  return %s;\n}\n\n"),
+            "an object literal and an inner template in a template's expression": (
+                "test/x.test.mjs", "function h() {\n  const s = `${ {}.x ?? `{` }`;\n  return %s;\n}\n\n"),
+            "<!-- in a .cjs module": ("test/x.test.cjs", "function h() {\n  return %s; <!-- {\n}\n\n"),
+            "--> at the start of a line of a .cjs module": ("test/x.test.cjs",
+                                                            "function h() {\n  return %s;\n  --> {\n}\n\n"),
+        }
+        for name, (f, mid) in cases.items():
+            with self.subTest(name):
+                before = JS_IMPORTS + mid % "1" + JS_H_TEST
+                self.assertEqual({"text": before, "first": ""},
+                                 rebuilt(f, before, JS_IMPORTS + mid % "2 - 1" + JS_H_TEST))
+        got = rebuilt("test/x.test.js", JS_IMPORTS + cases["<!-- in a .cjs module"][1] % "1" + JS_H_TEST,
+                      JS_IMPORTS + cases["<!-- in a .cjs module"][1] % "2 - 1" + JS_H_TEST)
+        self.assertIsNone(got["text"])
+        self.assertRegex(got["first"], r"^a helper's body that Node does not read as one function body \(line 4\): "
+                                       r"as a module, \S")
 
 
 class FailureKindTests(unittest.TestCase):
@@ -700,8 +790,8 @@ class SupportRerunTests(unittest.TestCase):
             rc, out, err = dev(r, "prove", "--json", "--runs", "1")
         self.assertEqual({"test_a.CalcTests.test_x": "cannot be proven: without the change it fails on AttributeError, "
                                                      "not on an assertion",
-                          "test_a.CalcTests.test_mul": "cannot be proven: without the change it fails on AttributeError, "
-                                                       "not on an assertion",
+                          "test_a.CalcTests.test_mul": "cannot be proven: without the change it fails on "
+                                                       "AttributeError, not on an assertion",
                           "test_b.BTests.test_add": "does not test the change"},
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
 
@@ -713,8 +803,8 @@ class SupportRerunTests(unittest.TestCase):
             rc, out, err = dev(r, "prove", "--json", "--runs", "1")
         self.assertEqual({"test_a.CalcTests.test_x": "cannot be proven: without the change it fails on AttributeError, "
                                                      "not on an assertion",
-                          "test_a.CalcTests.test_mul": "cannot be proven: without the change it fails on AttributeError, "
-                                                       "not on an assertion"},
+                          "test_a.CalcTests.test_mul": "cannot be proven: without the change it fails on "
+                                                       "AttributeError, not on an assertion"},
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
 
     @unittest.skipUnless(shutil.which("node"), "node is not installed, so the node runner cannot run here")
@@ -723,15 +813,16 @@ class SupportRerunTests(unittest.TestCase):
         before = head + "function h() {\n  return null;\n}\n\n" + 'test("a", () => assert.equal(util.value(), 1));\n'
         after = before.replace("return null;", "return { k: 1 };") + \
             'test("other", () => assert.equal(util.other(), 3));\n' + \
-            'test("tripled", () => {\n  const k = h().k;\n  assert.equal((util.other ?? (() => 0))() * 3 * k, 9);\n});\n'
+            'test("tripled", () => {\n  const k = h().k;\n' \
+            '  assert.equal((util.other ?? (() => 0))() * 3 * k, 9);\n});\n'
         with Env() as e:
             r = e.repo({"package.json": NODE_PACKAGE, "src/util.mjs": "export const value = () => 1;\n",
                         "test/util.test.mjs": before})
             edit(r, {"src/util.mjs": "export const value = () => 1;\nexport const other = () => 3;\n",
                      "test/util.test.mjs": after})
             rc, out, err = dev(r, "prove", "--json", "--runs", "1")
-        self.assertEqual({"test/util.test.mjs::other": "cannot be proven: without the change it fails on TypeError, not "
-                                                       "on an assertion",
+        self.assertEqual({"test/util.test.mjs::other": "cannot be proven: without the change it fails on TypeError, "
+                                                       "not on an assertion",
                           "test/util.test.mjs::tripled": "proves the change"},
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
 

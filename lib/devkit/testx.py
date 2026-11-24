@@ -3633,34 +3633,40 @@ def _js_word_before(text: str, i: int) -> str:
 
 
 @functools.lru_cache(maxsize=16)
-def _js_scan(text: str) -> tuple:
+def _js_scan(text: str, html: bool = False) -> tuple:
     """Where the comments and the literals of JS/TS `text` lie, in one pass -> (comments, literals): comments, [(start,
     end)] of each comment; literals, [(start, end, kind)] of the inside of each string ("string"), template literal
-    ("template") and regular expression ("regex")."""
-    comments, literals, i, n, last = [], [], 0, len(text), ""
+    ("template", its expressions with it) and regular expression ("regex"). A template literal's expressions are read
+    as code, their braces, strings, comments and inner templates too, so none of those ends it. A ++ or -- after a
+    value is postfix, a value itself: a slash after it divides. `html`: <!--, and --> at the start of a line (after
+    blanks and comments only), open a comment to the end of the line, as a script reads them (.js and .cjs files)."""
+    comments, literals, i, n, last, fresh = [], [], 0, len(text), "", True
+    templates = []  # each template literal whose expression is being read: [where its inside starts, braces open]
     while i < n:
         c = text[i]
+        if c == "`" or c == "}" and templates and not templates[-1][1]:
+            # template text, from its backtick or from the brace that ends an expression, to its backtick or a ${
+            start = templates.pop()[0] if c == "}" else i + 1
+            j = i + 1
+            while j < n and text[j] != "`" and not text.startswith("${", j):
+                j += 2 if text[j] == "\\" else 1
+            if j < n and text[j] != "`":
+                templates.append([start, 0])
+                i, last = j + 2, "{"
+            else:
+                literals.append((start, min(j, n), "template"))
+                i, last = j + 1, "`"
+            fresh = False
+            continue
+        if templates and c in "{}":
+            templates[-1][1] += 1 if c == "{" else -1
         if c in "'\"":
             j = i + 1
             while j < n and text[j] != c and text[j] != "\n":
                 j += 2 if text[j] == "\\" else 1
             literals.append((i + 1, min(j, n), "string"))
-            i, last = j + 1, c
-        elif c == "`":
-            j, depth = i + 1, 0
-            while j < n and (text[j] != "`" or depth):
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text.startswith("${", j):
-                    depth, j = depth + 1, j + 2
-                    continue
-                if text[j] == "}" and depth:
-                    depth -= 1
-                j += 1
-            literals.append((i + 1, min(j, n), "template"))
-            i, last = j + 1, c
-        elif text.startswith("//", i):
+            i, last, fresh = j + 1, c, False
+        elif text.startswith("//", i) or html and (text.startswith("<!--", i) or fresh and text.startswith("-->", i)):
             j = text.find("\n", i)
             j = n if j < 0 else j
             comments.append((i, j))
@@ -3669,6 +3675,7 @@ def _js_scan(text: str) -> tuple:
             j = text.find("*/", i + 2)
             j = n if j < 0 else j + 2
             comments.append((i, j))
+            fresh = fresh or "\n" in text[i:j]
             i = j
         elif c == "/" and (last in _JS_REGEX_BEFORE or last == "a" and _js_word_before(text, i) in _JS_REGEX_AFTER):
             j, cls = i + 1, False
@@ -3681,12 +3688,30 @@ def _js_scan(text: str) -> tuple:
                     cls = False
                 j += 1
             literals.append((i + 1, min(j, n), "regex"))
-            i, last = j + 1, "/"
+            i, last, fresh = j + 1, "/", False
+        elif c in "+-" and text.startswith(c + c, i):
+            post = last in (")", "]") or last == "a" and _js_word_before(text, i) not in _JS_REGEX_AFTER
+            i, last, fresh = i + 2, ")" if post else c, False
         else:
-            if not c.isspace():
-                last = c if not (c.isalnum() or c in "_$") else "a"
+            if c == "\n":
+                fresh = True
+            elif not c.isspace():
+                last, fresh = c if not (c.isalnum() or c in "_$") else "a", False
             i += 1
+    literals += [(start, n, "template") for start, _ in templates]  # templates the text ends inside
     return tuple(comments), tuple(literals)
+
+
+@functools.lru_cache(maxsize=16)
+def _js_html_view(text: str) -> str:
+    """`text` of a .js or .cjs module with each HTML-like comment (<!--, and --> at the start of a line) opened by //
+    in place, so the JS readers read it as a script does: a comment to the end of the line."""
+    out = None
+    for a, _ in _js_scan(text, True)[0]:
+        if text.startswith(("<!--", "-->"), a):
+            out = out or list(text)
+            out[a:a + 2] = "//"
+    return text if out is None else "".join(out)
 
 
 @functools.lru_cache(maxsize=16)
@@ -4182,9 +4207,8 @@ def _js_layout(text):
     test's whole lines (the outermost test of nested ones) with the comment and blank lines right above it; bodies:
     the inside of the braces of each helper's body (a function, a const, let or var that holds one, a hook, a class
     method: the entries _js_entries reads); blank: the blank lines no string or template literal holds; problem: the
-    first test that shares a line with other code, which no rebuild can splice, or the first line of code in a helper's
-    body indented no deeper than the helper's first line (a misread regular expression or division can move the brace
-    that closes the body past the statements after it), or ''."""
+    first test that shares a line with other code, which no rebuild can splice, or ''. Whether a body or a test is cut
+    where the engine reads it, Node's own reading tells (_js_whole_bodies)."""
     masked, (_, literals) = _js_mask(text), _js_scan(text)
     lines, starts, nl = text.split("\n"), _line_starts(text), _newlines(text)
     inside = set()  # lines that start inside a string or a template literal
@@ -4213,8 +4237,6 @@ def _js_layout(text):
             s -= 1
         tests.append((starts[s - 1], starts[e] if e < len(starts) else len(text)))
 
-    def width(k):  # how deep line k is indented
-        return len(re.match(r"[ \t]*", lines[k - 1]).group().expandtabs(8))
     bodies = []
     for (cls, _, _), s, e, kind, _ in _js_entries(text):
         a, b = starts[s - 1], starts[e] - 1 if e < len(starts) else len(text)
@@ -4224,12 +4246,6 @@ def _js_layout(text):
         close = _js_close(masked, body.end() - 1) if body else b
         if body and close < b:
             bodies.append((body.end(), close))
-            k = bisect.bisect_left(starts, body.end()) + 1  # each line that starts inside the body
-            while not problem and k <= len(starts) and starts[k - 1] <= close:
-                if k not in inside and masked[starts[k - 1]:min(close, starts[k - 1] + len(lines[k - 1]))].strip() \
-                        and width(k) <= width(s):
-                    problem = f"a line of code in a helper's body not indented under the helper (line {k})"
-                k += 1
     return sorted(tests), sorted(bodies), blank, problem
 
 
@@ -4442,6 +4458,43 @@ _BREAK_NAME = {"\r": "a carriage return without a new line", "\u2028": "a line s
                "\u2029": "a paragraph separator U+2029"}
 
 
+_JS_READ = Path(__file__).with_name("testx_jscheck.cjs")  # Node's reading of the bodies a rebuild cuts
+
+
+def _js_whole_bodies(f, sides) -> str:
+    """Whether Node reads each helper body and each test that the reader cut from JS/TS test module `f` as one whole
+    function body (testx_jscheck.cjs), each side's being (its text, its layout as _js_layout reads it, where: '' or
+    ' at the base'), all of them in one node run: a reader that misplaced a boundary leaves a brace or a token open
+    there in Node's view. -> '' when it reads them all, else the first it does not read, named by its line and Node's
+    reason, or why Node could not read them."""
+    items = []  # (kind, line, where, text): each side's cuts in the order they come
+    for t, layout, where in sides:
+        cuts = sorted([(s, e, "test") for s, e in layout[0]] + [(s, e, "body") for s, e in layout[1]])
+        items += [(kind, _line_of(t, s), where, t[s:e]) for s, e, kind in cuts]
+    texts = list(dict.fromkeys(x[3] for x in items))
+    if not texts:
+        return ""
+    node = shutil.which("node")
+    if not node:
+        return "no Node to read the bodies the rebuild cuts (node is not on PATH)"
+    try:
+        p = subprocess.run([node, "--no-warnings", str(_JS_READ)], input=json.dumps({"file": f, "bodies": texts}),
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                           env={k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"})
+        answers = json.loads(p.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        return f"Node could not read the bodies the rebuild cuts ({type(e).__name__})"
+    if not isinstance(answers, list) or len(answers) != len(texts):
+        return "Node could not read the bodies the rebuild cuts (it gave no answer for each)"
+    why = dict(zip(texts, answers))
+    for kind, line, where, t in items:
+        if why[t]:
+            what = "a helper's body that Node does not read as one function body" if kind == "body" else \
+                "a test that Node does not read as whole statements"
+            return f"{what} (line {line}{where}): {why[t]}"
+    return ""
+
+
 def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
     """Test module `f` (`text`, its text now) rebuilt for the run without the change from `old_text`, its text at the
     base. When its text outside its tests (_py_layout, _js_layout: each test with the comment and blank lines right
@@ -4457,9 +4510,11 @@ def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
     Else {"text": the rebuilt module, or None when the module keeps its change; "first": the first difference that keeps
     it, else ''}."""
     py = _lang(f) == "py"
+    # a .js or .cjs module may be a script, where an HTML-like comment is a comment: its readers read it so
+    view = _js_html_view if Path(f).suffix.lower() in (".js", ".cjs") else (lambda t: t)
 
     def read(t):
-        return _py_layout(t, functions) if py else _js_layout(t)
+        return _py_layout(t, functions) if py else _js_layout(view(t))
     old, now = read(old_text), read(text)
     if old is None or now is None:
         return None
@@ -4475,7 +4530,7 @@ def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
     if a is None or b is None:
         return {"text": None, "first": "a test inside a helper's body"}
     if a[0] != b[0]:
-        parts = (lambda t: _py_parts(t, functions)) if py else _js_parts
+        parts = (lambda t: _py_parts(t, functions)) if py else (lambda t: _js_parts(view(t)))
         o, n = parts(old_text), parts(text)
         same = o is None or n is None or [x[0] for x in o] == [x[0] for x in n]
         return {"text": None, "first": _differing_line(old_text, text, a, b) if same else _first_difference(o, n)}
@@ -4500,6 +4555,10 @@ def _rebuild_helpers(f, old_text, text, functions=True) -> dict | None:
             [rebuilt[s:e] for s, e in again[1]] != bodies or \
             [rebuilt[s:e] for s, e in again[0]] != [text[s:e] for s, e in now[0]]:
         return {"text": None, "first": "a helper or a test that shares its lines with other code"}
+    if not py:  # Node's own reading vouches for each body and test the reader cut, or keeps the module
+        why = _js_whole_bodies(f, ((text, now, ""), (old_text, old, " at the base")))
+        if why:
+            return {"text": None, "first": why}
     return {"text": rebuilt, "first": ""}
 
 
