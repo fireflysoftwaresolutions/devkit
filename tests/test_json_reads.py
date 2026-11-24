@@ -13,6 +13,7 @@ reason it is safe. Every file here is temporary. Run: python3 -m unittest tests.
 /usr/bin/python3 too, for Python 3.9).
 """
 import ast
+import io
 import json
 import sys
 import tempfile
@@ -26,10 +27,11 @@ import _hermetic  # noqa: E402
 
 _hermetic.activate()
 import test_acceptance_hooks as acceptance  # noqa: E402  (the hook entry run as an agent's harness runs it)
+import test_mcp  # noqa: E402  (the MCP server run as the Claude Desktop extension runs it)
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import (audit, bugs, canary, ciwatch, continuity, core, gates, language, lessonlint,  # noqa: E402
-                    lessons, scope, skillguard, state)
+                    lessons, mcp, scope, skillguard, state)
 
 # 1,000 levels: past the parser of Python 3.9 to 3.13. 150,000 levels: past the parser of Python 3.15 too, and still
 # inside every reader's window (canary reads the last 400 KB of a transcript).
@@ -284,6 +286,47 @@ class ForeignTextReaderTests(TempFolder):
                 calls, _ = ciwatch._shell_calls(str(t), 2_000_000_000)
                 self.assertEqual([c["command"] for c in calls], ["uv run pytest -q", args, "not JSON"])
 
+    def test_the_mcp_server_answers_a_deep_message_with_a_parse_error_and_serves_on(self):
+        for d in DEPTHS:
+            with self.subTest(depth=d):
+                call = ('{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "devkit_status", '
+                        '"arguments": {"x": ' + deep(d) + "}}}")
+                out = io.BytesIO()
+                server = mcp.Server(io.BytesIO((call + "\n" + json.dumps({"jsonrpc": "2.0", "id": 8, "method": "ping"})
+                                                + "\n").encode()), out)
+                self.assertEqual(server.serve(), 0)
+                replies = [json.loads(ln) for ln in out.getvalue().splitlines()]
+                self.assertEqual([(r["id"], (r.get("error") or {}).get("code")) for r in replies],
+                                 [(None, mcp.PARSE_ERROR), (8, None)])
+
+
+class McpServerTests(unittest.TestCase):
+    """`dev mcp` end to end, as the Claude Desktop extension starts it (-I -S): a client message nested too deep gets
+    a JSON-RPC parse error, and the server answers the next one."""
+
+    python = sys.executable
+
+    def test_a_deep_message_gets_a_parse_error(self):
+        with test_mcp.TempHome() as h:
+            s = test_mcp.Session([self.python, "-I", "-S", str(ROOT / "bin" / "dev"), "mcp"], h.env(), h.home)
+            try:
+                s.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                         "clientInfo": {"name": "test", "version": "1"}})
+                for d in DEPTHS:
+                    with self.subTest(depth=d):
+                        s.send('{"jsonrpc": "2.0", "id": 70, "method": "tools/call", "params": {"name": "devkit_status",'
+                               ' "arguments": {"x": ' + deep(d) + "}}}")
+                        reply = s.recv()
+                        self.assertEqual((reply["id"], reply["error"]["code"]), (None, mcp.PARSE_ERROR))
+                        self.assertEqual(s.request("ping")["result"], {})
+            finally:
+                self.assertEqual(s.close(), 0)
+
+
+@unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
+class McpServerPython39Tests(McpServerTests):
+    python = "/usr/bin/python3"
+
 
 # --------------------------------------------------------------------------- the guard
 
@@ -395,7 +438,6 @@ REVIEWED = {
     ("lessonevents", "_events"): (1, OWN),
     ("lessonevents", "prune"): (1, OWN),
     ("lessonrules", "_timing_commands"): (1, OWN),
-    ("mcp", "Server.serve"): (1, "OPEN: a JSON-RPC message from the MCP client, whose tool arguments a model wrote"),
     ("mcp", "call_tool"): (1, TOOL),
     ("messaging", "index_page"): (1, COMMAND),
     ("messaging", "read_page"): (1, COMMAND),
