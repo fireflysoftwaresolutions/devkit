@@ -252,8 +252,9 @@ files.
   exactly that `dev` command; a compound state change is refused with the fix to run it as one plain `dev` command.
   Any crew member can turn the root-thread mapping off for the rest of the session with one call that carries the
   root's thread id: devkit records it as `codex.thread-shared`, and you then run plain `dev` commands.
-  Outside bypass mode (Claude Code) or a never-asks policy (Codex), only calls that visibly run `dev` carry the
-  token, so permission prompts do not grow; never add an `export:*` allow rule.
+  Outside bypass mode (Claude Code) or a never-asks policy (Codex), a call of one plain `dev` command goes out as
+  written, so your allow rules match it, and devkit names its caller by the call's own shell; never add an
+  `export:*` allow rule.
   Read-only crew commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, `owner`, and
   `dev crew raci` without `--set`.
   After a compaction, Claude Code gives your conversation a new session id; devkit moves your open run and its

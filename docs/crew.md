@@ -542,12 +542,35 @@ change a token-verified call makes names, in `dev progress history`, how devkit 
 | Agent and mode | Which calls carry the token | Its form |
 | --- | --- | --- |
 | Claude Code in `bypassPermissions` mode, and Codex with approval policy `never`, in sh, bash, or zsh | Every shell call of the main session and of each member | devkit's prefix, ending in `export DEVKIT_CALL=<value>; readonly DEVKIT_CALL;` |
-| Claude Code in another permission mode, and other shells, such as fish | Only a call that visibly runs one plain `dev` command | `DEVKIT_CALL=<value> dev …` |
-| Codex with an approval policy that asks | Only a plain `dev progress`, `dev crew`, `dev watch`, or `dev session` call, which devkit rewrites anyway | `DEVKIT_CALL=<value> dev …` |
+| Claude Code in another permission mode | No plain `dev` call: it goes out as written, and its own shell names its caller (below) | None |
+| Codex with an approval policy that asks, in sh, bash, or zsh | Only a plain `dev progress`, `dev crew`, `dev watch`, or `dev session` call whose input is its command alone, which devkit rewrites anyway. Any other call of one plain `dev` command goes out as written, and its own shell names its caller (below) | `DEVKIT_CALL=<value> dev …` |
+| Codex in another shell, such as fish | Only a plain `dev progress`, `dev crew`, `dev watch`, or `dev session` call; where Codex asks, one whose input is its command alone | `DEVKIT_CALL=<value> dev …` |
 
-Outside bypass mode on Claude Code, or a never-asks approval policy on Codex, only calls that visibly run `dev` carry
-the token, so you get no more permission prompts than before. Never add an allow rule for `export` (such as
-`Bash(export:*)`): it would allow any command that starts with an export.
+**A plain `dev` call goes out as written where the agent checks your rules.** In Claude Code outside
+`bypassPermissions`, and in Codex where it asks and would not apply devkit's rewrite, devkit leaves a call of one plain
+`dev` command unchanged. An allow rule such as `Bash(dev progress:*)` then matches the text the agent wrote, and you get
+no more permission prompts than before. The `dev` command names its caller by facts the kernel keeps, never by the text
+alone (`how` is `text-pinned`):
+
+- exactly one open call of the session types that command;
+- the call's own shell sits right below the agent, its argument list holds exactly that command, and it started after
+  the call opened, within the ten minutes you may take to approve it;
+- no later call of the session could own that shell: each call that opened before the shell started has a shell of its
+  own that runs its own command, or, on Claude Code, ran in the foreground and got its result;
+- on Codex, where a member may run, a `dev` process that replaced its call's shell carries its caller's own thread id;
+- the call runs one `dev` command, which pins that shell.
+
+Two open calls that type the same command name nobody for a state change or a wait (`calls.text-ambiguous`). A shell
+that a later call could own, a second process that claims the same command, or a second state change or wait under the
+call marks it contested: devkit refuses it for every claimant and records `calls.pin-contested`, and you run the command
+again. A read marks nothing and falls back to the call ledger's rules. A state change made under a call that then got
+no result (refused, failed, denied, expired, or still open when its session ended) is recorded as
+`calls.text-use-without-result`. A background call closes as soon as it starts, so devkit keeps its record for 60
+seconds; in that time it names its caller for a read or a wait, never for a state change.
+[Security policy › What the call token protects](../SECURITY.md#what-the-call-token-protects) gives the whole rule
+and the races it leaves open.
+
+Never add an allow rule for `export` (such as `Bash(export:*)`): it would allow any command that starts with an export.
 
 **A state change devkit cannot verify is refused.** It is never taken as the tech lead's. The commands that change
 a run, a session's records, the crew's records, work items, or plans need a caller the token verifies; reads and
@@ -570,12 +593,13 @@ These commands need the tech lead, so a member's call is refused for them:
 
 **On Codex.** Where devkit stamps every call (approval policy `never`, which `dev setup` writes), the token decides
 and `CODEX_THREAD_ID` decides no state change. Where Codex asks, a plain `dev progress`, `dev crew`, `dev watch`, or
-`dev session` call still carries the token. For any other call, the thread names a member, or the tech lead for
+`dev session` call still carries the token, and any other call of one plain `dev` command names its caller by its own
+shell, as the earlier paragraphs describe. For a call neither covers, the thread names a member, or the tech lead for
 the session's root thread, only while that caller's own open call is exactly that `dev` command, typed alone; a
-compound state change is refused with the fix: run it as one plain `dev` command. The root thread names the tech lead only after a member's verified call showed
-that Codex gives members thread ids of their own. Any crew member can turn the root-thread mapping off for the rest of
-the session with one call that carries the root's thread id: devkit records it as `codex.thread-shared`, and the tech
-lead then runs plain `dev` commands. Reads and waits keep working either way. A session whose hook has never stamped a
+compound state change is refused with the fix: run it as one plain `dev` command. The root thread names the tech lead
+only after a member's verified call showed that Codex gives members thread ids of their own. Any crew member can turn
+the root-thread mapping off for the rest of the session with one call that carries the root's thread id: devkit
+records it as `codex.thread-shared`, and the tech lead then runs plain `dev` commands. Reads and waits keep working either way. A session whose hook has never stamped a
 token, such as one an older devkit started, keeps the earlier rules: there, a Codex tech lead's commands are allowed
 and recorded as `caller.unverified`.
 
