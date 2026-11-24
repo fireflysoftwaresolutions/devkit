@@ -624,6 +624,15 @@ class PipedStepRecordTests(GateCase):
         self.lane(earlier, dict(earlier, ts=int(now)))
         self.assertEqual(self.step_proofs('dev progress step "built it" --check "✓ 12 tests pass" | tail -5'), [])
 
+    def test_an_earlier_recorded_piped_step_does_not_stand_in_for_a_later_call_that_recorded_nothing(self):
+        # the lane holds "built it" from a first piped call; a second one, "documented it", was refused and recorded
+        # nothing: as for every proof, the latest call decides
+        self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
+        self.tx.bash('dev progress step "built it" --check "✓ 12 tests pass" | tail -5')
+        found = self.step_proofs('dev progress step "documented it" --check "✓ docs check clean" | tail -5')
+        self.assertEqual(self.rules(found), [("proofs", "dev progress step")])
+        self.assertIn("piped into `tail -5`", found[0]["evidence"])
+
     def test_a_piped_step_whose_call_has_no_time_is_not_proven_by_a_record(self):
         # a call whose start the transcript does not give cannot tell its own record from an earlier one
         self.lane({"ts": int(time.time()), "kind": "step", "text": "built it", "check": "✓ 12 tests pass"})
