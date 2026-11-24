@@ -3171,12 +3171,15 @@ DOCTOR_WARN = "warn"  # a doctor row's verdict besides True and False: worth kno
 DOCTOR_CHECKS_FAILED = 1  # the doctor's exit when it ran and a check failed (2: it refused to run; 70: it crashed)
 
 
-def _regular_text(f: Path):
-    """A regular file's text, a byte that is not UTF-8 replaced, or None when it does not open or is no regular file:
-    a FIFO or a device a repository ships in its place would hold the reader forever. Links are followed, as Claude
-    Code follows them."""
+def _regular_text(f):
+    """A regular file's text, a byte that is not UTF-8 replaced, or None when it is no regular file or does not open:
+    a FIFO or a device a repository ships in its place would hold the reader forever, or act on the open. It is
+    stat-ed before it is opened, so a device is never opened, and checked again once open. Links are followed, as
+    Claude Code follows them: the caller resolves them first (project_hooks_check)."""
     try:
-        fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.stat(f).st_mode):
+            return None
+        fd = os.open(f, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0))
     except OSError:
         return None
     try:
@@ -3188,35 +3191,55 @@ def _regular_text(f: Path):
         return None
 
 
+def _inside(path: str, folder: str) -> bool:
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
 def project_hooks_check(cwd=None) -> tuple:
     """dev doctor's row for the current project's Claude settings (.claude/settings.json and settings.local.json in
     the working folder and in its repository's top folder): a disableAllHooks that is not false turns every hook off,
     devkit's included, from the session's start, where no ConfigChange hook sees it. The user settings have their own
-    check (policy.diff_claude). Each file is read as Claude Code reads it (policy.hooks_off)."""
+    check (policy.diff_claude). Each file is read as Claude Code reads it (policy.hooks_off), its value cut to
+    policy.SHOWN characters. A file whose real path (links resolved) lies outside the repository's top folder, or
+    outside the working folder when there is no repository, is never read (decision D92): the row warns that it is a
+    link out of the repository, and prints nothing of its target."""
     from . import policy
     cwd = Path(cwd or os.getcwd())
     folders = [cwd]
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
     if top:
         folders.append(Path(top))
-    seen, bad = {os.path.realpath(CLAUDE_HOME / "settings.json")}, []
+    inside = os.path.realpath(top or cwd)
+    seen, bad, out = {os.path.realpath(CLAUDE_HOME / "settings.json")}, [], []
     for folder in folders:
         for name in ("settings.json", "settings.local.json"):
             f = folder / ".claude" / name
-            if os.path.realpath(f) in seen:
+            real = os.path.realpath(f)
+            if real in seen:
                 continue
-            seen.add(os.path.realpath(f))
-            text = _regular_text(f)
+            seen.add(real)
+            if not os.path.lexists(f):
+                continue
+            if not _inside(real, inside):
+                out.append(f)
+                continue
+            text = _regular_text(real)
             if text is None:
                 continue
             off = policy.hooks_off(text)
             if off is not None:
                 bad.append((f, off))
-    detail = "; ".join(f"{tilde(f)} sets disableAllHooks to {v}" for f, v in bad)
-    fix = (f"set disableAllHooks to false or remove it in {', '.join(tilde(f) for f, _ in bad)}, then start a new "
-           f"session")
-    return ("Agents", "project settings keep hooks on", not bad, detail or "no project settings turn hooks off",
-            fix if bad else "")
+    detail = "; ".join([f"{tilde(f)} sets disableAllHooks to {v}" for f, v in bad] +
+                       [f"{tilde(f)} is a link out of the repository, not read" for f in out])
+    fixes = []
+    if bad:
+        fixes.append(f"set disableAllHooks to false or remove it in {', '.join(tilde(f) for f, _ in bad)}, then "
+                     f"start a new session")
+    if out:
+        fixes.append(f"put the settings file itself in place of the link: {', '.join(tilde(f) for f in out)}")
+    ok = False if bad else DOCTOR_WARN if out else True
+    return ("Agents", "project settings keep hooks on", ok, detail or "no project settings turn hooks off",
+            "; ".join(fixes))
 
 
 def doctor_job_ran(job: dict, rc) -> bool:

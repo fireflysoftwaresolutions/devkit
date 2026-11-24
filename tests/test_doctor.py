@@ -425,6 +425,47 @@ class ProjectHooksOffTests(unittest.TestCase):
         self.assertIn('sets disableAllHooks to "' + "z" * 60, detail)
         self.assertNotIn("z" * 81, detail)
 
+    def test_a_settings_link_out_of_the_repository_is_named_and_never_read(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "secret.json").write_text('{"disableAllHooks": "TOPSECRET"}')
+        (self.repo / ".claude").mkdir()
+        (self.repo / ".claude" / "settings.local.json").symlink_to(outside / "secret.json")
+        opened = []
+        real_open = os.open
+        with mock.patch.object(setup.os, "open", lambda f, *a, **k: opened.append(os.fspath(f)) or real_open(f, *a, **k)):
+            _, _, ok, detail, fix = setup.project_hooks_check(self.repo / "src")
+        self.assertEqual(ok, setup.DOCTOR_WARN)
+        self.assertIn("settings.local.json is a link out of the repository, not read", detail)
+        self.assertNotIn("TOPSECRET", detail + fix)
+        self.assertNotIn(str(outside / "secret.json"), opened)
+
+    def test_a_claude_folder_linked_out_of_a_plain_working_folder_is_not_read(self):
+        plain, outside = self.root / "plain", self.root / "outside"
+        self.settings(outside, "settings.json", '{"disableAllHooks": true}')
+        plain.mkdir()
+        (plain / ".claude").symlink_to(outside / ".claude")
+        _, _, ok, detail, _ = setup.project_hooks_check(plain)
+        self.assertEqual(ok, setup.DOCTOR_WARN)
+        self.assertIn("a link out of the repository, not read", detail)
+
+    def test_a_link_inside_the_repository_is_followed(self):
+        target = self.settings(self.repo, "shared.json", '{"disableAllHooks": true}')
+        (self.repo / ".claude" / "settings.json").symlink_to(target)
+        _, _, ok, detail, _ = setup.project_hooks_check(self.repo)
+        self.assertFalse(ok)
+        self.assertIn("settings.json sets disableAllHooks to true", detail)
+
+    def test_no_regular_file_is_ever_opened(self):
+        (self.repo / ".claude").mkdir()
+        fifo = self.repo / ".claude" / "settings.local.json"
+        os.mkfifo(fifo)
+        opened = []
+        real_open = os.open
+        with mock.patch.object(setup.os, "open", lambda f, *a, **k: opened.append(os.fspath(f)) or real_open(f, *a, **k)):
+            self.assertTrue(setup.project_hooks_check(self.repo)[2])
+        self.assertNotIn(str(fifo), opened)
+
     def test_hooks_left_on_pass(self):
         self.settings(self.repo, "settings.json", '{"disableAllHooks": false, "env": {"NODE_ENV": "test"}}')
         self.settings(self.repo, "settings.local.json", '{"note": "disableAllHooks: true is not set here"}')
