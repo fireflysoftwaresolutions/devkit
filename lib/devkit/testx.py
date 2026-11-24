@@ -5508,6 +5508,18 @@ def _stopped_at_import(message: str) -> bool:
     return bool(msg) and not _ASSERTION_FAILED.match(msg) and bool(_IMPORT_STOP.match(msg))
 
 
+def _same_error(was, case, copy) -> bool:
+    """Whether the rerun's failed `case` failed with the error of the run without the change, `was` (its status,
+    message, stop and failure): the same type, which both name (an exit code or "an error" names none), and the same
+    message once the proof copy's own path `copy` is taken out of both. Nothing else is evened out: another temp
+    folder (each run has its own), object address or path makes it another error."""
+    failure = was[3]
+    if case.get("failure") != failure or not re.fullmatch(r"[A-Za-z_$][\w$.]*", failure or ""):
+        return False
+    real = os.path.realpath(copy)
+    return was[1].replace(real, "").replace(copy, "") == case["message"].replace(real, "").replace(copy, "")
+
+
 def _cover(res, f, id_):
     """For test `id_` of file `f`, which has no result of its own in `res`: the failure that stopped it before it ran
     -> ("load", message) when its file or module could not be loaded (a loader or collection failure; a run that
@@ -5772,9 +5784,9 @@ def _prove(a, top, runners) -> int:
     needs_added = _dependents(repo, added) if added else set()
     # the test support the run without the change undoes: the rebuilt modules and the helper files restored. A test
     # that reaches it (its own module, or one it imports, as the import graph or the run's record shows) proves the
-    # change by an assertion failure; any other failure there runs once more with the support as it is now, where a
-    # failure proves the production change and a pass leaves it unproven (a name or member only the support's edit
-    # gives says nothing about what the test asserts)
+    # change by an assertion failure; any other failure there runs once more with the support as it is now, where an
+    # assertion failure or the same error again proves the production change, and another error or a pass leaves it
+    # unproven (a name or member only the support's edit gives says nothing about what the test asserts)
     support = set(inner) | {h for h in undo if h in helpers}
     reaches = {}  # test file -> the support files it imports, by the import graph
     for g in sorted(support):
@@ -5936,13 +5948,14 @@ def _prove(a, top, runners) -> int:
                     res = run_tests(dest, r, files=[f for f, _, ids in mine if not ids],
                                     ids=[i for _, _, ids in mine for i in ids or ()], env=env, own_temp=True,
                                     **({"isolated_imports": True} if isolated else {}))
-                    # only an assertion failure proves, as in the run without the change: an error there may come from
-                    # what an earlier run left outside the copy (a folder in the home folder or beside the copy)
+                    # an assertion failure proves, as in the run without the change, and so does the error of that run
+                    # again, type and message: the support's edit did not decide it. Another error may come from what
+                    # an earlier run left outside the copy (a folder in the home folder or beside the copy)
                     for key, c in place(res, mine):
                         if key in rerun:
                             again_now[key] = again_now.get(key, False) or c["status"] == "failed" and \
-                                c.get("failure") == "assertion" and not c.get("load_failed") and \
-                                not _stopped_at_import(c["message"])
+                                (c.get("failure") == "assertion" or _same_error(without[key], c, dest)) and \
+                                not c.get("load_failed") and not _stopped_at_import(c["message"])
     finally:
         _remove_tree(dest)
         shutil.rmtree(dest + "-paths", ignore_errors=True)  # the links _copy_mapped_packages made, if any
@@ -5979,8 +5992,8 @@ def _prove(a, top, runners) -> int:
                    # a failure proves the change only when the changed code it ran came from the copy
                    _NOT_FROM_COPY if st == "failed" and py and py_undo and not mine["from_copy"] else
                    # a test that reached the support the run undid proves the change by an assertion failure, or by
-                   # failing once more with that support as it is now: anything else it raises (a name or member only
-                   # the support's edit gives) says nothing about what it asserts
+                   # failing once more with that support as it is now on an assertion or the same error: anything else
+                   # it raises (a name or member only the support's edit gives) says nothing about what it asserts
                    f"{_NOT_ASSERTION}{failure}, not on an assertion" if key in rerun and not again_now.get(key) else
                    "proves the change" if st == "failed" else
                    "does not test the change" if st == "passed" else "did not run without the change")
