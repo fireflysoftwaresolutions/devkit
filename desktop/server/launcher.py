@@ -27,13 +27,33 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 REPO = "fireflysoftwaresolutions/devkit"
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+MAX_DEPTH = 64  # as devkit's core.JSON_MAX_DEPTH: no message or configuration of devkit nests deeper
+
+
+def load_json(text):
+    """json.loads bounded as devkit's core.load_json bounds it -> the value, or ValueError when it is not JSON, is past
+    what the parser can nest or hold (RecursionError, MemoryError), or nests deeper than MAX_DEPTH."""
+    try:
+        value = json.loads(text)
+    except (RecursionError, MemoryError):
+        raise ValueError("nested too deep to parse") from None
+    todo = [(value, 1)]
+    while todo:
+        v, depth = todo.pop()
+        items = v.values() if isinstance(v, dict) else v if isinstance(v, list) else None
+        if items is None:
+            continue
+        if depth > MAX_DEPTH:
+            raise ValueError("nested deeper than " + str(MAX_DEPTH) + " levels")
+        todo.extend((x, depth + 1) for x in items)
+    return value
 
 
 def _config() -> dict:
     path = os.environ.get("DEVKIT_CONFIG") or os.path.join(HOME, ".config", "devkit", "config.json")
     try:
-        with open(path) as fh:
-            data = json.load(fh)
+        with open(path, "rb") as fh:
+            data = load_json(fh.read().decode("utf-8"))
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -87,9 +107,9 @@ def locate() -> dict:
 
 def _version() -> str:
     try:
-        with open(os.path.join(HERE, "..", "manifest.json")) as fh:
-            return json.load(fh).get("version", "0.0.0")
-    except (OSError, ValueError):
+        with open(os.path.join(HERE, "..", "manifest.json"), "rb") as fh:
+            return str(load_json(fh.read().decode("utf-8")).get("version", "0.0.0"))
+    except (OSError, ValueError, AttributeError):
         return "0.0.0"
 
 
@@ -135,8 +155,8 @@ def rescue(found: dict) -> int:
         if not line:
             continue
         try:
-            msg = json.loads(line.decode("utf-8"))
-        except ValueError:
+            msg = load_json(line.decode("utf-8"))
+        except ValueError:  # not JSON, not UTF-8 (UnicodeDecodeError), or nested too deep: one bad line, served on
             reply(None, error={"code": -32700, "message": "Parse error"})
             continue
         if not isinstance(msg, dict) or "method" not in msg:

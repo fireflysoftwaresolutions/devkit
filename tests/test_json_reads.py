@@ -443,6 +443,53 @@ class McpServerPython39Tests(McpServerTests):
     python = "/usr/bin/python3"
 
 
+class DesktopLauncherTests(unittest.TestCase):
+    """The Claude Desktop extension's launcher, where no devkit is found: the small server it serves then (rescue)
+    answers a client message nested too deep with a JSON-RPC parse error, as `dev mcp` does, and serves on; a deep
+    devkit configuration reads as no configuration."""
+
+    python = sys.executable
+
+    def test_the_fallback_server_answers_a_deep_message_with_a_parse_error(self):
+        with test_mcp.TempHome() as h:
+            s = test_mcp.Session([self.python, "-I", "-S", str(test_mcp.LAUNCHER)], h.env(), h.home)
+            try:
+                s.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}})
+                for d in DEPTHS:
+                    with self.subTest(depth=d):
+                        s.send('{"jsonrpc": "2.0", "id": 70, "method": "tools/call", "params": {"name": "devkit_status",'
+                               ' "arguments": {"x": ' + deep(d) + "}}}")
+                        reply = s.recv()
+                        self.assertEqual((reply["id"], reply["error"]["code"]), (None, mcp.PARSE_ERROR))
+                        self.assertEqual(s.request("ping")["result"], {})
+                self.assertIn("No devkit checkout was found",
+                              s.call("devkit_status")["result"]["content"][0]["text"])
+            finally:
+                self.assertEqual(s.close(), 0)
+
+    def test_a_deep_devkit_configuration_reads_as_none(self):
+        with test_mcp.TempHome() as h:
+            config = h.home / "config.json"
+            for d in DEPTHS:
+                with self.subTest(depth=d):
+                    config.write_text('{"devkit_home": "' + str(ROOT) + '", "x": ' + deep(d) + "}")
+                    p = subprocess.run([self.python, "-I", "-S", str(test_mcp.LAUNCHER), "--check"],
+                                       env=dict(h.env(), DEVKIT_CONFIG=str(config)), capture_output=True, text=True,
+                                       timeout=60, stdin=subprocess.DEVNULL)
+                    self.assertEqual((p.returncode, p.stderr), (1, ""))
+                    self.assertNotIn("config devkit_home", [c["source"] for c in json.loads(p.stdout)["tried"]])
+            config.write_text('{"devkit_home": "' + str(ROOT) + '"}')
+            p = subprocess.run([self.python, "-I", "-S", str(test_mcp.LAUNCHER), "--check"],
+                               env=dict(h.env(), DEVKIT_CONFIG=str(config)), capture_output=True, text=True,
+                               timeout=60, stdin=subprocess.DEVNULL)
+            self.assertEqual((p.returncode, json.loads(p.stdout)["source"]), (0, "config devkit_home"))
+
+
+@unittest.skipUnless(Path("/usr/bin/python3").exists(), "no system Python 3.9 on this machine")
+class DesktopLauncherPython39Tests(DesktopLauncherTests):
+    python = "/usr/bin/python3"
+
+
 class HookReaderTests(TempFolder):
     """What the hooks read besides their input: a Codex rollout's command records, its first record and devkit's
     session records; and the hook input as the capture and the identity read it."""
