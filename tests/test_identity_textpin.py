@@ -2283,9 +2283,49 @@ class LedgerFolderTests(TextPinCase):
         def scandir(p=None):
             got = real(p)
             return Counted(got) if p == pg.CALLS else got
-        with mock.patch.object(identity, "_ROOT_MAX", 5), mock.patch.object(os, "scandir", scandir):
+        with mock.patch.object(identity, "_ROOT_MAX", 5), mock.patch.object(os, "scandir", scandir), \
+                mock.patch.object(identity, "_root_offset", lambda: 4, create=True):
             identity.sweep_gone()
-        self.assertEqual(len(listed), 5)
+        self.assertEqual(len(listed), 9)  # the names before its window's random start, then the window
+
+    # a session folder listed after 30 names flooded into the ledger's root is still swept, though the root's window
+    # holds 20 names: each sweep's window starts at a random name, and one that runs past the listing's end wraps
+    # round to its start
+    def test_a_session_folder_past_the_roots_cap_is_still_swept(self):
+        folder = pg.CALLS / "s-real"
+        folder.mkdir(parents=True)
+        flag = identity.contest_path("s-real", "toolu_q")
+        flag.write_text("")
+        old = time.time() - 10 * identity.FLAG_GRACE_S
+        os.utime(flag, (old, old))
+        for i in range(30):
+            (pg.CALLS / f".junk{i:03d}").write_text("")
+        real = os.scandir
+
+        class Last:  # the root's listing, with the session folder last
+            def __init__(self, it):
+                self.it = it
+
+            def __enter__(self):
+                self.it.__enter__()
+                return self
+
+            def __exit__(self, *a):
+                return self.it.__exit__(*a)
+
+            def __iter__(self):
+                return iter(sorted(self.it, key=lambda d: d.name == "s-real"))
+
+        def scandir(p=None):
+            got = real(p)
+            return Last(got) if p == pg.CALLS else got
+        offsets, left = iter([0, 5, 12]), []
+        with mock.patch.object(identity, "_ROOT_MAX", 20), mock.patch.object(os, "scandir", scandir), \
+                mock.patch.object(identity, "_root_offset", lambda: next(offsets), create=True):
+            for _ in range(3):
+                identity.sweep_gone()
+                left.append(os.path.lexists(flag))
+        self.assertEqual(left, [True, True, False])
 
 
 if __name__ == "__main__":

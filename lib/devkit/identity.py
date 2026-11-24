@@ -805,23 +805,28 @@ def sweep_gone(now: float | None = None) -> int:
     (_end_call, "session-gone"), so a state change that ran under it is audited (calls.text-use-without-result); a
     call past its time ends there as expired (progress.open_calls). A call whose agent pid another process took since
     waits for its time. Then the contest flags the ended calls left behind go (_sweep_flags). The work is bounded by
-    the names listed, not the entries read: at most _ROOT_MAX in the ledger's root, and at most _LIST_MAX across the
-    session folders, each name listed taking one, dot-files and names that are no ledger entry too; the rest waits
-    for the next sweep. Run at every session start and by `dev sync`. -> the calls it ended"""
+    the names listed, not the entries read: in the ledger's root, a window of _ROOT_MAX names that starts at a random
+    one among the first _ROOT_MAX (_root_offset), so at most 2 * _ROOT_MAX - 1 names are listed there and no session
+    folder among them is always past the cap; and at most _LIST_MAX across the session folders, each name listed
+    taking one, dot-files and names that are no ledger entry too; the rest waits for the next sweep. Run at every
+    session start and by `dev sync`. -> the calls it ended"""
     from . import progress
     reads = [_LIST_MAX]  # the names a sweep lists in the session folders (every name, dot-files too), shared by all
-    sids, listed = [], 0
+    skip = _root_offset()
+    head, sids, listed = [], [], 0
     try:  # a session folder that is a link is never one: nothing it points to is read or removed
         with os.scandir(progress.CALLS) as found:  # the root's names take none of `reads`: they have their own cap
             for d in found:
-                listed += 1
                 if d.is_dir(follow_symlinks=False) and not d.name.startswith("."):
-                    sids.append(d.name)
-                if listed >= _ROOT_MAX:
+                    (head if listed < skip else sids).append((listed, d.name))
+                listed += 1
+                if listed >= skip + _ROOT_MAX:
                     break
     except OSError:
         return 0
-    sids.sort()
+    # a listing that ends before its window is full wraps round: the window takes the names it skipped at its start
+    wrap = skip + _ROOT_MAX - listed
+    sids = sorted([name for _, name in sids] + [name for i, name in head if i < wrap])
     if sids:  # each sweep starts at another folder, so one flooded folder never starves the ones after it
         at = _sweep_start(len(sids)) % len(sids)
         sids = sids[at:] + sids[:at]
@@ -839,6 +844,13 @@ def sweep_gone(now: float | None = None) -> int:
     return n
 
 
+def _root_offset() -> int:
+    """Where a sweep's window of the ledger root's names starts (sweep_gone): a random name among the first
+    _ROOT_MAX listed."""
+    import random
+    return random.randrange(_ROOT_MAX)  # nosemgrep: python.lang.security.audit.insecure-random  (an order, no secret)
+
+
 def _sweep_start(n: int) -> int:
     """Where a sweep of `n` session folders starts (sweep_gone): a random one."""
     import random
@@ -849,7 +861,7 @@ FLAG_GRACE_S = 60  # seconds a sweep leaves a contest flag after it was made and
 _TREE_DEPTH = 16  # levels of a folder planted at a flag's name the sweep removes; a deeper one stays
 _SWEEP_MAX = 1000  # flags a sweep looks at and entries of planted folders it removes, at most: the rest waits
 _LIST_MAX = 10 * _SWEEP_MAX  # names a sweep lists in the session folders (dot-files too), at most: the rest waits
-_ROOT_MAX = 10 * _SWEEP_MAX  # names a sweep lists in the ledger's root, at most: its own cap, apart from _LIST_MAX
+_ROOT_MAX = 10 * _SWEEP_MAX  # names in a sweep's window of the ledger's root: its own cap, apart from _LIST_MAX
 CLAIM_SLACK_S = 1  # seconds a call's audit claim may read as made before the call opened (file and clock times)
 
 
