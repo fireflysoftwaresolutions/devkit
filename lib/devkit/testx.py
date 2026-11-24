@@ -4918,20 +4918,6 @@ def _built_installs(top, dest, linked, listed) -> tuple:
     return out, stuck
 
 
-def _put_now(top, dest, files) -> None:
-    """Put `files` in the copy at `dest` as they are now in the checkout at `top` (a file the change deletes goes),
-    and clear the copy's bytecode caches."""
-    for f in files:
-        dst = os.path.join(dest, f)
-        if os.path.islink(dst) or os.path.lexists(dst) and not os.path.exists(os.path.join(top, f)):
-            os.remove(dst)
-        if os.path.exists(os.path.join(top, f)):
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(dst, "wb") as fh:
-                fh.write(Path(top, f).read_bytes())
-    _clear_caches(dest)
-
-
 def _clear_caches(dest) -> None:
     for d, subs, _ in os.walk(dest):
         subs[:] = [s for s in subs if s not in DEP_DIRS and s != ".git"]
@@ -5845,7 +5831,14 @@ def _prove(a, top, runners) -> int:
                      not _stopped_at_import(msg) and (key[0] in support or reaches.get(key[0]) or
                                                       _lang(key[0]) == "py" and seen - {key[0]})}
             if rerun:
-                _put_now(top, dest, sorted(support))
+                # a fresh copy, as the first runs had: what a run left in this one (a folder its test stopped before
+                # removing) would fail the rerun for a reason that is no part of the change. It sits where this one
+                # was, so the PYTHONPATH folders and the package links beside it lead into it as they did
+                shutil.rmtree(dest, ignore_errors=True)
+                os.makedirs(dest)
+                _copy_worktree(top, dest, listed)
+                _carry_git(top, dest)
+                _restore_base(top, base, dest, [f for f in undo if f not in support])
                 for r, sel, members in groups.values():
                     mine = [m for m in members if any(k[0] == m[0] for k in rerun)]
                     if not mine:

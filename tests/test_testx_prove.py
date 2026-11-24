@@ -720,6 +720,20 @@ class SupportRerunTests(unittest.TestCase):
                          {t["id"]: t["verdict"] for t in json.loads(out)["tests"]}, out + err)
 
 
+class CleanRerunTests(unittest.TestCase):
+    # the run once more with the support as it is now starts from a fresh copy: a folder that the run without the
+    # change left (its test stopped before it removed it) must not make that run fail, which would prove a change the
+    # test never reaches
+    def test_the_rerun_does_not_see_what_the_run_without_the_change_left(self):
+        before = "import shutil\n" + fake_module(OLD_MAKE + "\n\n")
+        after = before.replace(OLD_MAKE, NEW_MAKE) + (
+            "\n    def test_x(self):\n        out = Path(__file__).resolve().parent / 'out'\n        out.mkdir()\n"
+            "        self.assertEqual(make().extra(), 1)\n        shutil.rmtree(out)\n")
+        rc, rows, text = prove_rows(before, after)
+        self.assertEqual([("test_calc.CalcTests.test_x", "cannot be proven: without the change it fails on "
+                                                         "AttributeError, not on an assertion")], rows, text)
+
+
 class UnittestModuleFunctionTests(unittest.TestCase):
     # unittest runs only the test methods of a TestCase: a module-level function named test… is a helper there, whose
     # fix comes back as its base text, never a test prove names (unittest would refuse to run it)
