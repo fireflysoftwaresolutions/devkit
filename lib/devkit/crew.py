@@ -979,14 +979,17 @@ def _step_name(step) -> str:
 def _folder_step(step_name: str) -> str:
     """The step whose lane folder a brief names: `step_name`, or '' when another step of the current session's run
     gives its lanes the same scratch folder (progress.folder_twin, a run saved before such names were refused), so
-    the brief names the member's plain folder, the one its lane writes in (progress.lane_scratch)."""
+    the brief names the member's plain folder, the one its lane writes in (progress.lane_scratch). `step_name` too
+    when the run cannot be read (a record that does not parse, is busy or cannot be opened) or the session cannot be
+    named; any other error is a defect, and it surfaces."""
+    from . import messaging, progress, state
     try:
-        from . import progress
-        plan = progress.normalize(progress.load_run(*progress.current_session()) or {}).get("plan") or []
-        s = next((x for x in plan if isinstance(x, dict) and x.get("name") == step_name), None)
-        return "" if s and progress.folder_twin(plan, step_name, skip=s) else step_name
-    except Exception:
+        run = progress.load_run(*progress.current_session())
+    except (OSError, state.StateBusy, messaging.MessageError, progress.CodexSessionError):
         return step_name
+    plan = progress.normalize(run or {}).get("plan") or []
+    s = next((x for x in plan if isinstance(x, dict) and x.get("name") == step_name), None)
+    return "" if s and progress.folder_twin(plan, step_name, skip=s) else step_name
 
 
 def show_text(m: dict, roster=None) -> str:
